@@ -82,11 +82,10 @@ function showCoupangAffiliatePopup() {
   backdrop.setAttribute("aria-label", "쿠팡 제휴 안내");
   backdrop.innerHTML = `
     <div class="affiliate-popup" role="dialog" aria-modal="true" aria-labelledby="affiliate-popup-title">
-      <button class="affiliate-popup-close" type="button" aria-label="팝업 닫기">×</button>
       <span class="affiliate-popup-help" aria-hidden="true">?</span>
       <h2 id="affiliate-popup-title">쿠팡 방문하기</h2>
       <p class="affiliate-popup-copy">
-        제휴 페이지를 확인한 뒤 운세 결과를 계속 볼 수 있습니다.
+        쿠팡 페이지를 방문한 뒤 이 화면으로 돌아오면 분석 결과를 확인할 수 있습니다.
       </p>
       <div class="affiliate-popup-product" aria-hidden="true">
         ${popupProduct}
@@ -99,21 +98,12 @@ function showCoupangAffiliatePopup() {
         <a class="affiliate-popup-primary" href="${escapeHtml(COUPANG_PARTNERS_URL)}" target="_blank" rel="noopener noreferrer">
           쿠팡 방문하고 결과 보기
         </a>
-        <button class="affiliate-popup-secondary" type="button">결과 계속 보기</button>
       </div>
     </div>
   `;
-  backdrop.addEventListener("click", (event) => {
-    if (
-      event.target === backdrop ||
-      event.target.closest(".affiliate-popup-close") ||
-      event.target.closest(".affiliate-popup-secondary")
-    ) {
-      closeCoupangAffiliatePopup();
-    }
-  });
   backdrop.querySelector(".affiliate-popup-primary")?.addEventListener("click", () => {
     closeCoupangAffiliatePopup();
+    setActiveView("premium");
   });
   document.body.appendChild(backdrop);
   backdrop.querySelector(".affiliate-popup-primary")?.focus();
@@ -9533,12 +9523,6 @@ window.addEventListener("popstate", () => {
     submitReport();
   }
   setActiveView(nextView, { updateHistory: false, instant: true });
-});
-
-window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    closeCoupangAffiliatePopup();
-  }
 });
 
 const initialView = viewFromHash();

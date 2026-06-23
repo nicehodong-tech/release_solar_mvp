@@ -48,7 +48,6 @@
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.28);
 }
 
-.affiliate-popup-close,
 .affiliate-popup-help {
   position: absolute;
   top: 22px;
@@ -62,11 +61,6 @@
   color: #17191f;
   font-size: 30px;
   line-height: 1;
-  cursor: pointer;
-}
-
-.affiliate-popup-close {
-  right: 22px;
 }
 
 .affiliate-popup-help {
@@ -151,8 +145,7 @@
   gap: 10px;
 }
 
-.affiliate-popup-primary,
-.affiliate-popup-secondary {
+.affiliate-popup-primary {
   display: grid;
   place-items: center;
   min-height: 64px;
@@ -166,13 +159,6 @@
   border: 0;
   background: #1f2026;
   color: #fff75b;
-}
-
-.affiliate-popup-secondary {
-  border: 1px solid rgba(24, 28, 34, 0.14);
-  background: #fff;
-  color: #5f6670;
-  cursor: pointer;
 }
 
 @media (max-width: 420px) {
@@ -193,8 +179,7 @@
     font-size: 18px;
   }
 
-  .affiliate-popup-primary,
-  .affiliate-popup-secondary {
+  .affiliate-popup-primary {
     min-height: 60px;
     font-size: 18px;
   }
