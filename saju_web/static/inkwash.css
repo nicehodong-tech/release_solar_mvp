@@ -5160,3 +5160,60 @@ body[data-view="premium"] .premium-life-stage-summary span {
     max-width: 430px;
   }
 }
+
+/* Metric card width relief pass v169
+   막대 지표 카드는 글자와 그래프가 함께 들어가므로 일반 카드보다 가로 여유를 조금 더 준다. */
+@media (max-width: 680px) {
+  body[data-view="premium"] .premium-profile-snapshot,
+  body[data-view="premium"] .premium-core-dossier-metrics,
+  body[data-view="premium"] .premium-domain-dossier-metrics,
+  body[data-view="premium"] .premium-domain-visual-profile,
+  body[data-view="premium"] .premium-domain-visual-profile > div,
+  body[data-view="premium"] .premium-profile-matrix,
+  body[data-view="premium"] .premium-profile-matrix-grid,
+  body[data-view="premium"] .premium-life-dossier-metrics,
+  body[data-view="premium"] .premium-life-scale-list,
+  body[data-view="premium"] .premium-life-stage-board,
+  body[data-view="premium"] .premium-life-stage-bars,
+  body[data-view="premium"] .premium-visual-metric-board,
+  body[data-view="premium"] .premium-visual-metric-columns {
+    width: calc(100% + 12px);
+    max-width: calc(100% + 12px);
+    margin-right: -6px;
+    margin-left: -6px;
+  }
+
+  body[data-view="premium"] .premium-profile-snapshot-card,
+  body[data-view="premium"] .premium-core-dossier-metrics span,
+  body[data-view="premium"] .premium-domain-dossier-metrics article,
+  body[data-view="premium"] .premium-domain-visual-profile article,
+  body[data-view="premium"] .premium-profile-matrix article,
+  body[data-view="premium"] .premium-life-dossier-metrics section,
+  body[data-view="premium"] .premium-life-scale-list article,
+  body[data-view="premium"] .premium-life-stage-bar-item,
+  body[data-view="premium"] .premium-visual-metric-card {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+}
+
+@media (max-width: 380px) {
+  body[data-view="premium"] .premium-profile-snapshot,
+  body[data-view="premium"] .premium-core-dossier-metrics,
+  body[data-view="premium"] .premium-domain-dossier-metrics,
+  body[data-view="premium"] .premium-domain-visual-profile,
+  body[data-view="premium"] .premium-domain-visual-profile > div,
+  body[data-view="premium"] .premium-profile-matrix,
+  body[data-view="premium"] .premium-profile-matrix-grid,
+  body[data-view="premium"] .premium-life-dossier-metrics,
+  body[data-view="premium"] .premium-life-scale-list,
+  body[data-view="premium"] .premium-life-stage-board,
+  body[data-view="premium"] .premium-life-stage-bars,
+  body[data-view="premium"] .premium-visual-metric-board,
+  body[data-view="premium"] .premium-visual-metric-columns {
+    width: calc(100% + 8px);
+    max-width: calc(100% + 8px);
+    margin-right: -4px;
+    margin-left: -4px;
+  }
+}
