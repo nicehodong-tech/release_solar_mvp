@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI 사주 : 이현</title>
+    <link rel="stylesheet" href="/styles.css?v=life-timing-bars-v2" />
+    <link rel="stylesheet" href="/inkwash.css?v=premium-footer-actions-v2" />
+  </head>
+  <body data-view="home">
+    <header class="topbar">
+      <div>
+        <h1>AI 사주 : 이현</h1>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <aside class="input-panel" aria-label="출생 정보 입력">
+        <details class="input-disclosure" open>
+          <summary>
+            <strong id="input-summary-text">출생 정보</strong>
+          </summary>
+          <form id="birth-form" class="input-form">
+            <div class="form-head">
+              <h2>생년월일 입력</h2>
+            </div>
+
+            <label class="field" for="birth-date">
+              <span>생년월일</span>
+              <input id="birth-date" name="birthDate" type="text" inputmode="numeric" autocomplete="bday" placeholder="예: 19990101" aria-label="생년월일" required />
+            </label>
+
+            <label class="field" for="birth-time">
+              <span>태어난 시간</span>
+              <select id="birth-time" name="birthTime" aria-label="태어난 시간" required>
+                <option value="" disabled selected>시간 선택</option>
+                <option value="ja">자시 (23:30~01:30)</option>
+                <option value="chuk">축시 (01:30~03:30)</option>
+                <option value="in">인시 (03:30~05:30)</option>
+                <option value="myo">묘시 (05:30~07:30)</option>
+                <option value="jin">진시 (07:30~09:30)</option>
+                <option value="sa">사시 (09:30~11:30)</option>
+                <option value="o">오시 (11:30~13:30)</option>
+                <option value="mi">미시 (13:30~15:30)</option>
+                <option value="sin">신시 (15:30~17:30)</option>
+                <option value="yu">유시 (17:30~19:30)</option>
+                <option value="sul">술시 (19:30~21:30)</option>
+                <option value="hae">해시 (21:30~23:30)</option>
+              </select>
+            </label>
+
+            <label class="field" for="birth-gender">
+              <span>성별</span>
+              <select id="birth-gender" name="gender" aria-label="성별">
+                <option value="male" selected>남자</option>
+                <option value="female">여자</option>
+              </select>
+            </label>
+
+            <input name="tier" type="hidden" value="premium" />
+            <input name="calendarType" type="hidden" value="solar" />
+            <input name="relationshipStatus" type="hidden" value="unknown" />
+            <input name="targetYear" type="hidden" value="2026" />
+
+            <div class="submit-button-grid" aria-label="분석 결과 보기">
+              <button class="primary-button submit-button is-premium" type="submit" data-submit-tier="premium">
+                프리미엄 분석 결과 보기
+              </button>
+            </div>
+            <a class="service-blog-button input-blog-button" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
+              사주명리 공간 : 이현 블로그
+            </a>
+          </form>
+        </details>
+        <section id="side-summary" class="side-summary" aria-label="사주 기준 요약"></section>
+      </aside>
+
+      <section class="result-panel" aria-label="사주 분석 결과">
+        <div id="status" class="status" aria-live="polite"></div>
+
+        <section id="home-view" class="app-view is-active" aria-label="사주 종합운 홈">
+          <section id="fortune-spotlight" class="fortune-spotlight" aria-label="추천 운세"></section>
+          <section id="home-funnel" class="home-funnel" aria-label="무료 운세와 프리미엄 안내"></section>
+        </section>
+
+        <section id="judgment-view" class="app-view" aria-label="종합운 화면">
+          <div class="screen-head">
+            <button class="screen-back" type="button" data-view-target="home">홈으로</button>
+            <div>
+              <p class="eyebrow">무료 운세</p>
+              <h2>무료 운세 결과</h2>
+            </div>
+          </div>
+          <div id="summary" class="screen-body"></div>
+        </section>
+
+        <section id="premium-view" class="app-view" aria-label="프리미엄 운세 화면">
+          <div class="screen-head">
+            <button class="screen-back" type="button" data-view-target="home">홈으로</button>
+            <div>
+              <p class="eyebrow">프리미엄 운세</p>
+              <h2>프리미엄 운세 결과</h2>
+            </div>
+          </div>
+          <div id="premium" class="screen-body"></div>
+        </section>
+
+        <section id="basis-view" class="app-view" aria-label="명식 근거 화면">
+          <div class="screen-head">
+            <button class="screen-back" type="button" data-view-target="home">홈으로</button>
+            <div>
+              <p class="eyebrow">사주 원국</p>
+              <h2>팔자와 대운·세운입니다.</h2>
+              <p>명식, 대운, 세운을 분석의 보조 근거로 표시합니다.</p>
+            </div>
+          </div>
+          <section id="manse-board" class="manse-board" aria-label="만세력 보드"></section>
+          <div id="factors" class="screen-body"></div>
+        </section>
+      </section>
+    </main>
+
+    <nav class="mobile-action-bar" aria-label="빠른 이동">
+      <button type="button" data-input-target="birth">정보 수정</button>
+      <button type="button" data-view-target="premium">결과</button>
+      <button type="button" data-view-target="basis">명식</button>
+    </nav>
+
+    <script src="/app.js?v=premium-footer-actions-v2" type="module"></script>
+  </body>
+</html>

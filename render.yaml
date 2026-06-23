@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: saju-solar-mvp
+    env: python
+    plan: free
+    buildCommand: python -m compileall saju_web saju_analysis_engine saju_birth_engine
+    startCommand: python -m saju_web.app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.5
