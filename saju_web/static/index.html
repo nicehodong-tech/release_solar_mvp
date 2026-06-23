@@ -12,13 +12,19 @@
         const pageVisited =
           sessionStorage.getItem("leehyeon:coupangPageVisited") ||
           localStorage.getItem("leehyeon:coupangPageVisited");
-        if (returnView === "premium" || pageVisited === "1") {
+        const leftAt = Number(
+          sessionStorage.getItem("leehyeon:coupangLeftAt") ||
+            localStorage.getItem("leehyeon:coupangLeftAt") ||
+            0
+        );
+        const isFreshReturn = Number.isFinite(leftAt) && leftAt > 0 && Date.now() - leftAt <= 2 * 60 * 60 * 1000;
+        if (returnView === "premium" && pageVisited === "1" && isFreshReturn) {
           document.documentElement.classList.add("is-restoring-premium");
         }
       } catch (_error) {}
     </script>
-    <link rel="stylesheet" href="/styles.css?v=metric-width-v169" />
-    <link rel="stylesheet" href="/inkwash.css?v=metric-width-v169" />
+    <link rel="stylesheet" href="/styles.css?v=entry-restore-v170" />
+    <link rel="stylesheet" href="/inkwash.css?v=entry-restore-v170" />
   </head>
   <body data-view="home">
     <header class="topbar">
@@ -146,6 +152,6 @@
       <a href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">사주명리 공간 : 이현 블로그</a>
     </footer>
 
-    <script src="/app.js?v=metric-width-v169" type="module"></script>
+    <script src="/app.js?v=entry-restore-v170" type="module"></script>
   </body>
 </html>

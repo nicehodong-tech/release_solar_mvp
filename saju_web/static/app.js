@@ -33,7 +33,9 @@ const COUPANG_POPUP_IMAGE_URL = window.LEEHYEON_COUPANG_POPUP_IMAGE_URL || "";
 const REPORT_SESSION_KEY = "leehyeon:lastPremiumReport";
 const AFFILIATE_RETURN_VIEW_KEY = "leehyeon:coupangReturnView";
 const AFFILIATE_LEFT_PAGE_KEY = "leehyeon:coupangPageVisited";
+const AFFILIATE_LEFT_AT_KEY = "leehyeon:coupangLeftAt";
 const INPUT_EDITOR_REQUEST_KEY = "leehyeon:inputEditorRequested";
+const AFFILIATE_RETURN_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
 let currentPayload = null;
 let activeView = "home";
@@ -70,6 +72,28 @@ function removeStoredValue(key) {
   try {
     localStorage.removeItem(key);
   } catch (_error) {}
+}
+
+function markAffiliateDeparture() {
+  setStoredValue(AFFILIATE_LEFT_PAGE_KEY, "1");
+  setStoredValue(AFFILIATE_RETURN_VIEW_KEY, "premium");
+  setStoredValue(AFFILIATE_LEFT_AT_KEY, String(Date.now()));
+}
+
+function clearAffiliateReturnState() {
+  removeStoredValue(AFFILIATE_LEFT_PAGE_KEY);
+  removeStoredValue(AFFILIATE_RETURN_VIEW_KEY);
+  removeStoredValue(AFFILIATE_LEFT_AT_KEY);
+}
+
+function hasFreshAffiliateReturn() {
+  const shouldReturnToPremium = storedValue(AFFILIATE_RETURN_VIEW_KEY) === "premium";
+  const pageWasVisited = storedValue(AFFILIATE_LEFT_PAGE_KEY) === "1";
+  const leftAt = Number(storedValue(AFFILIATE_LEFT_AT_KEY) || 0);
+  if (!shouldReturnToPremium || !pageWasVisited || !Number.isFinite(leftAt) || leftAt <= 0) {
+    return false;
+  }
+  return Date.now() - leftAt <= AFFILIATE_RETURN_MAX_AGE_MS;
 }
 
 const groupLabels = {
@@ -112,7 +136,6 @@ function closeCoupangAffiliatePopup() {
 function showCoupangAffiliatePopup() {
   closeCoupangAffiliatePopup();
   affiliatePopupVisible = true;
-  setStoredValue(AFFILIATE_RETURN_VIEW_KEY, "premium");
   removeStoredValue(INPUT_EDITOR_REQUEST_KEY);
   const popupProduct = COUPANG_POPUP_IFRAME_HTML
     ? COUPANG_POPUP_IFRAME_HTML
@@ -144,8 +167,7 @@ function showCoupangAffiliatePopup() {
     </div>
   `;
   backdrop.querySelector(".affiliate-popup-primary")?.addEventListener("click", () => {
-    setStoredValue(AFFILIATE_LEFT_PAGE_KEY, "1");
-    setStoredValue(AFFILIATE_RETURN_VIEW_KEY, "premium");
+    markAffiliateDeparture();
     removeStoredValue(INPUT_EDITOR_REQUEST_KEY);
     closeCoupangAffiliatePopup();
     setActiveView("premium");
@@ -155,10 +177,9 @@ function showCoupangAffiliatePopup() {
 }
 
 function revealReportAfterCoupangReturn() {
-  const shouldReturnToPremium = storedValue(AFFILIATE_RETURN_VIEW_KEY) === "premium";
-  const pageWasVisited = storedValue(AFFILIATE_LEFT_PAGE_KEY) === "1";
-  if (!shouldReturnToPremium && !pageWasVisited) {
+  if (!hasFreshAffiliateReturn()) {
     document.documentElement.classList.remove("is-restoring-premium");
+    clearAffiliateReturnState();
     return;
   }
   if (!currentPayload) {
@@ -166,12 +187,12 @@ function revealReportAfterCoupangReturn() {
   }
   if (!currentPayload) {
     document.documentElement.classList.remove("is-restoring-premium");
+    clearAffiliateReturnState();
     return;
   }
   closeCoupangAffiliatePopup();
   setActiveView("premium");
-  removeStoredValue(AFFILIATE_LEFT_PAGE_KEY);
-  removeStoredValue(AFFILIATE_RETURN_VIEW_KEY);
+  clearAffiliateReturnState();
   removeStoredValue(INPUT_EDITOR_REQUEST_KEY);
   document.documentElement.classList.remove("is-restoring-premium");
 }
@@ -9718,15 +9739,13 @@ window.addEventListener("popstate", () => {
 
 window.addEventListener("blur", () => {
   if (affiliatePopupVisible) {
-    setStoredValue(AFFILIATE_LEFT_PAGE_KEY, "1");
-    setStoredValue(AFFILIATE_RETURN_VIEW_KEY, "premium");
+    markAffiliateDeparture();
   }
 });
 
 window.addEventListener("pagehide", () => {
-  if (affiliatePopupVisible || storedValue(AFFILIATE_RETURN_VIEW_KEY) === "premium") {
-    setStoredValue(AFFILIATE_LEFT_PAGE_KEY, "1");
-    setStoredValue(AFFILIATE_RETURN_VIEW_KEY, "premium");
+  if (affiliatePopupVisible) {
+    markAffiliateDeparture();
   }
 });
 
@@ -9748,8 +9767,11 @@ applyTierSelection(initialTier);
 renderFortuneSpotlight();
 renderHomeFunnel();
 clearStatus();
-const restoredReport = restoreReportSession();
-const shouldReturnToPremium = storedValue(AFFILIATE_RETURN_VIEW_KEY) === "premium" || storedValue(AFFILIATE_LEFT_PAGE_KEY) === "1";
+const shouldReturnToPremium = hasFreshAffiliateReturn();
+const restoredReport = shouldReturnToPremium ? restoreReportSession() : false;
+if (!shouldReturnToPremium) {
+  clearAffiliateReturnState();
+}
 const inputEditorRequested = storedValue(INPUT_EDITOR_REQUEST_KEY) === "1";
 if (restoredReport) {
   const shouldShowInputEditor = initialView === "home" && inputEditorRequested && !shouldReturnToPremium;
@@ -9758,8 +9780,7 @@ if (restoredReport) {
     openInputEditor({ tier: initialTier });
   } else {
     setActiveView(initialView === "basis" ? "basis" : "premium", { updateHistory: false, instant: true });
-    removeStoredValue(AFFILIATE_LEFT_PAGE_KEY);
-    removeStoredValue(AFFILIATE_RETURN_VIEW_KEY);
+    clearAffiliateReturnState();
     removeStoredValue(INPUT_EDITOR_REQUEST_KEY);
   }
 } else {
