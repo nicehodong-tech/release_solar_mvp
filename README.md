@@ -33,7 +33,7 @@ python scripts/smoke_check.py http://127.0.0.1:8775
 
 ## 서버 배포
 
-Render, Railway, Fly.io처럼 Python 웹 프로세스를 실행할 수 있는 호스팅을 기준으로 합니다.
+Render처럼 Python 웹 프로세스를 실행할 수 있는 호스팅을 기준으로 합니다.
 
 권장 실행 명령은 다음과 같습니다.
 
@@ -44,6 +44,8 @@ python -m saju_web.app
 호스팅 서비스가 `PORT` 환경변수를 제공하면 별도 포트 지정은 필요하지 않습니다.
 
 GitHub Pages는 정적 사이트 전용이므로 이 MVP에는 적합하지 않습니다. 현재 서비스는 `/api/judgment`를 통해 서버에서 사주 분석을 생성합니다.
+
+자세한 배포 절차는 `DEPLOYMENT_NOTES.md`를 확인합니다.
 
 ## 출시 범위
 
