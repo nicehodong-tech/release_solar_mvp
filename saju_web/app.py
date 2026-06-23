@@ -19,7 +19,7 @@ from .report_service import build_report_payload
 
 WEB_ROOT = Path(__file__).resolve().parent / "static"
 API_CACHE_MAX_ENTRIES = 96
-API_CACHE_VERSION = "judgment-v2"
+API_CACHE_VERSION = "judgment-v3"
 _API_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 _API_CACHE_LOCK = Lock()
 API_JOB_MAX_ENTRIES = 64
@@ -40,7 +40,7 @@ MIME_TYPES = {
 
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
-    return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def _payload_cache_key(payload: dict[str, Any]) -> str:
@@ -108,7 +108,7 @@ def _run_judgment_job(job_id: str, cache_key: str, payload: dict[str, Any]) -> N
     _job_update(
         job_id,
         status="running",
-        message="명식을 확정하고 운의 강약을 정리하고 있습니다.",
+        message="명식을 계산하고 운의 강약을 정리하고 있습니다.",
         startedAt=time.time(),
     )
     try:

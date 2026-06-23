@@ -36,11 +36,25 @@ const AFFILIATE_LEFT_PAGE_KEY = "leehyeon:coupangPageVisited";
 const AFFILIATE_LEFT_AT_KEY = "leehyeon:coupangLeftAt";
 const INPUT_EDITOR_REQUEST_KEY = "leehyeon:inputEditorRequested";
 const AFFILIATE_RETURN_MAX_AGE_MS = 10 * 60 * 1000;
+const REPORT_CLIENT_CACHE_PREFIX = "leehyeon:reportCache:";
+const REPORT_CLIENT_CACHE_VERSION = "report-client-v172";
+const REPORT_CLIENT_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const LOADING_MESSAGES = [
+  "분석을 시작했습니다. 생년월일과 태어난 시간을 기준으로 명식을 계산하고 있습니다.",
+  "월령과 오행의 강약을 정리하고 있습니다. 잠시만 기다려주세요.",
+  "재물·직업·애정·성향 지표를 구성하고 있습니다.",
+  "대운과 세운의 작용을 대조하고 있습니다.",
+  "프리미엄 화면에 표시할 결과를 정리하고 있습니다.",
+  "분석이 마무리 단계입니다. 곧 결과 화면으로 이동합니다.",
+];
 
 let currentPayload = null;
 let activeView = "home";
 let isReportLoading = false;
 let affiliatePopupVisible = false;
+let loadingTicker = null;
+let loadingStartedAt = 0;
+let loadingMessageIndex = 0;
 
 function storedValue(key) {
   try {
@@ -126,6 +140,40 @@ function setStatus(message, mode = "normal") {
 function clearStatus() {
   statusBox.textContent = "";
   statusBox.classList.remove("is-visible", "is-error", "is-loading");
+}
+
+function loadingMessage(index) {
+  const safeIndex = Math.max(0, Math.min(index, LOADING_MESSAGES.length - 1));
+  return LOADING_MESSAGES[safeIndex];
+}
+
+function showLoadingMessage(index) {
+  loadingMessageIndex = Math.max(0, Math.min(index, LOADING_MESSAGES.length - 1));
+  setStatus(loadingMessage(loadingMessageIndex), "loading");
+}
+
+function startLoadingStatus() {
+  stopLoadingStatus();
+  loadingStartedAt = Date.now();
+  loadingMessageIndex = 0;
+  showLoadingMessage(0);
+  window.requestAnimationFrame(() => {
+    statusBox.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+  loadingTicker = window.setInterval(() => {
+    const elapsed = Date.now() - loadingStartedAt;
+    const nextIndex = Math.min(Math.floor(elapsed / 2600), LOADING_MESSAGES.length - 1);
+    if (nextIndex !== loadingMessageIndex) {
+      showLoadingMessage(nextIndex);
+    }
+  }, 900);
+}
+
+function stopLoadingStatus() {
+  if (loadingTicker) {
+    window.clearInterval(loadingTicker);
+    loadingTicker = null;
+  }
 }
 
 function closeCoupangAffiliatePopup() {
@@ -702,6 +750,49 @@ function formPayload() {
   };
 }
 
+function reportClientCacheKey(payload) {
+  const normalized = {
+    version: REPORT_CLIENT_CACHE_VERSION,
+    birthDate: String(payload.birthDate || ""),
+    birthTime: String(payload.birthTime || ""),
+    gender: String(payload.gender || ""),
+    calendarType: String(payload.calendarType || ""),
+    relationshipStatus: String(payload.relationshipStatus || ""),
+    targetYear: String(payload.targetYear || ""),
+    tier: String(payload.tier || ""),
+  };
+  return `${REPORT_CLIENT_CACHE_PREFIX}${JSON.stringify(normalized)}`;
+}
+
+function readReportClientCache(cacheKey) {
+  try {
+    const raw = localStorage.getItem(cacheKey);
+    if (!raw) {
+      return null;
+    }
+    const cached = JSON.parse(raw);
+    if (!cached?.payload || !cached.savedAt || Date.now() - Number(cached.savedAt) > REPORT_CLIENT_CACHE_MAX_AGE_MS) {
+      localStorage.removeItem(cacheKey);
+      return null;
+    }
+    return cached.payload;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function writeReportClientCache(cacheKey, payload) {
+  try {
+    localStorage.setItem(
+      cacheKey,
+      JSON.stringify({
+        payload,
+        savedAt: Date.now(),
+      })
+    );
+  } catch (_error) {}
+}
+
 function formSessionState() {
   return {
     birthDate: form.elements.birthDate?.value || "",
@@ -793,14 +884,9 @@ async function pollJudgmentJob(jobId) {
   const startedAt = Date.now();
   let attempt = 0;
   while (Date.now() - startedAt < 180000) {
-    await wait(attempt < 3 ? 1400 : 2400);
+    await wait(attempt === 0 ? 650 : attempt < 5 ? 1200 : 1800);
     attempt += 1;
-    setStatus(
-      attempt < 4
-        ? "명식을 확정하고 운의 강약을 정리하고 있습니다."
-        : "분석 결과를 정리하고 있습니다. 잠시만 기다려주세요.",
-      "loading"
-    );
+    showLoadingMessage(Math.min(attempt, LOADING_MESSAGES.length - 1));
     const response = await fetch(`/api/judgment-status?jobId=${encodeURIComponent(jobId)}`, {
       headers: {
         Accept: "application/json",
@@ -819,21 +905,32 @@ async function pollJudgmentJob(jobId) {
 }
 
 async function requestJudgment() {
-  setStatus("사주를 계산하고 있습니다. 잠시만 기다려주세요.", "loading");
+  const basePayload = formPayload();
+  const cacheKey = reportClientCacheKey(basePayload);
+  const cachedPayload = readReportClientCache(cacheKey);
+  if (cachedPayload) {
+    setStatus("저장된 분석 결과를 불러오고 있습니다.", "loading");
+    await wait(180);
+    return cachedPayload;
+  }
+  startLoadingStatus();
   const response = await fetch("/api/judgment", {
     method: "POST",
     headers: {
       "Content-Type": "application/json; charset=utf-8",
     },
-    body: JSON.stringify({ ...formPayload(), async: true }),
+    body: JSON.stringify({ ...basePayload, async: true }),
   });
   const payload = await readJudgmentResponse(response);
   if (response.status === 202 && payload?.pending && payload.jobId) {
-    return pollJudgmentJob(payload.jobId);
+    const result = await pollJudgmentJob(payload.jobId);
+    writeReportClientCache(cacheKey, result);
+    return result;
   }
   if (!response.ok || !payload?.ok) {
     throw new Error(payload?.error?.message || "분석 결과 생성에 실패했습니다.");
   }
+  writeReportClientCache(cacheKey, payload);
   return payload;
 }
 
@@ -9673,6 +9770,7 @@ async function submitReport(options = {}) {
   } catch (error) {
     setStatus(error.message, "error");
   } finally {
+    stopLoadingStatus();
     setReportLoading(false);
     if (shouldShowAffiliatePopup) {
       window.requestAnimationFrame(showCoupangAffiliatePopup);
