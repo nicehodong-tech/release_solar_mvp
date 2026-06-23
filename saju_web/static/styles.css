@@ -186,6 +186,40 @@
   margin: 0 2px -2px;
 }
 
+.premium-page-jump-bar {
+  position: sticky;
+  top: 10px;
+  z-index: 45;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+  margin: 0 0 8px;
+  pointer-events: none;
+}
+
+.premium-page-jump-bar button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(29, 32, 38, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.68);
+  color: rgba(29, 32, 38, 0.64);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: 0;
+  box-shadow: 0 6px 18px rgba(23, 25, 31, 0.06);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.premium-page-jump-bar button:hover {
+  background: rgba(255, 255, 255, 0.92);
+  color: rgba(29, 32, 38, 0.82);
+}
+
 html.is-restoring-premium body {
   overflow: hidden;
 }
