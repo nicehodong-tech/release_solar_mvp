@@ -24,7 +24,8 @@ const views = {
 };
 const viewNames = new Set(Object.keys(views));
 const COUPANG_PARTNERS_URL =
-  window.LEEHYEON_COUPANG_PARTNERS_URL || "https://coupa.ng/cnBqRZ";
+  window.LEEHYEON_COUPANG_PARTNERS_URL ||
+  "https://link.coupang.com/re/AFFSDP?lptag=AF3151585&pageKey=8174473713&itemId=23653028364&traceid=V0-201-4d8275f22060fd79";
 const COUPANG_POPUP_IFRAME_HTML =
   window.LEEHYEON_COUPANG_POPUP_IFRAME_HTML ||
   '<iframe src="https://coupa.ng/cnBqRZ" width="120" height="240" frameborder="0" scrolling="no" referrerpolicy="unsafe-url" browsingtopics></iframe>';
@@ -99,7 +100,7 @@ function showCoupangAffiliatePopup() {
       </div>
       <strong class="affiliate-popup-visit">쿠팡 방문하기</strong>
       <p class="affiliate-popup-disclosure">
-        파트너스 활동으로 수수료를 받을 수 있습니다.
+        쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받습니다.
       </p>
       <div class="affiliate-popup-actions">
         <a class="affiliate-popup-primary" href="${escapeHtml(COUPANG_PARTNERS_URL)}" target="_blank" rel="noopener noreferrer">

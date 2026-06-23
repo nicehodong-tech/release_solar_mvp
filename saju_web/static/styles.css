@@ -135,9 +135,11 @@
 .affiliate-popup-disclosure {
   margin: 8px 0 24px;
   color: #a1a6ad;
-  font-size: 16px;
+  font-size: clamp(9px, 2.45vw, 10px);
   font-weight: 700;
-  line-height: 1.35;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
 }
 
 .affiliate-popup-actions {
