@@ -2450,7 +2450,7 @@ def _cycle_regulation_adjustments(structure: ChartStructure, flow: FlowSignal, d
         *pressure_signals[:4],
         *domain_signals[:6],
     ]
-    signals = list({str(signal.get("signal_id") or ""): signal for signal in selected_signals}.values())[:36]
+    signals = list({str(signal.get("signal_id") or ""): signal for signal in selected_signals}.values())[:18]
     for signal in signals:
         effect, has_cost = _cycle_signal_effect(domain, signal)
         if not effect:

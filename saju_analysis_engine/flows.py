@@ -928,7 +928,13 @@ def _quarter_phase(selected: list[SubPeriodSignal]) -> str:
     return "unknown"
 
 
-def build_flow_signals(chart: BirthChartResult, structure: ChartStructure, target_years: list[int]) -> list[FlowSignal]:
+def build_flow_signals(
+    chart: BirthChartResult,
+    structure: ChartStructure,
+    target_years: list[int],
+    *,
+    include_sub_periods: bool = True,
+) -> list[FlowSignal]:
     signals: list[FlowSignal] = []
     day_stem_key = chart.day_pillar.stem_key
     sal_targets = _day_group_sal_targets(chart.day_pillar.branch_key)
@@ -1166,7 +1172,11 @@ def build_flow_signals(chart: BirthChartResult, structure: ChartStructure, targe
                 domain_scores[domain]["change"] += min(2.2, repeated_branch_count * 0.7)
 
         finalized = _finalize_domain_scores(domain_scores)
-        sub_period_signals = _sub_period_signals(chart, structure, year_pillar, target_year, gender)
+        sub_period_signals = (
+            _sub_period_signals(chart, structure, year_pillar, target_year, gender)
+            if include_sub_periods
+            else []
+        )
         activated_elements = list(
             dict.fromkeys(
                 [element for _, element, _ in flow_element_sources]

@@ -47,6 +47,7 @@ def analyze_chart(
     domains: list[Domain] | None = None,
     past_event_answers: list[PastEventAnswer] | None = None,
     relationship_status: RelationshipStatus = "unknown",
+    include_sub_periods: bool = True,
 ) -> AnalysisResult:
     """Analyze a finalized birth chart without changing the chart itself."""
 
@@ -81,7 +82,7 @@ def analyze_chart(
         )
         if unsupported_event_domains:
             raise ValueError(f"Unsupported past_event domain: {', '.join(unsupported_event_domains)}")
-    flow_signals = build_flow_signals(chart, structure, years)
+    flow_signals = build_flow_signals(chart, structure, years, include_sub_periods=include_sub_periods)
     packets = build_event_packets(chart, structure, flow_signals, selected_domains, relationship_status)
     calibration_profile = build_calibration_profile(past_event_answers)
     packets = apply_calibration_to_packets(packets, calibration_profile)

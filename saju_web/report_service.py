@@ -681,6 +681,7 @@ def _analysis_context_cached(
         chart,
         target_years=product_target_years,
         relationship_status=relationship_status,  # type: ignore[arg-type]
+        include_sub_periods=False,
     )
     return chart, birth_year, product_target_years, analysis
 
