@@ -29,10 +29,14 @@ const COUPANG_POPUP_IFRAME_HTML =
   window.LEEHYEON_COUPANG_POPUP_IFRAME_HTML ||
   '<iframe src="https://coupa.ng/cnBqRZ" width="120" height="240" frameborder="0" scrolling="no" referrerpolicy="unsafe-url" browsingtopics></iframe>';
 const COUPANG_POPUP_IMAGE_URL = window.LEEHYEON_COUPANG_POPUP_IMAGE_URL || "";
+const REPORT_SESSION_KEY = "leehyeon:lastPremiumReport";
+const AFFILIATE_RETURN_VIEW_KEY = "leehyeon:coupangReturnView";
+const AFFILIATE_LEFT_PAGE_KEY = "leehyeon:coupangPageVisited";
 
 let currentPayload = null;
 let activeView = "home";
 let isReportLoading = false;
+let affiliatePopupVisible = false;
 
 const groupLabels = {
   default: "핵심",
@@ -68,10 +72,13 @@ function clearStatus() {
 
 function closeCoupangAffiliatePopup() {
   document.querySelector(".affiliate-popup-backdrop")?.remove();
+  affiliatePopupVisible = false;
 }
 
 function showCoupangAffiliatePopup() {
   closeCoupangAffiliatePopup();
+  affiliatePopupVisible = true;
+  sessionStorage.setItem(AFFILIATE_RETURN_VIEW_KEY, "premium");
   const popupProduct = COUPANG_POPUP_IFRAME_HTML
     ? COUPANG_POPUP_IFRAME_HTML
     : COUPANG_POPUP_IMAGE_URL
@@ -102,11 +109,25 @@ function showCoupangAffiliatePopup() {
     </div>
   `;
   backdrop.querySelector(".affiliate-popup-primary")?.addEventListener("click", () => {
+    sessionStorage.setItem(AFFILIATE_LEFT_PAGE_KEY, "1");
+    sessionStorage.setItem(AFFILIATE_RETURN_VIEW_KEY, "premium");
     closeCoupangAffiliatePopup();
     setActiveView("premium");
   });
   document.body.appendChild(backdrop);
   backdrop.querySelector(".affiliate-popup-primary")?.focus();
+}
+
+function revealReportAfterCoupangReturn() {
+  const shouldReturnToPremium = sessionStorage.getItem(AFFILIATE_RETURN_VIEW_KEY) === "premium";
+  const pageWasVisited = sessionStorage.getItem(AFFILIATE_LEFT_PAGE_KEY) === "1";
+  if (!shouldReturnToPremium || !pageWasVisited || !currentPayload) {
+    return;
+  }
+  closeCoupangAffiliatePopup();
+  setActiveView("premium");
+  sessionStorage.removeItem(AFFILIATE_LEFT_PAGE_KEY);
+  sessionStorage.removeItem(AFFILIATE_RETURN_VIEW_KEY);
 }
 
 function setReportLoading(isLoading) {
@@ -589,6 +610,10 @@ function openInputEditor(options = {}) {
   if (options.tier) {
     applyTierSelection(options.tier);
   }
+  if (activeView !== "home") {
+    setActiveView("home", { instant: true });
+  }
+  closeCoupangAffiliatePopup();
   document.body.classList.add("input-editor-open");
   inputDisclosure?.setAttribute("open", "");
   window.requestAnimationFrame(() => {
@@ -607,6 +632,64 @@ function formPayload() {
     targetYear: Number(data.get("targetYear")),
     tier: data.get("tier"),
   };
+}
+
+function formSessionState() {
+  return {
+    birthDate: form.elements.birthDate?.value || "",
+    birthTime: form.elements.birthTime?.value || "",
+    gender: form.elements.gender?.value || "male",
+    calendarType: form.elements.calendarType?.value || "solar",
+    relationshipStatus: form.elements.relationshipStatus?.value || "unknown",
+    targetYear: form.elements.targetYear?.value || "2026",
+    tier: form.elements.tier?.value || "premium",
+  };
+}
+
+function applyFormSessionState(state = {}) {
+  Object.entries(state).forEach(([key, value]) => {
+    if (form.elements[key] && value !== undefined && value !== null) {
+      form.elements[key].value = value;
+    }
+  });
+  applyTierSelection(state.tier || "premium");
+  updateInputSummary();
+}
+
+function persistReportSession(payload) {
+  try {
+    sessionStorage.setItem(
+      REPORT_SESSION_KEY,
+      JSON.stringify({
+        payload,
+        formState: formSessionState(),
+        savedAt: Date.now(),
+      })
+    );
+  } catch (_error) {
+    // Session restore is a convenience layer. If storage is unavailable, the report still renders normally.
+  }
+}
+
+function restoreReportSession() {
+  try {
+    const raw = sessionStorage.getItem(REPORT_SESSION_KEY);
+    if (!raw) {
+      return false;
+    }
+    const saved = JSON.parse(raw);
+    if (!saved?.payload?.ok) {
+      return false;
+    }
+    applyFormSessionState(saved.formState || {});
+    renderJudgmentPayload(saved.payload);
+    document.body.classList.remove("input-editor-open");
+    inputDisclosure?.removeAttribute("open");
+    return true;
+  } catch (_error) {
+    sessionStorage.removeItem(REPORT_SESSION_KEY);
+    return false;
+  }
 }
 
 function updateInputSummary() {
@@ -1308,11 +1391,20 @@ function renderPremiumSections(report) {
 function renderPremiumResultPage(report, sections) {
   return `
     <section class="premium-result-shell premium-mobile-result">
+      ${renderPremiumInputReturnBar()}
       ${renderPremiumMobileHero(report, sections)}
       ${renderPremiumSectionIndex(report, sections)}
       ${renderPremiumDomainShowcase(report, sections)}
       ${renderPremiumResultFooter()}
     </section>
+  `;
+}
+
+function renderPremiumInputReturnBar() {
+  return `
+    <div class="premium-input-return-bar">
+      <button class="input-return-button" type="button" data-input-target="birth">사주 입력으로 돌아가기</button>
+    </div>
   `;
 }
 
@@ -9451,6 +9543,7 @@ async function submitReport(options = {}) {
     const payload = await requestJudgment();
     renderJudgmentPayload(payload);
     updateInputSummary();
+    persistReportSession(payload);
     document.body.classList.remove("input-editor-open");
     inputDisclosure?.removeAttribute("open");
     if (options.nextView) {
@@ -9525,14 +9618,41 @@ window.addEventListener("popstate", () => {
   setActiveView(nextView, { updateHistory: false, instant: true });
 });
 
+window.addEventListener("blur", () => {
+  if (affiliatePopupVisible) {
+    sessionStorage.setItem(AFFILIATE_LEFT_PAGE_KEY, "1");
+    sessionStorage.setItem(AFFILIATE_RETURN_VIEW_KEY, "premium");
+  }
+});
+
+window.addEventListener("focus", revealReportAfterCoupangReturn);
+
+window.addEventListener("pageshow", () => {
+  revealReportAfterCoupangReturn();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    revealReportAfterCoupangReturn();
+  }
+});
+
 const initialView = viewFromHash();
 const initialTier = "premium";
 applyTierSelection(initialTier);
 renderFortuneSpotlight();
 renderHomeFunnel();
 clearStatus();
-setActiveView("home", { updateHistory: false, instant: true });
-if (initialView !== "home") {
+const restoredReport = restoreReportSession();
+const shouldReturnToPremium = sessionStorage.getItem(AFFILIATE_RETURN_VIEW_KEY) === "premium";
+if (restoredReport && (initialView !== "home" || shouldReturnToPremium)) {
+  setActiveView(initialView === "basis" ? "basis" : "premium", { updateHistory: false, instant: true });
+  sessionStorage.removeItem(AFFILIATE_LEFT_PAGE_KEY);
+  sessionStorage.removeItem(AFFILIATE_RETURN_VIEW_KEY);
+} else {
+  setActiveView("home", { updateHistory: false, instant: true });
+}
+if (!restoredReport && initialView !== "home") {
   window.history.replaceState({}, "", viewUrl("home"));
   openInputEditor({ tier: initialTier });
 }

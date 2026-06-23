@@ -161,6 +161,23 @@
   color: #fff75b;
 }
 
+.input-return-button {
+  align-self: flex-start;
+  min-height: 0;
+  padding: 7px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.premium-input-return-bar {
+  display: flex;
+  justify-content: flex-start;
+  margin: 0 0 10px;
+}
+
 @media (max-width: 420px) {
   .affiliate-popup-backdrop {
     padding: 18px;
