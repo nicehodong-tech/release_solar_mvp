@@ -5120,3 +5120,43 @@ body[data-view="premium"] .premium-life-stage-summary span {
   font-size: 0.78rem;
   font-weight: 800;
 }
+
+/* Layout restore pass v168
+   결과 화면이 잘리지 않도록 한 안전장치는 유지하되, 모바일 좌우 여백을 개발 중 보던 폭으로 회복한다. */
+@media (max-width: 680px) {
+  body[data-view="home"] .app-shell {
+    width: min(calc(100% - 32px), 430px);
+  }
+
+  body[data-view="judgment"] .app-shell,
+  body[data-view="premium"] .app-shell {
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  body[data-view="judgment"] .free-profile-shell,
+  body[data-view="premium"] .premium-result-shell {
+    width: min(calc(100% - 32px), 430px);
+    max-width: 430px;
+  }
+
+  body[data-view="premium"] .premium-result-shell {
+    gap: 18px;
+  }
+
+  body[data-view="judgment"] .mobile-action-bar,
+  body[data-view="premium"] .mobile-action-bar {
+    right: 16px;
+    left: 16px;
+    max-width: calc(100vw - 32px);
+  }
+}
+
+@media (max-width: 380px) {
+  body[data-view="home"] .app-shell,
+  body[data-view="judgment"] .free-profile-shell,
+  body[data-view="premium"] .premium-result-shell {
+    width: min(calc(100% - 28px), 430px);
+    max-width: 430px;
+  }
+}
