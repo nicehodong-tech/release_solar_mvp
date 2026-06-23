@@ -752,6 +752,51 @@ function updateInputSummary() {
     birthDate && birthTime ? `${birthDate} · ${timeLabel} · ${genderLabel}` : "출생 정보";
 }
 
+function wait(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function readJudgmentResponse(response) {
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (_error) {
+    throw new Error("분석 결과를 불러오지 못했습니다.");
+  }
+  return payload;
+}
+
+async function pollJudgmentJob(jobId) {
+  const startedAt = Date.now();
+  let attempt = 0;
+  while (Date.now() - startedAt < 180000) {
+    await wait(attempt < 3 ? 1400 : 2400);
+    attempt += 1;
+    setStatus(
+      attempt < 4
+        ? "명식을 확정하고 운의 강약을 정리하고 있습니다."
+        : "분석 결과를 정리하고 있습니다. 잠시만 기다려주세요.",
+      "loading"
+    );
+    const response = await fetch(`/api/judgment-status?jobId=${encodeURIComponent(jobId)}`, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+    const payload = await readJudgmentResponse(response);
+    if (response.status === 202 && payload?.pending) {
+      continue;
+    }
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.error?.message || "분석 결과 생성에 실패했습니다.");
+    }
+    return payload;
+  }
+  throw new Error("분석 시간이 길어지고 있습니다. 잠시 뒤 다시 시도해주세요.");
+}
+
 async function requestJudgment() {
   setStatus("사주를 계산하고 있습니다. 잠시만 기다려주세요.", "loading");
   const response = await fetch("/api/judgment", {
@@ -759,10 +804,13 @@ async function requestJudgment() {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
     },
-    body: JSON.stringify(formPayload()),
+    body: JSON.stringify({ ...formPayload(), async: true }),
   });
-  const payload = await response.json();
-  if (!response.ok || !payload.ok) {
+  const payload = await readJudgmentResponse(response);
+  if (response.status === 202 && payload?.pending && payload.jobId) {
+    return pollJudgmentJob(payload.jobId);
+  }
+  if (!response.ok || !payload?.ok) {
     throw new Error(payload?.error?.message || "분석 결과 생성에 실패했습니다.");
   }
   return payload;
