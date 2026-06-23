@@ -26,6 +26,180 @@
   --ink-pine-art: url("/assets/ink-pine.png");
 }
 
+/* Coupang Partners transition popup. */
+.affiliate-popup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(0, 0, 0, 0.54);
+}
+
+.affiliate-popup {
+  position: relative;
+  width: min(100%, 430px);
+  padding: 34px 28px 28px;
+  border-radius: 30px;
+  background: #fff;
+  color: #17191f;
+  text-align: center;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.28);
+}
+
+.affiliate-popup-close,
+.affiliate-popup-help {
+  position: absolute;
+  top: 22px;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #17191f;
+  font-size: 30px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.affiliate-popup-close {
+  right: 22px;
+}
+
+.affiliate-popup-help {
+  left: 22px;
+  border: 3px solid #17191f;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.affiliate-popup h2 {
+  margin: 80px 0 10px;
+  font-size: clamp(34px, 7vw, 44px);
+  font-weight: 900;
+  letter-spacing: -0.03em;
+}
+
+.affiliate-popup-copy {
+  margin: 0 auto 26px;
+  max-width: 310px;
+  color: #777d86;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.48;
+}
+
+.affiliate-popup-product {
+  display: grid;
+  place-items: center;
+  min-height: 118px;
+  margin: 4px auto 12px;
+}
+
+.affiliate-popup-product img {
+  display: block;
+  width: min(150px, 44vw);
+  max-height: 132px;
+  object-fit: contain;
+}
+
+.affiliate-popup-product iframe {
+  display: block;
+  width: 120px;
+  height: 240px;
+  max-width: 100%;
+  border: 0;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.affiliate-popup-product-placeholder {
+  display: grid;
+  place-items: center;
+  width: 148px;
+  height: 112px;
+  border: 1px solid rgba(24, 28, 34, 0.12);
+  border-radius: 22px;
+  background: linear-gradient(145deg, #f8f8f8, #e8ebef);
+  color: #22252b;
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.affiliate-popup-visit {
+  display: block;
+  margin-top: 2px;
+  font-size: 28px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+}
+
+.affiliate-popup-disclosure {
+  margin: 8px 0 24px;
+  color: #a1a6ad;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.affiliate-popup-actions {
+  display: grid;
+  gap: 10px;
+}
+
+.affiliate-popup-primary,
+.affiliate-popup-secondary {
+  display: grid;
+  place-items: center;
+  min-height: 64px;
+  border-radius: 18px;
+  font-size: 20px;
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.affiliate-popup-primary {
+  border: 0;
+  background: #1f2026;
+  color: #fff75b;
+}
+
+.affiliate-popup-secondary {
+  border: 1px solid rgba(24, 28, 34, 0.14);
+  background: #fff;
+  color: #5f6670;
+  cursor: pointer;
+}
+
+@media (max-width: 420px) {
+  .affiliate-popup-backdrop {
+    padding: 18px;
+  }
+
+  .affiliate-popup {
+    padding: 30px 22px 22px;
+    border-radius: 28px;
+  }
+
+  .affiliate-popup h2 {
+    margin-top: 72px;
+  }
+
+  .affiliate-popup-copy {
+    font-size: 18px;
+  }
+
+  .affiliate-popup-primary,
+  .affiliate-popup-secondary {
+    min-height: 60px;
+    font-size: 18px;
+  }
+}
+
 @media (max-width: 680px) {
   body {
     background: #fbfbf7;

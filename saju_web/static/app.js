@@ -23,6 +23,12 @@ const views = {
   basis: document.querySelector("#basis-view"),
 };
 const viewNames = new Set(Object.keys(views));
+const COUPANG_PARTNERS_URL =
+  window.LEEHYEON_COUPANG_PARTNERS_URL || "https://coupa.ng/cnBqRZ";
+const COUPANG_POPUP_IFRAME_HTML =
+  window.LEEHYEON_COUPANG_POPUP_IFRAME_HTML ||
+  '<iframe src="https://coupa.ng/cnBqRZ" width="120" height="240" frameborder="0" scrolling="no" referrerpolicy="unsafe-url" browsingtopics></iframe>';
+const COUPANG_POPUP_IMAGE_URL = window.LEEHYEON_COUPANG_POPUP_IMAGE_URL || "";
 
 let currentPayload = null;
 let activeView = "home";
@@ -58,6 +64,59 @@ function setStatus(message, mode = "normal") {
 function clearStatus() {
   statusBox.textContent = "";
   statusBox.classList.remove("is-visible", "is-error", "is-loading");
+}
+
+function closeCoupangAffiliatePopup() {
+  document.querySelector(".affiliate-popup-backdrop")?.remove();
+}
+
+function showCoupangAffiliatePopup() {
+  closeCoupangAffiliatePopup();
+  const popupProduct = COUPANG_POPUP_IFRAME_HTML
+    ? COUPANG_POPUP_IFRAME_HTML
+    : COUPANG_POPUP_IMAGE_URL
+    ? `<img src="${escapeHtml(COUPANG_POPUP_IMAGE_URL)}" alt="쿠팡 추천 상품" />`
+    : `<div class="affiliate-popup-product-placeholder">COUPANG</div>`;
+  const backdrop = document.createElement("section");
+  backdrop.className = "affiliate-popup-backdrop";
+  backdrop.setAttribute("aria-label", "쿠팡 제휴 안내");
+  backdrop.innerHTML = `
+    <div class="affiliate-popup" role="dialog" aria-modal="true" aria-labelledby="affiliate-popup-title">
+      <button class="affiliate-popup-close" type="button" aria-label="팝업 닫기">×</button>
+      <span class="affiliate-popup-help" aria-hidden="true">?</span>
+      <h2 id="affiliate-popup-title">쿠팡 방문하기</h2>
+      <p class="affiliate-popup-copy">
+        제휴 페이지를 확인한 뒤 운세 결과를 계속 볼 수 있습니다.
+      </p>
+      <div class="affiliate-popup-product" aria-hidden="true">
+        ${popupProduct}
+      </div>
+      <strong class="affiliate-popup-visit">쿠팡 방문하기</strong>
+      <p class="affiliate-popup-disclosure">
+        파트너스 활동으로 수수료를 받을 수 있습니다.
+      </p>
+      <div class="affiliate-popup-actions">
+        <a class="affiliate-popup-primary" href="${escapeHtml(COUPANG_PARTNERS_URL)}" target="_blank" rel="noopener noreferrer">
+          쿠팡 방문하고 결과 보기
+        </a>
+        <button class="affiliate-popup-secondary" type="button">결과 계속 보기</button>
+      </div>
+    </div>
+  `;
+  backdrop.addEventListener("click", (event) => {
+    if (
+      event.target === backdrop ||
+      event.target.closest(".affiliate-popup-close") ||
+      event.target.closest(".affiliate-popup-secondary")
+    ) {
+      closeCoupangAffiliatePopup();
+    }
+  });
+  backdrop.querySelector(".affiliate-popup-primary")?.addEventListener("click", () => {
+    closeCoupangAffiliatePopup();
+  });
+  document.body.appendChild(backdrop);
+  backdrop.querySelector(".affiliate-popup-primary")?.focus();
 }
 
 function setReportLoading(isLoading) {
@@ -9396,6 +9455,7 @@ async function submitReport(options = {}) {
   if (isReportLoading) {
     return;
   }
+  let shouldShowAffiliatePopup = false;
   setReportLoading(true);
   try {
     const payload = await requestJudgment();
@@ -9407,10 +9467,14 @@ async function submitReport(options = {}) {
       setActiveView(options.nextView);
     }
     clearStatus();
+    shouldShowAffiliatePopup = true;
   } catch (error) {
     setStatus(error.message, "error");
   } finally {
     setReportLoading(false);
+    if (shouldShowAffiliatePopup) {
+      window.requestAnimationFrame(showCoupangAffiliatePopup);
+    }
   }
 }
 
@@ -9469,6 +9533,12 @@ window.addEventListener("popstate", () => {
     submitReport();
   }
   setActiveView(nextView, { updateHistory: false, instant: true });
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeCoupangAffiliatePopup();
+  }
 });
 
 const initialView = viewFromHash();
