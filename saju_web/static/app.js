@@ -6427,6 +6427,7 @@ function renderPremiumResultFooter() {
   return `
     <section class="premium-result-footer" aria-label="추가 확인">
       <div class="premium-result-footer-actions">
+        <button class="premium-footer-action is-muted" type="button" data-input-target="birth">출생 정보 수정</button>
         <button class="premium-footer-action" type="button" data-view-target="basis">명식표 보기</button>
         <a class="service-blog-button premium-blog-button premium-footer-action is-bottom" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
           사주명리 공간 : 이현 블로그

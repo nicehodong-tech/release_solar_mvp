@@ -778,6 +778,12 @@ body[data-view="premium"] .premium-result-footer-actions .premium-footer-action:
   background: rgba(255, 255, 255, 0.94);
 }
 
+body[data-view="premium"] .premium-result-footer-actions .premium-footer-action.is-muted {
+  background: rgba(255, 255, 255, 0.52);
+  color: rgba(36, 36, 36, 0.62);
+  font-weight: 750;
+}
+
 .premium-section-index-card,
 body[data-view="premium"] .premium-section-index-card,
 .premium-domain-panel,
