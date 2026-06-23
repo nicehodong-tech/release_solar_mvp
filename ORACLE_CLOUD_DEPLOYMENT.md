@@ -1,6 +1,8 @@
 # Oracle Cloud Always Free 배포 안내
 
-이 문서는 양력 MVP 서비스를 Oracle Cloud Always Free 서울 리전에 올리기 위한 기준 절차입니다.
+이 문서는 양력 MVP 서비스를 Oracle Cloud Always Free VM에 올리기 위한 기준 절차입니다.
+
+홈 리전은 한국 리전이 보이면 한국을 우선합니다. 가입 화면에 한국 리전이 없다면 MVP 단계에서는 일본 도쿄 리전으로 진행합니다.
 
 목표 구조는 다음과 같습니다.
 
@@ -16,7 +18,9 @@
 Oracle Cloud Console에서 Compute Instance를 만들 때 아래 기준을 권장합니다.
 
 ```text
-Region: South Korea Central (Seoul), ap-seoul-1
+Region 1순위: South Korea Central (Seoul), ap-seoul-1
+Region 2순위: South Korea North (Chuncheon), ap-chuncheon-1
+Region 대안: Japan East (Tokyo), ap-tokyo-1
 Image: Ubuntu 24.04 LTS 또는 Ubuntu 22.04 LTS
 Shape: VM.Standard.A1.Flex
 OCPU: 1 또는 2
@@ -26,7 +30,9 @@ Public IPv4: 활성화
 SSH key: 새 키 생성 후 private key 저장
 ```
 
-Always Free는 계정, 리전, 재고 상태에 따라 생성 가능 여부가 달라질 수 있습니다. A1 Flex 재고가 없으면 같은 서울 리전에서 시간을 두고 다시 시도하는 편이 낫습니다.
+Always Free는 계정, 리전, 재고 상태에 따라 생성 가능 여부가 달라질 수 있습니다. 한국 리전이 가입 화면에 없거나 A1 Flex 재고가 없으면 도쿄 리전으로 진행해도 됩니다. 사주 MVP는 영상 서비스나 실시간 게임이 아니므로 도쿄 리전에서도 한국 사용자 체감 속도는 충분히 현실적입니다.
+
+다만 홈 리전은 가입 후 바꾸기 어렵습니다. 반드시 국내 서버가 필요한 정책 단계가 오면 별도 국내 서버나 유료 VPS로 이전하는 방식을 전제로 둡니다.
 
 ## 2. Oracle 네트워크 규칙
 
@@ -146,4 +152,3 @@ df -h
 free -h
 sudo journalctl -u saju-web --since "1 hour ago" --no-pager
 ```
-
