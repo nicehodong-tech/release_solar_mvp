@@ -35,7 +35,7 @@ const AFFILIATE_RETURN_VIEW_KEY = "leehyeon:coupangReturnView";
 const AFFILIATE_LEFT_PAGE_KEY = "leehyeon:coupangPageVisited";
 const AFFILIATE_LEFT_AT_KEY = "leehyeon:coupangLeftAt";
 const INPUT_EDITOR_REQUEST_KEY = "leehyeon:inputEditorRequested";
-const AFFILIATE_RETURN_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+const AFFILIATE_RETURN_MAX_AGE_MS = 10 * 60 * 1000;
 
 let currentPayload = null;
 let activeView = "home";
