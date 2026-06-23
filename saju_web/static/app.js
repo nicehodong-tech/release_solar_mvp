@@ -1438,23 +1438,13 @@ function renderPremiumSections(report) {
 
 function renderPremiumResultPage(report, sections) {
   return `
-    <section id="premium-result-top" class="premium-result-shell premium-mobile-result">
-      ${renderPremiumPageJumpBar()}
+    <section class="premium-result-shell premium-mobile-result">
       ${renderPremiumInputReturnBar()}
       ${renderPremiumMobileHero(report, sections)}
       ${renderPremiumSectionIndex(report, sections)}
       ${renderPremiumDomainShowcase(report, sections)}
       ${renderPremiumResultFooter()}
     </section>
-  `;
-}
-
-function renderPremiumPageJumpBar() {
-  return `
-    <nav class="premium-page-jump-bar" aria-label="결과 화면 이동">
-      <button type="button" data-page-jump="top">상단</button>
-      <button type="button" data-page-jump="bottom">하단</button>
-    </nav>
   `;
 }
 
@@ -9524,49 +9514,14 @@ function renderJudgmentPayload(payload) {
   renderHead(payload);
   renderFreeProfilePreview(payload.report);
   renderPremiumSections(payload.report);
-  bindPremiumPageJumpBar();
   renderFactors(payload.report);
   clearStatus();
-}
-
-function jumpPremiumPage(position) {
-  const target =
-    position === "bottom"
-      ? document.getElementById("premium-result-bottom")
-      : document.getElementById("premium-result-top");
-  if (!target) {
-    return;
-  }
-  setActiveView("premium", { updateHistory: false, keepScroll: true });
-  if (target.id) {
-    window.location.hash = target.id;
-  }
-  target.scrollIntoView({ behavior: "smooth", block: position === "bottom" ? "end" : "start" });
-}
-
-function bindPremiumPageJumpBar() {
-  document.querySelectorAll("[data-page-jump]").forEach((button) => {
-    if (button.dataset.pageJumpBound === "true") {
-      return;
-    }
-    button.dataset.pageJumpBound = "true";
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      jumpPremiumPage(button.dataset.pageJump);
-    });
-  });
 }
 
 function handleSurfaceAction(event) {
   const button = event.target.closest("button");
   if (!button) {
     return false;
-  }
-  if (button.dataset.pageJump) {
-    event.preventDefault();
-    jumpPremiumPage(button.dataset.pageJump);
-    return true;
   }
   if (button.dataset.scrollTarget) {
     event.preventDefault();
