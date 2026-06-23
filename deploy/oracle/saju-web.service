@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Saju Leehyeon web service
+After=network.target
+
+[Service]
+Type=simple
+User=sajuapp
+Group=sajuapp
+WorkingDirectory=/opt/aisaju-leehyeon/current
+Environment=HOST=127.0.0.1
+Environment=PORT=8765
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/aisaju-leehyeon/current/.venv/bin/python -m saju_web.app --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
