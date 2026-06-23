@@ -1403,7 +1403,7 @@ function renderPremiumResultPage(report, sections) {
 function renderPremiumInputReturnBar() {
   return `
     <div class="premium-input-return-bar">
-      <button class="input-return-button" type="button" data-input-target="birth">사주 입력으로 돌아가기</button>
+      <button class="input-return-button" type="button" data-input-target="birth">출생 정보 수정</button>
     </div>
   `;
 }
