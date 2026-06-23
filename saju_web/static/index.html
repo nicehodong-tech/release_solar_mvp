@@ -4,7 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI 사주 : 이현</title>
-    <link rel="stylesheet" href="/styles.css?v=coupang-return-v4" />
+    <script>
+      try {
+        if (sessionStorage.getItem("leehyeon:coupangReturnView") === "premium") {
+          document.documentElement.classList.add("is-restoring-premium");
+        }
+      } catch (_error) {}
+    </script>
+    <link rel="stylesheet" href="/styles.css?v=coupang-return-v5" />
     <link rel="stylesheet" href="/inkwash.css?v=premium-footer-actions-v2" />
   </head>
   <body data-view="home">
@@ -133,6 +140,6 @@
       <a href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">사주명리 공간 : 이현 블로그</a>
     </footer>
 
-    <script src="/app.js?v=coupang-return-v4" type="module"></script>
+    <script src="/app.js?v=coupang-return-v5" type="module"></script>
   </body>
 </html>

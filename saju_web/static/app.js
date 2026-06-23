@@ -121,13 +121,22 @@ function showCoupangAffiliatePopup() {
 function revealReportAfterCoupangReturn() {
   const shouldReturnToPremium = sessionStorage.getItem(AFFILIATE_RETURN_VIEW_KEY) === "premium";
   const pageWasVisited = sessionStorage.getItem(AFFILIATE_LEFT_PAGE_KEY) === "1";
-  if (!shouldReturnToPremium || !pageWasVisited || !currentPayload) {
+  if (!shouldReturnToPremium || !pageWasVisited) {
+    document.documentElement.classList.remove("is-restoring-premium");
+    return;
+  }
+  if (!currentPayload) {
+    restoreReportSession();
+  }
+  if (!currentPayload) {
+    document.documentElement.classList.remove("is-restoring-premium");
     return;
   }
   closeCoupangAffiliatePopup();
   setActiveView("premium");
   sessionStorage.removeItem(AFFILIATE_LEFT_PAGE_KEY);
   sessionStorage.removeItem(AFFILIATE_RETURN_VIEW_KEY);
+  document.documentElement.classList.remove("is-restoring-premium");
 }
 
 function setReportLoading(isLoading) {
@@ -9625,6 +9634,13 @@ window.addEventListener("blur", () => {
   }
 });
 
+window.addEventListener("pagehide", () => {
+  if (affiliatePopupVisible || sessionStorage.getItem(AFFILIATE_RETURN_VIEW_KEY) === "premium") {
+    sessionStorage.setItem(AFFILIATE_LEFT_PAGE_KEY, "1");
+    sessionStorage.setItem(AFFILIATE_RETURN_VIEW_KEY, "premium");
+  }
+});
+
 window.addEventListener("focus", revealReportAfterCoupangReturn);
 
 window.addEventListener("pageshow", () => {
@@ -9656,3 +9672,4 @@ if (!restoredReport && initialView !== "home") {
   window.history.replaceState({}, "", viewUrl("home"));
   openInputEditor({ tier: initialTier });
 }
+document.documentElement.classList.remove("is-restoring-premium");
