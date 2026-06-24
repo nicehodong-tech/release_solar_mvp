@@ -94,6 +94,14 @@ function markAffiliateDeparture() {
   setStoredValue(AFFILIATE_LEFT_AT_KEY, String(Date.now()));
 }
 
+function leaveForAffiliatePage() {
+  markAffiliateDeparture();
+  removeStoredValue(INPUT_EDITOR_REQUEST_KEY);
+  closeCoupangAffiliatePopup();
+  setActiveView("premium", { updateHistory: false, instant: true });
+  window.location.assign(COUPANG_PARTNERS_URL);
+}
+
 function clearAffiliateReturnState() {
   removeStoredValue(AFFILIATE_LEFT_PAGE_KEY);
   removeStoredValue(AFFILIATE_RETURN_VIEW_KEY);
@@ -208,17 +216,15 @@ function showCoupangAffiliatePopup() {
         쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받습니다.
       </p>
       <div class="affiliate-popup-actions">
-        <a class="affiliate-popup-primary" href="${escapeHtml(COUPANG_PARTNERS_URL)}" target="_blank" rel="noopener noreferrer">
+        <a class="affiliate-popup-primary" href="${escapeHtml(COUPANG_PARTNERS_URL)}" rel="nofollow sponsored noopener">
           쿠팡 방문하고 결과 보기
         </a>
       </div>
     </div>
   `;
-  backdrop.querySelector(".affiliate-popup-primary")?.addEventListener("click", () => {
-    markAffiliateDeparture();
-    removeStoredValue(INPUT_EDITOR_REQUEST_KEY);
-    closeCoupangAffiliatePopup();
-    setActiveView("premium");
+  backdrop.querySelector(".affiliate-popup-primary")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    leaveForAffiliatePage();
   });
   document.body.appendChild(backdrop);
   backdrop.querySelector(".affiliate-popup-primary")?.focus();
