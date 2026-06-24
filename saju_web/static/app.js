@@ -55,6 +55,7 @@ let affiliatePopupVisible = false;
 let loadingTicker = null;
 let loadingStartedAt = 0;
 let loadingMessageIndex = 0;
+let loadingDisplayedPercent = 0;
 
 function storedValue(key) {
   try {
@@ -166,12 +167,19 @@ function showLoadingMessage(index) {
   setStatus(loadingMessage(loadingMessageIndex), "loading");
 }
 
+function refreshLoadingStatus() {
+  setStatus(loadingMessage(loadingMessageIndex), "loading");
+}
+
 function loadingProgressPercent() {
-  const stepCount = Math.max(1, LOADING_MESSAGES.length);
-  const stepProgress = (loadingMessageIndex + 1) / stepCount;
-  const elapsed = loadingStartedAt ? Date.now() - loadingStartedAt : 0;
-  const elapsedBoost = Math.min(14, Math.floor(elapsed / 1400));
-  return Math.max(12, Math.min(96, Math.round(10 + stepProgress * 76 + elapsedBoost)));
+  if (!loadingStartedAt) {
+    return Math.max(12, loadingDisplayedPercent || 12);
+  }
+  const elapsedSeconds = Math.max(0, (Date.now() - loadingStartedAt) / 1000);
+  const target = 8 + 87 * (1 - Math.exp(-elapsedSeconds / 14));
+  const nextPercent = Math.min(94, Math.max(8, Math.round(target)));
+  loadingDisplayedPercent = Math.max(loadingDisplayedPercent, nextPercent);
+  return loadingDisplayedPercent;
 }
 
 function renderLoadingStatus(message) {
@@ -191,6 +199,7 @@ function startLoadingStatus() {
   stopLoadingStatus();
   loadingStartedAt = Date.now();
   loadingMessageIndex = 0;
+  loadingDisplayedPercent = 8;
   showLoadingMessage(0);
   window.requestAnimationFrame(() => {
     statusBox.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -209,6 +218,7 @@ function stopLoadingStatus() {
   }
   loadingStartedAt = 0;
   loadingMessageIndex = 0;
+  loadingDisplayedPercent = 0;
 }
 
 function closeCoupangAffiliatePopup() {
@@ -919,7 +929,7 @@ async function pollJudgmentJob(jobId) {
   while (Date.now() - startedAt < 180000) {
     await wait(attempt === 0 ? 650 : attempt < 5 ? 1200 : 1800);
     attempt += 1;
-    showLoadingMessage(Math.min(attempt, LOADING_MESSAGES.length - 1));
+    refreshLoadingStatus();
     const response = await fetch(`/api/judgment-status?jobId=${encodeURIComponent(jobId)}`, {
       headers: {
         Accept: "application/json",
