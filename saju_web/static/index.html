@@ -26,13 +26,28 @@
             0
         );
         const isFreshReturn = Number.isFinite(leftAt) && leftAt > 0 && Date.now() - leftAt <= 10 * 60 * 1000;
-        if (returnView === "premium" && pageVisited === "1" && isFreshReturn) {
+        const reportRaw =
+          sessionStorage.getItem("leehyeon:lastPremiumReport") ||
+          localStorage.getItem("leehyeon:lastPremiumReport");
+        let hasRecentReport = false;
+        if (reportRaw) {
+          const saved = JSON.parse(reportRaw);
+          const savedAt = Number(saved && saved.savedAt);
+          hasRecentReport =
+            Boolean(saved && saved.payload && saved.payload.ok) &&
+            Number.isFinite(savedAt) &&
+            savedAt > 0 &&
+            Date.now() - savedAt <= 10 * 60 * 1000;
+        }
+        const hash = window.location.hash.replace("#", "");
+        const wantsReport = hash === "premium" || hash === "basis" || hash === "report" || hash === "summary" || hash === "detail" || hash === "catalog" || hash === "judgment";
+        if ((returnView === "premium" && pageVisited === "1" && isFreshReturn) || wantsReport || hasRecentReport) {
           document.documentElement.classList.add("is-restoring-premium");
         }
       } catch (_error) {}
     </script>
-    <link rel="stylesheet" href="/styles.css?v=metric-source-v179" />
-    <link rel="stylesheet" href="/inkwash.css?v=metric-source-v179" />
+    <link rel="stylesheet" href="/styles.css?v=return-restore-v180" />
+    <link rel="stylesheet" href="/inkwash.css?v=return-restore-v180" />
   </head>
   <body data-view="home">
     <header class="topbar">
@@ -153,13 +168,6 @@
       <button type="button" data-view-target="basis">명식</button>
     </nav>
 
-    <footer class="site-footer" aria-label="서비스 안내">
-      <a href="/privacy.html">개인정보 처리방침</a>
-      <a href="/terms.html">이용 안내</a>
-      <a href="/affiliate.html">제휴 안내</a>
-      <a href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">사주명리 공간 : 이현 블로그</a>
-    </footer>
-
-    <script src="/app.js?v=metric-source-v179" type="module"></script>
+    <script src="/app.js?v=return-restore-v180" type="module"></script>
   </body>
 </html>

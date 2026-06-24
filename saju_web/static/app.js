@@ -36,6 +36,7 @@ const AFFILIATE_LEFT_PAGE_KEY = "leehyeon:coupangPageVisited";
 const AFFILIATE_LEFT_AT_KEY = "leehyeon:coupangLeftAt";
 const INPUT_EDITOR_REQUEST_KEY = "leehyeon:inputEditorRequested";
 const AFFILIATE_RETURN_MAX_AGE_MS = 10 * 60 * 1000;
+const REPORT_SESSION_RESTORE_MAX_AGE_MS = 10 * 60 * 1000;
 const REPORT_CLIENT_CACHE_PREFIX = "leehyeon:reportCache:";
 const REPORT_CLIENT_CACHE_VERSION = "report-client-v172";
 const REPORT_CLIENT_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -100,6 +101,7 @@ function leaveForAffiliatePage() {
   removeStoredValue(INPUT_EDITOR_REQUEST_KEY);
   closeCoupangAffiliatePopup();
   setActiveView("premium", { updateHistory: false, instant: true });
+  window.history.replaceState({}, "", viewUrl("premium"));
   window.location.assign(COUPANG_PARTNERS_URL);
 }
 
@@ -874,14 +876,38 @@ function persistReportSession(payload) {
   }
 }
 
-function restoreReportSession() {
+function readStoredReportSession(options = {}) {
   try {
     const raw = storedValue(REPORT_SESSION_KEY);
     if (!raw) {
-      return false;
+      return null;
     }
     const saved = JSON.parse(raw);
     if (!saved?.payload?.ok) {
+      return null;
+    }
+    const maxAgeMs = Number(options.maxAgeMs || 0);
+    if (maxAgeMs > 0) {
+      const savedAt = Number(saved.savedAt || 0);
+      if (!Number.isFinite(savedAt) || savedAt <= 0 || Date.now() - savedAt > maxAgeMs) {
+        return null;
+      }
+    }
+    return saved;
+  } catch (_error) {
+    removeStoredValue(REPORT_SESSION_KEY);
+    return null;
+  }
+}
+
+function hasRecentReportSession(maxAgeMs = REPORT_SESSION_RESTORE_MAX_AGE_MS) {
+  return Boolean(readStoredReportSession({ maxAgeMs }));
+}
+
+function restoreReportSession(options = {}) {
+  try {
+    const saved = readStoredReportSession(options);
+    if (!saved) {
       return false;
     }
     applyFormSessionState(saved.formState || {});
@@ -2628,20 +2654,170 @@ function renderPremiumDomainPanel(section, index, report = null) {
 function renderPremiumDomainCoreBody(section, report = null) {
   const domain = premiumSectionDomain(section);
   if (domain === "timing") {
-    return renderPremiumTimingProductBoard(report || {}, section) || renderPremiumProductStory(section) || renderPremiumVisualMetricBoard(section);
+    const scoreSummary = renderPremiumDomainScoreSummary(section);
+    const timingBody = renderPremiumTimingProductBoard(report || {}, section) || renderPremiumProductStory(section) || renderPremiumVisualMetricBoard(section);
+    return `${scoreSummary}${timingBody}`;
   }
   if (domain === "life") {
-    return renderPremiumLifeSectionProduct(section);
+    const scoreSummary = renderPremiumDomainScoreSummary(section);
+    return `${scoreSummary}${renderPremiumLifeSectionProduct(section)}`;
   }
   const productStory = renderPremiumProductStory(section);
   const productBrief = productStory || renderPremiumProductInterpretation(section);
+  const scoreSummary = renderPremiumDomainScoreSummary(section);
   const metricBoard = renderPremiumVisualMetricBoard(section);
+  const interpretation = renderPremiumDomainInterpretationPack(section);
   const reading = renderPremiumSectionReading(section);
   return `
+      ${scoreSummary}
       ${metricBoard}
+      ${interpretation}
       ${productBrief}
       ${reading}
     `;
+}
+
+function renderPremiumDomainScoreSummary(section) {
+  const pool = premiumVisualMetricPool(section);
+  let metrics = pool.filter((item) => !premiumMetricIsTimingLike(item));
+  if (!metrics.length) metrics = pool;
+  const score = premiumDomainTotalScore(section, metrics);
+  const level = premiumMetricLevel(score);
+  const tone = premiumMetricToneFromLevel(level.label);
+  const domain = premiumSectionDomain(section);
+  const strongest = [...metrics].sort((a, b) => b.score - a.score)[0];
+  const weakest = [...metrics].sort((a, b) => a.score - b.score)[0];
+  const strongestLevel = strongest ? premiumMetricLevel(strongest.score) : null;
+  const weakestLevel = weakest ? premiumMetricLevel(weakest.score) : null;
+  const strongestLineLabel = strongestLevel && premiumMetricToneFromLevel(strongestLevel.label) === "strong" ? "강점" : "높은 항목";
+  const weakestLineLabel = weakestLevel && premiumMetricToneFromLevel(weakestLevel.label) === "watch" ? "주의" : "점검";
+  const title = premiumNavTitle(section);
+  return `
+    <section class="premium-domain-score-summary is-${escapeHtml(tone)} domain-${escapeHtml(domain)}" aria-label="${escapeHtml(`${title} 총점`)}">
+      <div class="premium-domain-score-symbol" aria-hidden="true">${escapeHtml(premiumDomainSymbol(domain))}</div>
+      <div class="premium-domain-score-main">
+        <span>${escapeHtml(`${title} 총점`)}</span>
+        <strong>${escapeHtml(`${Math.round(score)}점`)}</strong>
+        <b>${escapeHtml(level.label)}</b>
+      </div>
+      <div class="premium-domain-score-lines">
+        ${strongest ? `<p><em>${escapeHtml(strongestLineLabel)}</em>${escapeHtml(strongest.title)} ${escapeHtml(strongestLevel.label)}</p>` : ""}
+        ${weakest ? `<p><em>${escapeHtml(weakestLineLabel)}</em>${escapeHtml(weakest.title)} ${escapeHtml(weakestLevel.label)}</p>` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function premiumDomainTotalScore(section, metrics = null) {
+  const rawPool = Array.isArray(metrics) ? metrics : premiumVisualMetricPool(section);
+  let pool = rawPool.filter((item) => !premiumMetricIsTimingLike(item));
+  if (!pool.length) pool = rawPool;
+  const scores = pool.map((item) => Number(item?.score)).filter((score) => Number.isFinite(score));
+  if (!scores.length) {
+    return Number(section?.strength_score || 56) || 56;
+  }
+  const sorted = [...scores].sort((a, b) => b - a);
+  const top = sorted.slice(0, Math.min(4, sorted.length));
+  const bottom = sorted.slice(-Math.min(2, sorted.length));
+  const average = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+  const topAverage = top.reduce((sum, score) => sum + score, 0) / top.length;
+  const bottomAverage = bottom.reduce((sum, score) => sum + score, 0) / bottom.length;
+  return Math.max(0, Math.min(100, Math.round(average * 0.45 + topAverage * 0.38 + bottomAverage * 0.17)));
+}
+
+function premiumMetricToneFromLevel(label) {
+  if (label === "위험" || label === "주의") {
+    return "watch";
+  }
+  if (label === "좋음" || label === "매우 좋음") {
+    return "strong";
+  }
+  return "neutral";
+}
+
+function premiumDomainSymbol(domain) {
+  const symbols = {
+    personality: "性",
+    money: "財",
+    career: "業",
+    love: "情",
+    marriage: "家",
+    timing: "年",
+    life: "生",
+    honor: "名",
+    social: "人",
+  };
+  return symbols[domain] || "命";
+}
+
+function renderPremiumDomainInterpretationPack(section) {
+  const pool = premiumVisualMetricPool(section);
+  let metrics = pool.filter((item) => !premiumMetricIsTimingLike(item));
+  if (!metrics.length) metrics = pool;
+  if (!metrics.length) {
+    return "";
+  }
+  const domain = premiumSectionDomain(section);
+  const strongest = [...metrics].sort((a, b) => b.score - a.score).slice(0, 2);
+  const weakest = [...metrics].sort((a, b) => a.score - b.score)[0];
+  const interpretation = premiumDomainCauseSentence(domain, strongest, weakest);
+  const advice = premiumDomainAdviceSentence(domain, strongest, weakest);
+  if (!interpretation && !advice) {
+    return "";
+  }
+  return `
+    <section class="premium-domain-interpretation domain-${escapeHtml(domain)}">
+      ${interpretation ? `
+        <article>
+          <span>해석</span>
+          <p>${escapeHtml(interpretation)}</p>
+        </article>
+      ` : ""}
+      ${advice ? `
+        <article class="is-advice">
+          <span>대응책</span>
+          <p>${escapeHtml(advice)}</p>
+        </article>
+      ` : ""}
+    </section>
+  `;
+}
+
+function premiumDomainCauseSentence(domain, strongest, weakest) {
+  const strongTitles = strongest.map((item) => item.title).filter(Boolean);
+  const weakTitle = weakest?.title || "";
+  const top = strongTitles.slice(0, 2).join(", ");
+  const topText = top || "중심 항목";
+  const weak = weakTitle ? `먼저 살펴볼 항목은 ${weakTitle}입니다` : "크게 흔들리는 항목은 많지 않습니다";
+  const templates = {
+    personality: `강하게 나온 항목은 ${topText}입니다. ${weak}. 선택이 빠른 사람인지, 오래 따지는 사람인지가 이 영역에서 분명하게 나타납니다.`,
+    money: `재물 판단에서 강하게 나온 항목은 ${topText}입니다. ${weak}. 돈이 들어오는 장면보다 돈의 소유권과 관리 방식에서 차이가 크게 납니다.`,
+    career: `직업운에서 강하게 나온 항목은 ${topText}입니다. ${weak}. 경력은 실력만으로 결정되지 않고 평가권, 책임 범위, 보상 구조에 따라 달라집니다.`,
+    love: `연애운에서 강하게 나온 항목은 ${topText}입니다. ${weak}. 연애는 호감의 크기보다 표현 방식과 선택 기준에서 결론이 납니다.`,
+    marriage: `결혼운에서 강하게 나온 항목은 ${topText}입니다. ${weak}. 결혼은 마음의 문제에서 끝나지 않고 생활 기준과 가족 책임으로 이어집니다.`,
+    honor: `명예운에서 강하게 나온 항목은 ${topText}입니다. ${weak}. 명예는 인상보다 이력, 성과, 공식 평가로 굳어집니다.`,
+    social: `대인관계에서 강하게 나온 항목은 ${topText}입니다. ${weak}. 사람운은 인맥의 넓이보다 오래 남는 신뢰에서 차이가 납니다.`,
+    timing: `시기 판단에서 강하게 나온 항목은 ${topText}입니다. ${weak}. 좋은 해와 조심할 해는 단순한 길흉보다 무엇이 커지고 무엇을 줄여야 하는지로 봐야 합니다.`,
+    life: `인생 구간에서 강하게 나온 항목은 ${topText}입니다. ${weak}. 초년부터 말년까지 같은 방식으로 흘러가지 않고, 강해지는 시기와 정리해야 할 시기가 나뉩니다.`,
+  };
+  return templates[domain] || `강하게 나온 항목은 ${topText}입니다. ${weak}.`;
+}
+
+function premiumDomainAdviceSentence(domain, strongest, weakest) {
+  const weakTitle = weakest?.title || "";
+  const weakText = weakTitle || "주의 항목";
+  const templates = {
+    personality: `먼저 조정할 항목은 ${weakText}입니다. 바로 반응하기보다 기준을 먼저 정하십시오. 말투보다 순서가 성격의 장점을 살립니다.`,
+    money: `먼저 관리할 항목은 ${weakText}입니다. 명의, 몫, 지급일, 보증처럼 나중에 말이 바뀌기 쉬운 부분을 초기에 정해야 합니다.`,
+    career: `먼저 확인할 항목은 ${weakText}입니다. 책임을 맡기 전에는 결정권과 보상 기준을 분명히 해야 합니다.`,
+    love: `먼저 맞출 항목은 ${weakText}입니다. 마음이 있어도 연락 방식과 기대치를 초반에 맞추는 편이 좋습니다.`,
+    marriage: `먼저 정리할 항목은 ${weakText}입니다. 생활비, 주거, 가족 개입 범위는 감정보다 먼저 정리해야 합니다.`,
+    honor: `먼저 보강할 항목은 ${weakText}입니다. 공식 기록과 성과 자료를 남기는 습관이 명예운을 지킵니다.`,
+    social: `먼저 선을 그을 항목은 ${weakText}입니다. 부탁과 책임의 경계를 세워야 좋은 인연이 오래 갑니다.`,
+    timing: `먼저 정리할 항목은 ${weakText}입니다. 새 일을 크게 벌이기보다 계약, 돈, 관계의 미뤄둔 문제를 먼저 정리해야 합니다.`,
+    life: `먼저 관리할 구간은 ${weakText}입니다. 그 시기에는 확장보다 정리와 재배치가 우선입니다.`,
+  };
+  return templates[domain] || `먼저 정리할 항목은 ${weakText}입니다. 이 항목이 안정되면 장점이 더 분명해집니다.`;
 }
 
 function renderPremiumLifeSectionProduct(section) {
@@ -3531,11 +3707,13 @@ function premiumVisualMetricPool(section) {
       : premiumMetricScoreFromValue(rawMetricValue, item.tone || item.role || "");
     const level = premiumMetricLevel(score);
     const toneText = String(item.tone || item.role || "").toLowerCase();
-    const tone = score < 55 || (!hasNumericScore && (toneText.includes("watch") || toneText.includes("risk")))
-      ? "watch"
-      : score >= 70
-        ? "strong"
-        : "neutral";
+    const tone = hasNumericScore
+      ? premiumMetricToneFromLevel(level.label)
+      : (toneText.includes("watch") || toneText.includes("risk"))
+        ? "watch"
+        : (toneText.includes("strong") || toneText.includes("good"))
+          ? "strong"
+          : premiumMetricToneFromLevel(level.label);
     const definition =
       premiumMetricDefinition(domain, title) ||
       definitions.get(key) ||
@@ -3600,16 +3778,17 @@ function premiumMetricSourcePriority(sourceKind) {
 function premiumRepresentativeMetrics(section) {
   const pool = premiumVisualMetricPool(section);
   const representativePool = pool.filter((item) => !premiumMetricIsTimingLike(item));
-  const strongTarget = Math.min(3, representativePool.filter((item) => item.score >= 65).length);
-  const watchTarget = Math.min(3, representativePool.filter((item) => item.score < 55).length);
+  const metricTone = (item) => premiumMetricToneFromLevel(premiumMetricLevel(item.score).label);
+  const strongTarget = Math.min(3, representativePool.filter((item) => metricTone(item) === "strong").length);
+  const watchTarget = Math.min(3, representativePool.filter((item) => metricTone(item) === "watch").length);
   let selectedKeys = new Set();
   let strong = representativePool
-    .filter((item) => item.score >= 65)
+    .filter((item) => metricTone(item) === "strong")
     .sort((a, b) => b.score - a.score)
     .slice(0, strongTarget);
   strong.forEach((item) => selectedKeys.add(item.key));
   let watch = representativePool
-    .filter((item) => item.score < 55 && !selectedKeys.has(item.key))
+    .filter((item) => metricTone(item) === "watch" && !selectedKeys.has(item.key))
     .sort((a, b) => a.score - b.score)
     .slice(0, watchTarget);
   return {
@@ -3678,12 +3857,9 @@ function renderPremiumVisualDetailMetricCard(item) {
   const score = Number.isFinite(Number(item.score)) ? Math.max(0, Math.min(100, Number(item.score))) : 56;
   const level = premiumMetricLevel(score);
   const width = Math.max(8, Math.min(100, level.percent));
-  const tone =
-    item.tone === "watch" || score < 55
-      ? "watch"
-      : item.tone === "strong" || score >= 70
-        ? "strong"
-        : "neutral";
+  const tone = premiumMetricToneFromLevel(level.label);
+  const highText = premiumMetricOutcomeText(item.highText || "");
+  const lowText = premiumMetricOutcomeText(item.lowText || "");
   return `
     <article class="premium-visual-detail-card is-${escapeHtml(tone)}">
       <div class="premium-visual-detail-card-head">
@@ -3697,6 +3873,12 @@ function renderPremiumVisualDetailMetricCard(item) {
         <i style="width:${width}%"></i>
       </div>
       <p>${escapeHtml(item.definition || "해당 영역의 결과에 반영되는 세부 요소입니다.")}</p>
+      ${highText || lowText ? `
+        <div class="premium-visual-detail-meaning">
+          ${highText ? `<span><b>높게 나오면</b>${escapeHtml(highText)}</span>` : ""}
+          ${lowText ? `<span><b>낮게 나오면</b>${escapeHtml(lowText)}</span>` : ""}
+        </div>
+      ` : ""}
     </article>
   `;
 }
@@ -9956,11 +10138,16 @@ renderFortuneSpotlight();
 renderHomeFunnel();
 clearStatus();
 const shouldReturnToPremium = hasFreshAffiliateReturn();
-const restoredReport = shouldReturnToPremium ? restoreReportSession() : false;
+const inputEditorRequested = storedValue(INPUT_EDITOR_REQUEST_KEY) === "1";
+const shouldRestoreFromHash = initialView !== "home";
+const shouldRestoreRecentReport = initialView === "home" && !inputEditorRequested && hasRecentReportSession();
+const shouldRestoreInitialReport = shouldReturnToPremium || shouldRestoreFromHash || shouldRestoreRecentReport;
+const restoredReport = shouldRestoreInitialReport
+  ? restoreReportSession({ maxAgeMs: shouldRestoreRecentReport ? REPORT_SESSION_RESTORE_MAX_AGE_MS : 0 })
+  : false;
 if (!shouldReturnToPremium) {
   clearAffiliateReturnState();
 }
-const inputEditorRequested = storedValue(INPUT_EDITOR_REQUEST_KEY) === "1";
 if (restoredReport) {
   const shouldShowInputEditor = initialView === "home" && inputEditorRequested && !shouldReturnToPremium;
   if (shouldShowInputEditor) {
