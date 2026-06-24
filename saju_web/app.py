@@ -31,6 +31,7 @@ MIME_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
     ".json": "application/json; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -167,6 +168,9 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             return
         self._serve_static()
 
+    def do_HEAD(self) -> None:
+        self._serve_static(include_body=False)
+
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path != "/api/judgment":
@@ -229,7 +233,7 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             return
         self._send_json(_pending_response(job_id, job), 202)
 
-    def _serve_static(self) -> None:
+    def _serve_static(self, *, include_body: bool = True) -> None:
         raw_path = self.path.split("?", 1)[0]
         relative = unquote(raw_path).lstrip("/") or "index.html"
         if relative.endswith("/"):
@@ -244,7 +248,8 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if include_body:
+            self.wfile.write(data)
 
     def _send_json(self, payload: dict[str, Any], status: int) -> None:
         data = _json_bytes(payload)
