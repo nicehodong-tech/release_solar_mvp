@@ -3502,10 +3502,10 @@ function premiumVisualMetricPool(section) {
   });
 
   const rawItems = [
-    ...(Array.isArray(section?.required_judgment_cards) ? section.required_judgment_cards : []),
-    ...(Array.isArray(section?.topic_items) ? section.topic_items : []),
-    ...(Array.isArray(section?.judgment_axes) ? section.judgment_axes : []),
-    ...((section?.product_story && Array.isArray(section.product_story.items)) ? section.product_story.items : []),
+    ...premiumMetricSourceItems(section?.required_judgment_cards, "required"),
+    ...premiumMetricSourceItems(section?.judgment_axes, "axis"),
+    ...premiumMetricSourceItems(section?.topic_items, "topic"),
+    ...premiumMetricSourceItems(section?.product_story?.items, "story"),
   ];
   const seen = new Map();
   rawItems.forEach((item, index) => {
@@ -3520,11 +3520,15 @@ function premiumVisualMetricPool(section) {
     }
     const rawScore = Number(item.score);
     const hasNumericScore = Number.isFinite(rawScore);
+    const rawMetricValue = item.value || item.grade || item.tone || item.role || "";
+    if (!hasNumericScore && !String(rawMetricValue || "").trim()) {
+      return;
+    }
     const negativeAxis = premiumMetricIsNegativeAxis(rawTitle);
     const numericScore = hasNumericScore ? Math.max(0, Math.min(100, rawScore)) : 56;
     const score = Number.isFinite(rawScore)
       ? (negativeAxis ? 100 - numericScore : numericScore)
-      : premiumMetricScoreFromValue(item.value || item.grade || item.tone || item.role, item.tone || item.role || "");
+      : premiumMetricScoreFromValue(rawMetricValue, item.tone || item.role || "");
     const level = premiumMetricLevel(score);
     const toneText = String(item.tone || item.role || "").toLowerCase();
     const tone = score < 55 || (!hasNumericScore && (toneText.includes("watch") || toneText.includes("risk")))
@@ -3548,10 +3552,18 @@ function premiumVisualMetricPool(section) {
       highText: profile?.high || "",
       lowText: profile?.low || "",
       sourceIndex: index,
+      sourceKind: item.__metricSource || "",
+      sourcePriority: premiumMetricSourcePriority(item.__metricSource || ""),
     };
     const existing = seen.get(key);
     if (!existing) {
       seen.set(key, metric);
+      return;
+    }
+    if (metric.sourcePriority !== existing.sourcePriority) {
+      if (metric.sourcePriority > existing.sourcePriority) {
+        seen.set(key, { ...metric, sourceIndex: existing.sourceIndex });
+      }
       return;
     }
     const existingPriority = existing.definition && existing.definition !== premiumMetricDefinition(domain, existing.title) ? 2 : 0;
@@ -3561,6 +3573,28 @@ function premiumVisualMetricPool(section) {
     }
   });
   return [...seen.values()].sort((a, b) => a.sourceIndex - b.sourceIndex);
+}
+
+function premiumMetricSourceItems(items, sourceKind) {
+  return (Array.isArray(items) ? items : [])
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({ ...item, __metricSource: sourceKind }));
+}
+
+function premiumMetricSourcePriority(sourceKind) {
+  if (sourceKind === "required") {
+    return 4;
+  }
+  if (sourceKind === "axis") {
+    return 3;
+  }
+  if (sourceKind === "topic") {
+    return 2;
+  }
+  if (sourceKind === "story") {
+    return 1;
+  }
+  return 0;
 }
 
 function premiumRepresentativeMetrics(section) {
