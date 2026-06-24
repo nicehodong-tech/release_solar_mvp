@@ -139,7 +139,12 @@ const premiumRiskMarkerPatternText = "주의|리스크|위험|손실|부담|갈�
 const premiumRiskMarkerPattern = new RegExp(premiumRiskMarkerPatternText);
 
 function setStatus(message, mode = "normal") {
-  statusBox.textContent = message;
+  if (mode === "loading" && message) {
+    renderLoadingStatus(message);
+  } else {
+    statusBox.textContent = message;
+    statusBox.style.removeProperty("--loading-progress");
+  }
   statusBox.classList.toggle("is-error", mode === "error");
   statusBox.classList.toggle("is-loading", mode === "loading");
   statusBox.classList.toggle("is-visible", Boolean(message));
@@ -147,6 +152,7 @@ function setStatus(message, mode = "normal") {
 
 function clearStatus() {
   statusBox.textContent = "";
+  statusBox.style.removeProperty("--loading-progress");
   statusBox.classList.remove("is-visible", "is-error", "is-loading");
 }
 
@@ -160,6 +166,27 @@ function showLoadingMessage(index) {
   setStatus(loadingMessage(loadingMessageIndex), "loading");
 }
 
+function loadingProgressPercent() {
+  const stepCount = Math.max(1, LOADING_MESSAGES.length);
+  const stepProgress = (loadingMessageIndex + 1) / stepCount;
+  const elapsed = loadingStartedAt ? Date.now() - loadingStartedAt : 0;
+  const elapsedBoost = Math.min(14, Math.floor(elapsed / 1400));
+  return Math.max(12, Math.min(96, Math.round(10 + stepProgress * 76 + elapsedBoost)));
+}
+
+function renderLoadingStatus(message) {
+  const percent = loadingProgressPercent();
+  statusBox.style.setProperty("--loading-progress", `${percent}%`);
+  statusBox.innerHTML = `
+    <div class="status-loading-head">
+      <span>분석 준비 중</span>
+      <b>${percent}%</b>
+    </div>
+    <div class="status-loading-bar" aria-hidden="true"><i></i></div>
+    <p class="status-loading-copy">${escapeHtml(message)}</p>
+  `;
+}
+
 function startLoadingStatus() {
   stopLoadingStatus();
   loadingStartedAt = Date.now();
@@ -171,9 +198,7 @@ function startLoadingStatus() {
   loadingTicker = window.setInterval(() => {
     const elapsed = Date.now() - loadingStartedAt;
     const nextIndex = Math.min(Math.floor(elapsed / 2600), LOADING_MESSAGES.length - 1);
-    if (nextIndex !== loadingMessageIndex) {
-      showLoadingMessage(nextIndex);
-    }
+    showLoadingMessage(nextIndex);
   }, 900);
 }
 
@@ -182,6 +207,8 @@ function stopLoadingStatus() {
     window.clearInterval(loadingTicker);
     loadingTicker = null;
   }
+  loadingStartedAt = 0;
+  loadingMessageIndex = 0;
 }
 
 function closeCoupangAffiliatePopup() {
@@ -3605,8 +3632,11 @@ function renderPremiumVisualDetailMetricCard(item) {
         : "neutral";
   return `
     <article class="premium-visual-detail-card is-${escapeHtml(tone)}">
-      <div>
+      <div class="premium-visual-detail-card-head">
         <strong>${escapeHtml(item.title)}</strong>
+      </div>
+      <div class="premium-visual-detail-card-meta">
+        <span>지표 수준</span>
         <b>${escapeHtml(level.label)}</b>
       </div>
       <div class="premium-visual-meter" aria-label="${escapeHtml(`${item.title} ${level.label}`)}">

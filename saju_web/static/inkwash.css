@@ -5343,3 +5343,40 @@ body[data-view="premium"] .premium-life-stage-summary span {
     overflow-wrap: anywhere;
   }
 }
+
+/* Loading gauge and detail metric pass v176
+   대표 지표 카드는 모바일 1열, 전체 항목 카드는 비교가 쉽도록 2열을 유지한다. */
+@media (max-width: 760px) {
+  body[data-view="premium"] .premium-visual-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px;
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  body[data-view="premium"] .premium-visual-detail-card {
+    gap: 8px;
+    min-height: 128px;
+    padding: 12px 10px;
+  }
+
+  body[data-view="premium"] .premium-visual-detail-card strong {
+    font-size: 13px;
+    line-height: 1.32;
+  }
+
+  body[data-view="premium"] .premium-visual-detail-card-meta {
+    gap: 5px;
+  }
+
+  body[data-view="premium"] .premium-visual-detail-card-meta span {
+    font-size: 9px;
+  }
+
+  body[data-view="premium"] .premium-visual-detail-card b {
+    padding-right: 7px;
+    padding-left: 7px;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+}
