@@ -3254,19 +3254,20 @@ function premiumMetricScoreFromValue(value, tone = "") {
 
 function premiumMetricLevel(score) {
   const value = Number.isFinite(Number(score)) ? Number(score) : 56;
+  const percent = Math.max(14, Math.min(96, Math.round(value)));
   if (value >= 80) {
-    return { label: "매우 좋음", percent: 92 };
+    return { label: "매우 좋음", percent };
   }
   if (value >= 65) {
-    return { label: "좋음", percent: 74 };
+    return { label: "좋음", percent };
   }
   if (value >= 45) {
-    return { label: "보통", percent: 55 };
+    return { label: "보통", percent };
   }
   if (value >= 30) {
-    return { label: "주의", percent: 36 };
+    return { label: "주의", percent };
   }
-  return { label: "위험", percent: 18 };
+  return { label: "위험", percent };
 }
 
 function premiumMetricIsNegativeAxis(value) {
@@ -3564,15 +3565,16 @@ function premiumVisualMetricPool(section) {
 
 function premiumRepresentativeMetrics(section) {
   const pool = premiumVisualMetricPool(section);
-  const strongTarget = Math.min(3, pool.filter((item) => item.score >= 65).length);
-  const watchTarget = Math.min(3, pool.filter((item) => item.score < 55).length);
+  const representativePool = pool.filter((item) => !premiumMetricIsTimingLike(item));
+  const strongTarget = Math.min(3, representativePool.filter((item) => item.score >= 65).length);
+  const watchTarget = Math.min(3, representativePool.filter((item) => item.score < 55).length);
   let selectedKeys = new Set();
-  let strong = pool
+  let strong = representativePool
     .filter((item) => item.score >= 65)
     .sort((a, b) => b.score - a.score)
     .slice(0, strongTarget);
   strong.forEach((item) => selectedKeys.add(item.key));
-  let watch = pool
+  let watch = representativePool
     .filter((item) => item.score < 55 && !selectedKeys.has(item.key))
     .sort((a, b) => a.score - b.score)
     .slice(0, watchTarget);
@@ -3581,6 +3583,14 @@ function premiumRepresentativeMetrics(section) {
     watch,
     all: pool,
   };
+}
+
+function premiumMetricIsTimingLike(item) {
+  const text = cleanCustomerLabel(`${item?.title || ""} ${item?.key || ""}`);
+  if (!text) {
+    return false;
+  }
+  return /(연도|강세연도|주의연도|전환연도|결혼적기|시기|타이밍)$/u.test(text.replace(/\s+/g, ""));
 }
 
 function renderPremiumVisualMetricBoard(section) {

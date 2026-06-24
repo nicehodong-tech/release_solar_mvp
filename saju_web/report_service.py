@@ -2270,7 +2270,7 @@ def _feature_value_strongest(
         for score in (_feature_score(product_item, key) for key in keys)
         if isinstance(score, int)
     ]
-    if isinstance(fallback_score, int):
+    if not scores and isinstance(fallback_score, int):
         scores.append(fallback_score)
     if not scores:
         return "확인 필요"
@@ -2292,7 +2292,7 @@ def _feature_value_average(
         for score in (_feature_score(product_item, key) for key in keys)
         if isinstance(score, int)
     ]
-    if isinstance(fallback_score, int):
+    if not scores and isinstance(fallback_score, int):
         scores.append(fallback_score)
     if not scores:
         return "확인 필요"
@@ -2300,6 +2300,122 @@ def _feature_value_average(
     if cap == "중상위권" and value in {"최상위권", "상위권"}:
         return "중상위권"
     return value
+
+
+def _bounded_metric_score(score: int | float | None, *, cap: int | None = None) -> int | None:
+    if not isinstance(score, (int, float)):
+        return None
+    value = max(0, min(100, round(float(score))))
+    if isinstance(cap, int):
+        value = min(value, cap)
+    return value
+
+
+def _feature_score_blended(
+    product_item: dict[str, Any] | None,
+    key: str,
+    fallback_score: int | None,
+    *,
+    cap: int | None = None,
+) -> int | None:
+    score = _feature_score(product_item, key)
+    if isinstance(score, int) and isinstance(fallback_score, int):
+        blended_score = round((score + fallback_score) / 2)
+        if fallback_score >= 82:
+            blended_score = max(blended_score, fallback_score - 24)
+        return _bounded_metric_score(blended_score, cap=cap)
+    if isinstance(score, int):
+        return _bounded_metric_score(score, cap=cap)
+    if isinstance(fallback_score, int):
+        return _bounded_metric_score(fallback_score, cap=cap)
+    return None
+
+
+def _feature_score_strongest(
+    product_item: dict[str, Any] | None,
+    keys: tuple[str, ...],
+    *,
+    fallback_score: int | None = None,
+    cap: int | None = None,
+) -> int | None:
+    scores = [
+        score
+        for score in (_feature_score(product_item, key) for key in keys)
+        if isinstance(score, int)
+    ]
+    if not scores and isinstance(fallback_score, int):
+        scores.append(fallback_score)
+    if not scores:
+        return None
+    return _bounded_metric_score(max(scores), cap=cap)
+
+
+def _feature_score_average(
+    product_item: dict[str, Any] | None,
+    keys: tuple[str, ...],
+    *,
+    fallback_score: int | None = None,
+    cap: int | None = None,
+) -> int | None:
+    scores = [
+        score
+        for score in (_feature_score(product_item, key) for key in keys)
+        if isinstance(score, int)
+    ]
+    if not scores and isinstance(fallback_score, int):
+        scores.append(fallback_score)
+    if not scores:
+        return None
+    return _bounded_metric_score(sum(scores) / len(scores), cap=cap)
+
+
+def _risk_control_score(score: int | None) -> int | None:
+    if not isinstance(score, int):
+        return None
+    if score >= 75:
+        return 40
+    if score >= 62:
+        return 45
+    if score >= 48:
+        return 58
+    return 78
+
+
+def _combined_stability_score(product_item: dict[str, Any] | None, *keys: str) -> int | None:
+    scores = [
+        score
+        for score in (_feature_score(product_item, key) for key in keys)
+        if isinstance(score, int)
+    ]
+    if not scores:
+        return None
+    return _bounded_metric_score(min(scores))
+
+
+def _contract_name_stability_score(product_item: dict[str, Any] | None) -> int | None:
+    risk_score = _engine_score(product_item, "risk_score")
+    if risk_score >= 62:
+        return _risk_control_score(risk_score)
+    return _combined_stability_score(product_item, "deal_selection", "loss_avoidance")
+
+
+def _score_from_axis_value(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text or text == "확인 필요":
+        return None
+    if text in {"최상위권", "매우 좋음", "안정"}:
+        return 88
+    if text in {"상위권", "좋음"}:
+        return 82
+    if text in {"중상위권", "양호"}:
+        return 74
+    if text in {"평균권", "보통"}:
+        return 56
+    if text in {"주의 필요", "주의"}:
+        return 38
+    if text in {"약세", "위험", "낮음"}:
+        return 28
+    return None
 
 
 def _feature_rank(
@@ -3044,7 +3160,7 @@ def _risk_axis_value(card: dict[str, Any]) -> str:
     return "낮음"
 
 
-def _judgment_axes_for_card(
+def _raw_judgment_axes_for_card(
     card: dict[str, Any],
     product_item: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
@@ -3148,6 +3264,128 @@ def _judgment_axes_for_card(
         {"key": "core", "label": "핵심 결론", "value": primary},
         {"key": "risk", "label": "주의 필요도", "value": _risk_axis_value(card)},
     ]
+
+
+def _judgment_axis_score(
+    domain: str,
+    key: str,
+    product_item: dict[str, Any] | None,
+    *,
+    probability: int | None,
+    opportunity: int | None,
+    risk_score: int | None,
+) -> int | None:
+    if domain == "money":
+        mapping = {
+            "wealth_formation": lambda: _feature_score_blended(product_item, "money_potential", probability, cap=79),
+            "wealth_scale": lambda: _feature_score_strongest(product_item, ("money_potential", "business_expansion", "asset_retention"), fallback_score=probability, cap=79),
+            "income_creation": lambda: _feature_score_strongest(product_item, ("income_expansion", "liquidity_stability", "reward_claim_strength"), fallback_score=opportunity, cap=79),
+            "skill_income": lambda: _feature_score_average(product_item, ("business_expansion", "reward_claim_strength"), fallback_score=opportunity, cap=79),
+            "performance_reward": lambda: _feature_score_blended(product_item, "reward_claim_strength", opportunity, cap=79),
+            "asset_retention": lambda: _feature_score_strongest(product_item, ("asset_retention", "spending_control", "loss_avoidance"), fallback_score=probability),
+            "cashflow_stability": lambda: _feature_score_strongest(product_item, ("liquidity_stability", "spending_control", "practical_planning"), fallback_score=probability),
+            "investment_trading_judgment": lambda: _feature_score_strongest(product_item, ("investment_trading_sense", "deal_selection", "loss_avoidance"), fallback_score=opportunity),
+            "shared_asset_stability": lambda: _risk_control_score(risk_score),
+            "debt_guarantee_control": lambda: _combined_stability_score(product_item, "loss_avoidance", "shared_asset_boundary"),
+            "family_asset_boundary": lambda: _combined_stability_score(product_item, "shared_asset_boundary", "ownership_clarity"),
+            "contract_stability": lambda: _contract_name_stability_score(product_item),
+            "receivables_recovery": lambda: _feature_score_strongest(product_item, ("ownership_clarity", "deal_selection", "reward_claim_strength"), fallback_score=opportunity),
+            "business_expansion": lambda: _feature_score(product_item, "business_expansion"),
+            "financial_defense": lambda: _combined_stability_score(product_item, "spending_control", "loss_avoidance"),
+            "late_life_wealth_growth": lambda: _feature_score_strongest(product_item, ("late_life_money_growth", "asset_retention", "practical_planning"), fallback_score=probability),
+            "money_standard": lambda: _feature_score_strongest(product_item, ("money_attitude", "deal_selection", "decision_consistency"), fallback_score=probability),
+            "money_peak_year": lambda: _feature_score_strongest(product_item, ("money_potential", "income_expansion", "asset_retention", "business_expansion"), fallback_score=opportunity),
+            "money_caution_year": lambda: _risk_control_score(risk_score),
+        }
+    elif domain == "career":
+        mapping = {
+            "career_fit": lambda: _feature_score(product_item, "career_achievement", fallback_score=probability),
+            "career_field": lambda: _feature_score(product_item, "organization_adaptability", fallback_score=probability),
+            "career_achievement": lambda: _feature_score(product_item, "career_achievement", fallback_score=probability),
+            "recognition": lambda: _feature_score(product_item, "reputation_maintenance", fallback_score=opportunity),
+            "promotion_title_readiness": lambda: _feature_score_strongest(product_item, ("promotion_visibility", "honor_recognition", "role_authority_alignment"), fallback_score=opportunity),
+            "social_ascent": lambda: _feature_score_strongest(product_item, ("social_success_potential", "leadership_potential", "honor_recognition"), fallback_score=opportunity),
+            "authority_balance": lambda: _risk_control_score(risk_score),
+            "responsibility_authority_balance": lambda: _feature_score_strongest(product_item, ("role_authority_alignment", "responsibility_capacity", "boundary_management"), fallback_score=probability),
+            "compensation_negotiation": lambda: _feature_score_strongest(product_item, ("reward_claim_strength", "deal_selection", "role_authority_alignment"), fallback_score=opportunity),
+            "expertise": lambda: _feature_score(product_item, "academic_expertise"),
+            "organization_fit": lambda: _feature_score(product_item, "organization_adaptability"),
+            "affiliation_transition": lambda: _feature_score_strongest(product_item, ("change_adaptability", "self_direction", "organization_adaptability"), fallback_score=opportunity),
+            "independent_work": lambda: _feature_score(product_item, "business_expansion", fallback_score=opportunity),
+            "misfit_work": lambda: _risk_control_score(risk_score),
+            "career_transition_year": lambda: _feature_score(product_item, "change_adaptability", fallback_score=opportunity),
+        }
+    elif domain == "love":
+        mapping = {
+            "attraction_standard": lambda: _feature_score(product_item, "interpersonal_influence", fallback_score=opportunity),
+            "partner_selection": lambda: _feature_score_strongest(product_item, ("attraction_selectivity", "spouse_match_quality", "decision_consistency"), fallback_score=probability),
+            "partner_trust_filter": lambda: _feature_score_strongest(product_item, ("boundary_management", "misunderstanding_prevention", "decision_consistency"), fallback_score=probability),
+            "relationship_opening": lambda: _feature_score(product_item, "interpersonal_influence", fallback_score=opportunity),
+            "relationship_progress": lambda: _feature_score(product_item, "relationship_stability", fallback_score=probability),
+            "relationship_agency": lambda: _feature_score_strongest(product_item, ("self_direction", "boundary_management", "decision_consistency"), fallback_score=probability),
+            "relationship_tempo_control": lambda: _feature_score_strongest(product_item, ("emotional_alignment", "boundary_management", "relationship_progression"), fallback_score=probability),
+            "expression": lambda: _feature_score(product_item, "communication_expression"),
+            "affection_receptivity": lambda: _feature_score_strongest(product_item, ("affection_receptivity", "emotional_alignment", "conflict_recovery"), fallback_score=probability),
+            "stability": lambda: _feature_score_strongest(product_item, ("relationship_stability", "conflict_recovery", "misunderstanding_prevention", "emotional_alignment"), fallback_score=probability),
+            "contact_distance_stability": lambda: _feature_score_strongest(product_item, ("boundary_management", "relationship_stability", "communication_expression"), fallback_score=probability),
+            "misunderstanding": lambda: _feature_score(product_item, "boundary_management"),
+            "conflict_source": lambda: _risk_control_score(risk_score),
+            "external_interference_control": lambda: _feature_score_strongest(product_item, ("boundary_management", "misunderstanding_prevention", "conflict_recovery"), fallback_score=probability),
+            "reunion_chance": lambda: _feature_score(product_item, "conflict_recovery"),
+            "marriage_bridge": lambda: _feature_score(product_item, "marriage_stability", fallback_score=probability),
+        }
+    elif domain == "marriage":
+        mapping = {
+            "marriage_tendency": lambda: _feature_score(product_item, "marriage_stability", fallback_score=probability),
+            "spouse_type": lambda: _feature_score_strongest(product_item, ("spouse_match_quality", "spouse_support_benefit"), fallback_score=probability),
+            "marriage_timing": lambda: _feature_score(product_item, "change_adaptability", fallback_score=opportunity),
+            "marriage_realization": lambda: _feature_score_strongest(product_item, ("marriage_timing_readiness", "practical_planning", "decision_consistency"), fallback_score=probability),
+            "life_stability": lambda: _feature_score(product_item, "practical_planning"),
+            "household_management": lambda: _feature_score_strongest(product_item, ("household_stability", "household_finance_alignment", "family_responsibility"), fallback_score=probability),
+            "housing_life_design": lambda: _feature_score_strongest(product_item, ("household_stability", "practical_planning", "asset_retention"), fallback_score=probability),
+            "couple_finance": lambda: _feature_score(product_item, "asset_retention"),
+            "living_cost_standard": lambda: _feature_score_strongest(product_item, ("household_finance_alignment", "spending_control", "money_attitude"), fallback_score=probability),
+            "couple_conflict": lambda: _risk_control_score(risk_score),
+            "couple_conflict_repair": lambda: _feature_score_strongest(product_item, ("conflict_recovery", "marriage_crisis_management", "communication_expression"), fallback_score=probability),
+            "family_boundary": lambda: _risk_control_score(risk_score),
+            "inlaw_family_boundary": lambda: _feature_score_strongest(product_item, ("inlaw_boundary_strength", "family_responsibility", "boundary_management"), fallback_score=probability),
+            "child_rearing_responsibility": lambda: _feature_score_strongest(product_item, ("family_responsibility", "household_stability", "responsibility_capacity"), fallback_score=probability),
+            "spouse_fortune": lambda: _feature_score(product_item, "relationship_stability", fallback_score=probability),
+            "marriage_crisis_tolerance": lambda: _feature_score_strongest(product_item, ("marriage_crisis_management", "conflict_recovery", "family_responsibility"), fallback_score=probability),
+            "marriage_continuity": lambda: _feature_score(product_item, "decision_consistency"),
+        }
+    else:
+        mapping = {}
+    scorer = mapping.get(key)
+    if not scorer:
+        return None
+    return _bounded_metric_score(scorer())
+
+
+def _judgment_axes_for_card(
+    card: dict[str, Any],
+    product_item: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    axes = [dict(axis) for axis in _raw_judgment_axes_for_card(card, product_item)]
+    domain = _domain_key(card)
+    probability = _engine_score(product_item, "event_probability_score")
+    opportunity = _engine_score(product_item, "opportunity_score")
+    risk_score = _engine_score(product_item, "risk_score")
+    for axis in axes:
+        key = str(axis.get("key") or "")
+        score = _judgment_axis_score(
+            domain,
+            key,
+            product_item,
+            probability=probability,
+            opportunity=opportunity,
+            risk_score=risk_score,
+        )
+        if score is None:
+            score = _score_from_axis_value(axis.get("value"))
+        if isinstance(score, int):
+            axis["score"] = score
+    return axes
 
 
 def _action_for_card(card: dict[str, Any], product_item: dict[str, Any] | None = None) -> str:
