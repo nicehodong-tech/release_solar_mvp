@@ -10684,7 +10684,8 @@ def _premium_section_profile(section: dict[str, Any]) -> dict[str, Any]:
 
 def _attach_premium_category_contract(section: dict[str, Any]) -> dict[str, Any]:
     source_contract = section.get("category_contract") if isinstance(section.get("category_contract"), dict) else {}
-    base_contract = premium_category_contract(_domain_key(section))
+    domain_key = _domain_key(section)
+    base_contract = premium_category_contract(domain_key)
     contract = dict(base_contract)
     if source_contract:
         contract.update(source_contract)
@@ -10739,33 +10740,34 @@ def _attach_premium_category_contract(section: dict[str, Any]) -> dict[str, Any]
         for item in synced_topic_items
         if str(item.get("title") or item.get("label") or "").strip()
     }
-    for unit in reading_units:
-        if not isinstance(unit, dict):
-            continue
-        title = str(unit.get("display_label") or unit.get("label") or "").strip()
-        if not title:
-            continue
-        key = _compact_match_key(title)
-        if key and key in topic_keys:
-            continue
-        result = str(unit.get("result") or unit.get("focus") or "").strip()
-        if not result and not str(unit.get("value") or "").strip():
-            continue
-        topic_keys.add(key)
-        synced_topic_items.append(
-            {
-                "title": title,
-                "body": result,
-                "definition": str(unit.get("focus") or result),
-                "value": str(unit.get("value") or "").strip(),
-                "score": unit.get("score"),
-                "tone": str(unit.get("tone") or "neutral"),
-                "evidence": str(unit.get("evidence") or ""),
-            }
-        )
+    if domain_key != "timing":
+        for unit in reading_units:
+            if not isinstance(unit, dict):
+                continue
+            title = str(unit.get("display_label") or unit.get("label") or "").strip()
+            if not title:
+                continue
+            key = _compact_match_key(title)
+            if key and key in topic_keys:
+                continue
+            result = str(unit.get("result") or unit.get("focus") or "").strip()
+            if not result and not str(unit.get("value") or "").strip():
+                continue
+            topic_keys.add(key)
+            synced_topic_items.append(
+                {
+                    "title": title,
+                    "body": result,
+                    "definition": str(unit.get("focus") or result),
+                    "value": str(unit.get("value") or "").strip(),
+                    "score": unit.get("score"),
+                    "tone": str(unit.get("tone") or "neutral"),
+                    "evidence": str(unit.get("evidence") or ""),
+                }
+            )
     exposed = {
         "schema_version": contract.get("schema_version") or "",
-        "domain": contract.get("domain") or _domain_key(section),
+        "domain": contract.get("domain") or domain_key,
         "section_label": contract.get("section_label") or "",
         "guide_label": contract.get("guide_label") or "",
         "guide_body": contract.get("guide_body") or "",
