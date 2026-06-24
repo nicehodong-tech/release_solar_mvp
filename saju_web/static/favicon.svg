@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AI 사주 이현">
+  <rect width="64" height="64" rx="14" fill="#f7f6f1"/>
+  <circle cx="32" cy="32" r="23" fill="#202321"/>
+  <path d="M18 41c7-13 18-18 30-19" fill="none" stroke="#f7f6f1" stroke-width="2.6" stroke-linecap="round" opacity=".88"/>
+  <path d="M23 29c7 2 14 2 21-2" fill="none" stroke="#f7f6f1" stroke-width="2" stroke-linecap="round" opacity=".78"/>
+  <text x="32" y="40" text-anchor="middle" font-family="Noto Serif KR, Noto Serif CJK KR, serif" font-size="26" font-weight="800" fill="#f7f6f1">현</text>
+  <rect x="45" y="43" width="10" height="10" rx="2" fill="#9b3b35"/>
+</svg>
