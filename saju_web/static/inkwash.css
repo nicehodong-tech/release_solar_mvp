@@ -5217,3 +5217,80 @@ body[data-view="premium"] .premium-life-stage-summary span {
     margin-left: -4px;
   }
 }
+
+/* Mobile metric width pass v174
+   지표 카드는 제목, 수준 배지, 막대, 설명이 함께 들어가므로
+   모바일에서는 일반 본문보다 조금 더 넓은 읽기 폭을 준다. */
+@media (max-width: 680px) {
+  body[data-view="premium"] .premium-visual-metric-board,
+  body[data-view="premium"] .premium-profile-snapshot,
+  body[data-view="premium"] .premium-core-dossier-metrics,
+  body[data-view="premium"] .premium-domain-dossier-metrics,
+  body[data-view="premium"] .premium-life-dossier-metrics,
+  body[data-view="premium"] .premium-metric-list,
+  body[data-view="premium"] .premium-life-stage-bars,
+  body[data-view="premium"] .premium-life-scale-list {
+    width: calc(100% + 28px);
+    max-width: calc(100% + 28px);
+    margin-right: -14px;
+    margin-left: -14px;
+    transform: none;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-columns,
+  body[data-view="premium"] .premium-profile-matrix-grid {
+    width: 100%;
+    max-width: 100%;
+    margin-right: 0;
+    margin-left: 0;
+    transform: none;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-columns {
+    grid-template-columns: 1fr;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-board {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-card,
+  body[data-view="premium"] .premium-profile-snapshot-card,
+  body[data-view="premium"] .premium-domain-dossier-metrics article,
+  body[data-view="premium"] .premium-life-dossier-metrics section,
+  body[data-view="premium"] .premium-metric-row {
+    padding-right: 13px;
+    padding-left: 13px;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-card header {
+    grid-template-columns: minmax(0, 1fr) minmax(58px, auto);
+    gap: 8px;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-level {
+    min-width: 58px;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-level b {
+    padding-right: 7px;
+    padding-left: 7px;
+  }
+}
+
+@media (max-width: 380px) {
+  body[data-view="premium"] .premium-visual-metric-board,
+  body[data-view="premium"] .premium-profile-snapshot,
+  body[data-view="premium"] .premium-core-dossier-metrics,
+  body[data-view="premium"] .premium-domain-dossier-metrics,
+  body[data-view="premium"] .premium-life-dossier-metrics,
+  body[data-view="premium"] .premium-metric-list,
+  body[data-view="premium"] .premium-life-stage-bars,
+  body[data-view="premium"] .premium-life-scale-list {
+    width: calc(100% + 32px);
+    max-width: calc(100% + 32px);
+    margin-right: -16px;
+    margin-left: -16px;
+  }
+}
