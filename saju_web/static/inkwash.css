@@ -5294,3 +5294,52 @@ body[data-view="premium"] .premium-life-stage-summary span {
     margin-left: -16px;
   }
 }
+
+/* Mobile metric single-column pass v175
+   실제 모바일에서는 지표 카드가 두 열로 보이면 제목과 본문이 단어 단위로 끊긴다.
+   지표 섹션은 모바일에서 한 줄에 한 카드씩 읽히도록 고정한다. */
+@media (max-width: 760px) {
+  body[data-view="premium"] .premium-visual-metric-board {
+    width: calc(100% + 32px);
+    max-width: calc(100% + 32px);
+    margin-right: -16px;
+    margin-left: -16px;
+    padding-right: 14px;
+    padding-left: 14px;
+    box-sizing: border-box;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-columns {
+    display: grid;
+    grid-template-columns: 1fr !important;
+    width: 100%;
+    max-width: 100%;
+    gap: 18px;
+    margin: 0;
+    transform: none;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-column {
+    width: 100%;
+    min-width: 0;
+    gap: 10px;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-card {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 14px 15px;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-card header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+  }
+
+  body[data-view="premium"] .premium-visual-metric-card strong {
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+}
