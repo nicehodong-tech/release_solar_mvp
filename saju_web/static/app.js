@@ -1678,9 +1678,14 @@ function renderPremiumMobileHero(report, sections) {
       <div class="premium-mobile-hero-meta" aria-label="분석 기준">
         <span>${escapeHtml(premiumRequestLine())}</span>
       </div>
-      <a class="service-blog-button premium-blog-button is-top" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
-        사주명리 공간 : 이현 블로그
-      </a>
+      <div class="premium-hero-action-row">
+        <a class="service-blog-button premium-blog-button is-top" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
+          사주명리 공간 : 이현 블로그
+        </a>
+        <button class="service-blog-button premium-blog-button premium-copy-button is-top" type="button" data-copy-report="premium">
+          결과 복사하기
+        </button>
+      </div>
     </section>
   `;
 }
@@ -6688,6 +6693,7 @@ function renderPremiumResultFooter() {
         <a class="service-blog-button premium-blog-button premium-footer-action is-bottom" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
           사주명리 공간 : 이현 블로그
         </a>
+        <button class="premium-footer-action premium-copy-button is-bottom" type="button" data-copy-report="premium">결과 복사하기</button>
       </div>
     </section>
   `;
@@ -9774,10 +9780,88 @@ function renderJudgmentPayload(payload) {
   clearStatus();
 }
 
+function resultCopyText() {
+  const source = panels.premium || views.premium;
+  const rawText = source?.innerText || "";
+  const excludedLines = new Set([
+    "결과 복사하기",
+    "사주명리 공간 : 이현 블로그",
+    "출생 정보 수정",
+    "정보 수정",
+    "명식표 보기",
+  ]);
+  const cleaned = rawText
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .filter((line) => !excludedLines.has(line))
+    .filter((line, index, lines) => index === 0 || line !== lines[index - 1])
+    .join("\n");
+  const header = premiumRequestLine();
+  return [header ? `입력 정보: ${header}` : "", cleaned].filter(Boolean).join("\n\n");
+}
+
+async function copyReportText() {
+  const text = resultCopyText();
+  if (!text.trim()) {
+    showCopyToast("복사할 분석 결과가 없습니다.");
+    return;
+  }
+  try {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      fallbackCopyText(text);
+    }
+    showCopyToast("복사가 완료되었습니다");
+  } catch (_error) {
+    fallbackCopyText(text);
+    showCopyToast("복사가 완료되었습니다");
+  }
+}
+
+function fallbackCopyText(text) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.inset = "auto auto 0 0";
+  textarea.style.width = "1px";
+  textarea.style.height = "1px";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
+function showCopyToast(message) {
+  const existing = document.querySelector(".copy-toast");
+  existing?.remove();
+  const toast = document.createElement("div");
+  toast.className = "copy-toast";
+  toast.setAttribute("role", "status");
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  window.setTimeout(() => {
+    toast.classList.add("is-visible");
+  }, 20);
+  window.setTimeout(() => {
+    toast.classList.remove("is-visible");
+    window.setTimeout(() => toast.remove(), 220);
+  }, 1800);
+}
+
 function handleSurfaceAction(event) {
   const button = event.target.closest("button");
   if (!button) {
     return false;
+  }
+  if (button.dataset.copyReport) {
+    event.preventDefault();
+    copyReportText();
+    return true;
   }
   if (button.dataset.scrollTarget) {
     event.preventDefault();
