@@ -108,13 +108,19 @@ def _record(
     )
 
 
+def _birth_time_unknown(chart: BirthChartResult) -> bool:
+    return bool(getattr(chart, "calculation_trace", {}).get("birth_time_unknown"))
+
+
 def _natal_positions(chart: BirthChartResult) -> dict[str, str]:
-    return {
+    positions = {
         "year": chart.year_pillar.branch_key,
         "month": chart.month_pillar.branch_key,
         "day": chart.day_pillar.branch_key,
-        "hour": chart.hour_pillar.branch_key,
     }
+    if not _birth_time_unknown(chart):
+        positions["hour"] = chart.hour_pillar.branch_key
+    return positions
 
 
 def find_natal_interactions(chart: BirthChartResult) -> list[BranchInteraction]:

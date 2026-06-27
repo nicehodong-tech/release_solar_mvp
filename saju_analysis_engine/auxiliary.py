@@ -413,13 +413,19 @@ def growth_stage(day_stem_key: str, branch_key: str) -> str:
     return GROWTH_LABELS[branch_order.index(branch_key)]
 
 
+def _birth_time_unknown(chart: BirthChartResult) -> bool:
+    return bool(getattr(chart, "calculation_trace", {}).get("birth_time_unknown"))
+
+
 def _pillars(chart: BirthChartResult) -> dict[str, str]:
-    return {
+    pillars = {
         "year": chart.year_pillar.branch_key,
         "month": chart.month_pillar.branch_key,
         "day": chart.day_pillar.branch_key,
-        "hour": chart.hour_pillar.branch_key,
     }
+    if not _birth_time_unknown(chart):
+        pillars["hour"] = chart.hour_pillar.branch_key
+    return pillars
 
 
 def _group_and_targets(reference_branch_key: str) -> tuple[str, dict[str, str]]:
@@ -439,21 +445,25 @@ def _sal_by_position(positions: dict[str, str], sal_targets: dict[str, str]) -> 
 
 
 def _stem_positions(chart: BirthChartResult) -> dict[str, str]:
-    return {
+    positions = {
         "year": chart.year_pillar.stem_key,
         "month": chart.month_pillar.stem_key,
         "day": chart.day_pillar.stem_key,
-        "hour": chart.hour_pillar.stem_key,
     }
+    if not _birth_time_unknown(chart):
+        positions["hour"] = chart.hour_pillar.stem_key
+    return positions
 
 
 def _pillar_labels(chart: BirthChartResult) -> dict[str, str]:
-    return {
+    labels = {
         "year": chart.year_pillar.label,
         "month": chart.month_pillar.label,
         "day": chart.day_pillar.label,
-        "hour": chart.hour_pillar.label,
     }
+    if not _birth_time_unknown(chart):
+        labels["hour"] = chart.hour_pillar.label
+    return labels
 
 
 def _domains_for_positions(positions: list[str], primary_domain: str) -> list[str]:

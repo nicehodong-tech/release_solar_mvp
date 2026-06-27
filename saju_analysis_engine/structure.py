@@ -71,13 +71,19 @@ POSITION_TEN_GOD_CONTEXTS: dict[str, dict[str, object]] = {
 }
 
 
+def _birth_time_unknown(chart: BirthChartResult) -> bool:
+    return bool(getattr(chart, "calculation_trace", {}).get("birth_time_unknown"))
+
+
 def _pillars(chart: BirthChartResult):
-    return {
+    pillars = {
         "year": chart.year_pillar,
         "month": chart.month_pillar,
         "day": chart.day_pillar,
-        "hour": chart.hour_pillar,
     }
+    if not _birth_time_unknown(chart):
+        pillars["hour"] = chart.hour_pillar
+    return pillars
 
 
 def _position_signals(chart: BirthChartResult) -> dict[str, PositionSignal]:
@@ -245,7 +251,7 @@ def build_chart_structure(chart: BirthChartResult) -> ChartStructure:
         warnings.append("daeun_boundary_sensitive")
 
     structure = ChartStructure(
-        four_pillars=chart.four_pillars,
+        four_pillars={position: pillar.label for position, pillar in _pillars(chart).items()},
         day_master_stem=chart.day_pillar.stem_key,
         day_master_element=element_profile.day_master_element,
         day_master_yin_yang=STEM_METADATA[chart.day_pillar.stem_key]["yin_yang"],

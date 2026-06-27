@@ -46,13 +46,19 @@ def hidden_ten_gods_for_branch(day_stem_key: str, branch_key: str) -> list[str]:
     return [ten_god_for(day_stem_key, stem_key) for stem_key, _ in BRANCH_HIDDEN_STEMS[branch_key]]
 
 
+def _birth_time_unknown(chart: BirthChartResult) -> bool:
+    return bool(getattr(chart, "calculation_trace", {}).get("birth_time_unknown"))
+
+
 def _pillars(chart: BirthChartResult):
-    return {
+    pillars = {
         "year": chart.year_pillar,
         "month": chart.month_pillar,
         "day": chart.day_pillar,
-        "hour": chart.hour_pillar,
     }
+    if not _birth_time_unknown(chart):
+        pillars["hour"] = chart.hour_pillar
+    return pillars
 
 
 def build_ten_god_profile(chart: BirthChartResult) -> TenGodProfile:

@@ -120,6 +120,8 @@ PILLAR_DISPLAY_ORDER = (
 FIXED_SERVICE_CITY = "서울"
 FIXED_SERVICE_CITY_LABEL = "서울 기준"
 HOUR_RULE_LABEL = "자시 23:30~01:30 기준"
+UNKNOWN_BIRTH_TIME_VALUES = {"unknown", "unknown_time", "time_unknown", "none", "모름"}
+UNKNOWN_BIRTH_TIME_REPRESENTATIVE = (12, 30)
 BRANCH_HOUR_REPRESENTATIVE_TIMES: dict[str, tuple[int, int]] = {
     "ja": (0, 30),
     "chuk": (2, 30),
@@ -134,6 +136,10 @@ BRANCH_HOUR_REPRESENTATIVE_TIMES: dict[str, tuple[int, int]] = {
     "sul": (20, 30),
     "hae": (22, 30),
 }
+
+
+def _is_unknown_birth_time(value: str) -> bool:
+    return value.strip().lower() in UNKNOWN_BIRTH_TIME_VALUES
 
 STEM_HANJA_BY_KEY: dict[str, str] = {
     "gap": "甲",
@@ -538,6 +544,8 @@ def _parse_birth_date(value: str) -> tuple[int, int, int]:
 
 def _parse_birth_time(value: str) -> tuple[int, int]:
     branch_value = value.strip().lower()
+    if branch_value in UNKNOWN_BIRTH_TIME_VALUES:
+        return UNKNOWN_BIRTH_TIME_REPRESENTATIVE
     if branch_value in BRANCH_HOUR_REPRESENTATIVE_TIMES:
         return BRANCH_HOUR_REPRESENTATIVE_TIMES[branch_value]
     parts = value.split(":")
@@ -563,7 +571,7 @@ def _parse_target_year(payload: dict[str, Any]) -> int:
     return target_year
 
 
-def _pillar_rows(chart: BirthChartResult) -> list[dict[str, Any]]:
+def _pillar_rows(chart: BirthChartResult, *, birth_time_known: bool = True) -> list[dict[str, Any]]:
     pillar_map = {
         "year": chart.year_pillar,
         "month": chart.month_pillar,
@@ -572,6 +580,8 @@ def _pillar_rows(chart: BirthChartResult) -> list[dict[str, Any]]:
     }
     rows: list[dict[str, Any]] = []
     for key, label in PILLAR_DISPLAY_ORDER:
+        if key == "hour" and not birth_time_known:
+            continue
         pillar = pillar_map[key]
         rows.append(
             {
@@ -675,6 +685,9 @@ def _analysis_context_cached(
     }
     birth_input = _build_birth_input(payload)
     chart = build_birth_chart(birth_input)
+    if _is_unknown_birth_time(birth_time):
+        chart.calculation_trace["birth_time_unknown"] = True
+        chart.calculation_warnings.append("birth_time_unknown")
     birth_year = int(str(chart.normalized_birth_datetime)[:4])
     product_target_years = _timing_target_years(birth_year)
     analysis = analyze_chart(
@@ -730,6 +743,7 @@ def _chart_summary(
     target_year: int,
     birth_year: int,
     timing_flow_signals: list[Any] | None = None,
+    birth_time_known: bool = True,
 ) -> dict[str, Any]:
     display_start_age = _daeun_start_display_age(chart.daeun_start_age)
     current_order = _current_daeun_order(display_start_age, target_year, birth_year)
@@ -740,8 +754,12 @@ def _chart_summary(
                 current_daeun = row
                 break
     return {
-        "fourPillars": dict(chart.four_pillars),
-        "pillarRows": _pillar_rows(chart),
+        "fourPillars": {
+            key: value
+            for key, value in dict(chart.four_pillars).items()
+            if birth_time_known or key != "hour"
+        },
+        "pillarRows": _pillar_rows(chart, birth_time_known=birth_time_known),
         "trueSolarDatetime": chart.true_solar_datetime,
         "normalizedBirthDatetime": chart.normalized_birth_datetime,
         "birthLocation": dict(chart.birth_location),
@@ -755,8 +773,9 @@ def _chart_summary(
         "timingAnnualRows": _timing_annual_rows(timing_flow_signals or [], birth_year),
         "basis": {
             "locationLabel": FIXED_SERVICE_CITY_LABEL,
-            "hourRuleLabel": HOUR_RULE_LABEL,
+            "hourRuleLabel": HOUR_RULE_LABEL if birth_time_known else "생시 미상",
             "koreanAge": target_year - birth_year + 1,
+            "birthTimeKnown": birth_time_known,
         },
         "boundarySensitive": chart.boundary_sensitive,
         "daeunBoundarySensitive": chart.daeun_boundary_sensitive,
@@ -2399,6 +2418,65 @@ def _contract_name_stability_score(product_item: dict[str, Any] | None) -> int |
     return _combined_stability_score(product_item, "deal_selection", "loss_avoidance")
 
 
+def _weighted_feature_score(
+    product_item: dict[str, Any] | None,
+    weights: tuple[tuple[str, float], ...],
+    *,
+    cap: int | None = None,
+) -> int | None:
+    total = 0.0
+    weight_total = 0.0
+    for key, weight in weights:
+        score = _feature_score(product_item, key)
+        if not isinstance(score, int) or weight <= 0:
+            continue
+        total += score * weight
+        weight_total += weight
+    if weight_total <= 0:
+        return None
+    return _bounded_metric_score(total / weight_total, cap=cap)
+
+
+def _positive_control_feature_score(
+    product_item: dict[str, Any] | None,
+    weights: tuple[tuple[str, float], ...],
+    *,
+    risk_score: int | None,
+    risk_weight: float = 0.28,
+    cap: int | None = None,
+) -> int | None:
+    base = _weighted_feature_score(product_item, weights)
+    if base is None:
+        return None
+    value = float(base)
+    if isinstance(risk_score, int):
+        value -= max(0, risk_score - 60) * risk_weight
+        value += max(0, 48 - risk_score) * 0.12
+    return _bounded_metric_score(value, cap=cap)
+
+
+def _balanced_feature_score(
+    product_item: dict[str, Any] | None,
+    weights: tuple[tuple[str, float], ...],
+    *,
+    support_keys: tuple[str, ...] = (),
+    cap: int | None = None,
+) -> int | None:
+    base = _weighted_feature_score(product_item, weights)
+    if base is None:
+        return None
+    support_scores = [
+        score
+        for score in (_feature_score(product_item, key) for key in support_keys)
+        if isinstance(score, int)
+    ]
+    if support_scores:
+        weakest = min(support_scores)
+        if weakest < 50:
+            base -= round((50 - weakest) * 0.24)
+    return _bounded_metric_score(base, cap=cap)
+
+
 def _score_from_axis_value(value: Any) -> int | None:
     text = str(value or "").strip()
     if not text or text == "확인 필요":
@@ -3277,77 +3355,422 @@ def _judgment_axis_score(
 ) -> int | None:
     if domain == "money":
         mapping = {
-            "wealth_formation": lambda: _feature_score_blended(product_item, "money_potential", probability, cap=79),
-            "wealth_scale": lambda: _feature_score_strongest(product_item, ("money_potential", "business_expansion", "asset_retention"), fallback_score=probability, cap=79),
-            "income_creation": lambda: _feature_score_strongest(product_item, ("income_expansion", "liquidity_stability", "reward_claim_strength"), fallback_score=opportunity, cap=79),
-            "skill_income": lambda: _feature_score_average(product_item, ("business_expansion", "reward_claim_strength"), fallback_score=opportunity, cap=79),
-            "performance_reward": lambda: _feature_score_blended(product_item, "reward_claim_strength", opportunity, cap=79),
-            "asset_retention": lambda: _feature_score_strongest(product_item, ("asset_retention", "spending_control", "loss_avoidance"), fallback_score=probability),
-            "cashflow_stability": lambda: _feature_score_strongest(product_item, ("liquidity_stability", "spending_control", "practical_planning"), fallback_score=probability),
-            "investment_trading_judgment": lambda: _feature_score_strongest(product_item, ("investment_trading_sense", "deal_selection", "loss_avoidance"), fallback_score=opportunity),
-            "shared_asset_stability": lambda: _risk_control_score(risk_score),
-            "debt_guarantee_control": lambda: _combined_stability_score(product_item, "loss_avoidance", "shared_asset_boundary"),
-            "family_asset_boundary": lambda: _combined_stability_score(product_item, "shared_asset_boundary", "ownership_clarity"),
-            "contract_stability": lambda: _contract_name_stability_score(product_item),
-            "receivables_recovery": lambda: _feature_score_strongest(product_item, ("ownership_clarity", "deal_selection", "reward_claim_strength"), fallback_score=opportunity),
-            "business_expansion": lambda: _feature_score(product_item, "business_expansion"),
-            "financial_defense": lambda: _combined_stability_score(product_item, "spending_control", "loss_avoidance"),
-            "late_life_wealth_growth": lambda: _feature_score_strongest(product_item, ("late_life_money_growth", "asset_retention", "practical_planning"), fallback_score=probability),
-            "money_standard": lambda: _feature_score_strongest(product_item, ("money_attitude", "deal_selection", "decision_consistency"), fallback_score=probability),
-            "money_peak_year": lambda: _feature_score_strongest(product_item, ("money_potential", "income_expansion", "asset_retention", "business_expansion"), fallback_score=opportunity),
-            "money_caution_year": lambda: _risk_control_score(risk_score),
+            "wealth_formation": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("money_potential", 0.48),
+                    ("income_expansion", 0.18),
+                    ("asset_retention", 0.22),
+                    ("ownership_clarity", 0.12),
+                ),
+                support_keys=("asset_retention", "ownership_clarity"),
+                cap=92,
+            ),
+            "wealth_scale": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("money_potential", 0.34),
+                    ("business_expansion", 0.26),
+                    ("investment_trading_sense", 0.18),
+                    ("asset_retention", 0.14),
+                    ("deal_selection", 0.08),
+                ),
+                support_keys=("asset_retention", "deal_selection"),
+                cap=94,
+            ),
+            "income_creation": lambda: _weighted_feature_score(
+                product_item,
+                (
+                    ("income_expansion", 0.42),
+                    ("liquidity_stability", 0.18),
+                    ("reward_claim_strength", 0.28),
+                    ("business_expansion", 0.12),
+                ),
+                cap=94,
+            ),
+            "skill_income": lambda: _weighted_feature_score(
+                product_item,
+                (
+                    ("business_expansion", 0.42),
+                    ("reward_claim_strength", 0.34),
+                    ("income_expansion", 0.24),
+                ),
+                cap=94,
+            ),
+            "performance_reward": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("reward_claim_strength", 0.46),
+                    ("ownership_clarity", 0.22),
+                    ("deal_selection", 0.18),
+                    ("income_expansion", 0.14),
+                ),
+                support_keys=("ownership_clarity", "deal_selection"),
+                cap=94,
+            ),
+            "asset_retention": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("asset_retention", 0.46),
+                    ("spending_control", 0.24),
+                    ("loss_avoidance", 0.20),
+                    ("ownership_clarity", 0.10),
+                ),
+                support_keys=("spending_control", "loss_avoidance"),
+                cap=94,
+            ),
+            "cashflow_stability": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("liquidity_stability", 0.42),
+                    ("spending_control", 0.24),
+                    ("practical_planning", 0.22),
+                    ("loss_avoidance", 0.12),
+                ),
+                support_keys=("spending_control", "practical_planning"),
+                cap=94,
+            ),
+            "investment_trading_judgment": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("investment_trading_sense", 0.38),
+                    ("deal_selection", 0.28),
+                    ("loss_avoidance", 0.22),
+                    ("money_attitude", 0.12),
+                ),
+                support_keys=("deal_selection", "loss_avoidance"),
+                cap=94,
+            ),
+            "shared_asset_stability": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("shared_asset_boundary", 0.42),
+                    ("ownership_clarity", 0.20),
+                    ("deal_selection", 0.16),
+                    ("loss_avoidance", 0.22),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.22,
+                cap=92,
+            ),
+            "debt_guarantee_control": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("loss_avoidance", 0.42),
+                    ("shared_asset_boundary", 0.24),
+                    ("deal_selection", 0.20),
+                    ("spending_control", 0.14),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.18,
+                cap=92,
+            ),
+            "family_asset_boundary": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("shared_asset_boundary", 0.38),
+                    ("ownership_clarity", 0.34),
+                    ("loss_avoidance", 0.16),
+                    ("money_attitude", 0.12),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.18,
+                cap=92,
+            ),
+            "contract_stability": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("deal_selection", 0.36),
+                    ("ownership_clarity", 0.26),
+                    ("loss_avoidance", 0.24),
+                    ("shared_asset_boundary", 0.14),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.20,
+                cap=92,
+            ),
+            "receivables_recovery": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("ownership_clarity", 0.34),
+                    ("deal_selection", 0.28),
+                    ("reward_claim_strength", 0.26),
+                    ("loss_avoidance", 0.12),
+                ),
+                support_keys=("ownership_clarity", "deal_selection"),
+                cap=94,
+            ),
+            "business_expansion": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("business_expansion", 0.50),
+                    ("investment_trading_sense", 0.18),
+                    ("money_potential", 0.18),
+                    ("deal_selection", 0.14),
+                ),
+                support_keys=("deal_selection",),
+                cap=94,
+            ),
+            "financial_defense": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("loss_avoidance", 0.42),
+                    ("spending_control", 0.28),
+                    ("asset_retention", 0.18),
+                    ("practical_planning", 0.12),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.14,
+                cap=92,
+            ),
+            "late_life_wealth_growth": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("late_life_money_growth", 0.42),
+                    ("asset_retention", 0.26),
+                    ("practical_planning", 0.20),
+                    ("money_attitude", 0.12),
+                ),
+                support_keys=("asset_retention", "practical_planning"),
+                cap=94,
+            ),
+            "money_standard": lambda: _weighted_feature_score(
+                product_item,
+                (
+                    ("money_attitude", 0.34),
+                    ("deal_selection", 0.24),
+                    ("spending_control", 0.22),
+                    ("ownership_clarity", 0.20),
+                ),
+                cap=92,
+            ),
+            "money_peak_year": lambda: _weighted_feature_score(
+                product_item,
+                (
+                    ("money_potential", 0.30),
+                    ("income_expansion", 0.26),
+                    ("business_expansion", 0.22),
+                    ("asset_retention", 0.22),
+                ),
+                cap=94,
+            ),
+            "money_caution_year": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("loss_avoidance", 0.34),
+                    ("deal_selection", 0.26),
+                    ("shared_asset_boundary", 0.24),
+                    ("spending_control", 0.16),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.24,
+                cap=92,
+            ),
         }
     elif domain == "career":
         mapping = {
-            "career_fit": lambda: _feature_score(product_item, "career_achievement", fallback_score=probability),
-            "career_field": lambda: _feature_score(product_item, "organization_adaptability", fallback_score=probability),
+            "career_fit": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("career_achievement", 0.38),
+                    ("academic_expertise", 0.22),
+                    ("organization_adaptability", 0.22),
+                    ("role_authority_alignment", 0.18),
+                ),
+                support_keys=("academic_expertise", "organization_adaptability"),
+                cap=94,
+            ),
+            "career_field": lambda: _weighted_feature_score(
+                product_item,
+                (
+                    ("academic_expertise", 0.28),
+                    ("career_achievement", 0.26),
+                    ("self_direction", 0.18),
+                    ("business_expansion", 0.14),
+                    ("organization_adaptability", 0.14),
+                ),
+                cap=94,
+            ),
             "career_achievement": lambda: _feature_score(product_item, "career_achievement", fallback_score=probability),
             "recognition": lambda: _feature_score(product_item, "reputation_maintenance", fallback_score=opportunity),
             "promotion_title_readiness": lambda: _feature_score_strongest(product_item, ("promotion_visibility", "honor_recognition", "role_authority_alignment"), fallback_score=opportunity),
             "social_ascent": lambda: _feature_score_strongest(product_item, ("social_success_potential", "leadership_potential", "honor_recognition"), fallback_score=opportunity),
-            "authority_balance": lambda: _risk_control_score(risk_score),
+            "authority_balance": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("role_authority_alignment", 0.38),
+                    ("responsibility_capacity", 0.24),
+                    ("boundary_management", 0.22),
+                    ("organization_adaptability", 0.16),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.20,
+                cap=92,
+            ),
             "responsibility_authority_balance": lambda: _feature_score_strongest(product_item, ("role_authority_alignment", "responsibility_capacity", "boundary_management"), fallback_score=probability),
             "compensation_negotiation": lambda: _feature_score_strongest(product_item, ("reward_claim_strength", "deal_selection", "role_authority_alignment"), fallback_score=opportunity),
             "expertise": lambda: _feature_score(product_item, "academic_expertise"),
             "organization_fit": lambda: _feature_score(product_item, "organization_adaptability"),
             "affiliation_transition": lambda: _feature_score_strongest(product_item, ("change_adaptability", "self_direction", "organization_adaptability"), fallback_score=opportunity),
-            "independent_work": lambda: _feature_score(product_item, "business_expansion", fallback_score=opportunity),
-            "misfit_work": lambda: _risk_control_score(risk_score),
+            "independent_work": lambda: _weighted_feature_score(
+                product_item,
+                (
+                    ("business_expansion", 0.34),
+                    ("self_direction", 0.28),
+                    ("change_adaptability", 0.20),
+                    ("deal_selection", 0.18),
+                ),
+                cap=94,
+            ),
+            "misfit_work": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("boundary_management", 0.34),
+                    ("organization_adaptability", 0.26),
+                    ("practical_planning", 0.22),
+                    ("decision_consistency", 0.18),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.18,
+                cap=92,
+            ),
             "career_transition_year": lambda: _feature_score(product_item, "change_adaptability", fallback_score=opportunity),
         }
     elif domain == "love":
         mapping = {
-            "attraction_standard": lambda: _feature_score(product_item, "interpersonal_influence", fallback_score=opportunity),
+            "attraction_standard": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("attraction_selectivity", 0.34),
+                    ("interpersonal_influence", 0.26),
+                    ("emotional_alignment", 0.22),
+                    ("decision_consistency", 0.18),
+                ),
+                support_keys=("emotional_alignment",),
+                cap=94,
+            ),
             "partner_selection": lambda: _feature_score_strongest(product_item, ("attraction_selectivity", "spouse_match_quality", "decision_consistency"), fallback_score=probability),
             "partner_trust_filter": lambda: _feature_score_strongest(product_item, ("boundary_management", "misunderstanding_prevention", "decision_consistency"), fallback_score=probability),
-            "relationship_opening": lambda: _feature_score(product_item, "interpersonal_influence", fallback_score=opportunity),
+            "relationship_opening": lambda: _weighted_feature_score(
+                product_item,
+                (
+                    ("interpersonal_influence", 0.42),
+                    ("communication_expression", 0.24),
+                    ("relationship_progression", 0.20),
+                    ("affection_receptivity", 0.14),
+                ),
+                cap=94,
+            ),
             "relationship_progress": lambda: _feature_score(product_item, "relationship_stability", fallback_score=probability),
-            "relationship_agency": lambda: _feature_score_strongest(product_item, ("self_direction", "boundary_management", "decision_consistency"), fallback_score=probability),
+            "relationship_agency": lambda: _weighted_feature_score(
+                product_item,
+                (
+                    ("self_direction", 0.36),
+                    ("decision_consistency", 0.26),
+                    ("boundary_management", 0.24),
+                    ("emotional_alignment", 0.14),
+                ),
+                cap=94,
+            ),
             "relationship_tempo_control": lambda: _feature_score_strongest(product_item, ("emotional_alignment", "boundary_management", "relationship_progression"), fallback_score=probability),
             "expression": lambda: _feature_score(product_item, "communication_expression"),
             "affection_receptivity": lambda: _feature_score_strongest(product_item, ("affection_receptivity", "emotional_alignment", "conflict_recovery"), fallback_score=probability),
             "stability": lambda: _feature_score_strongest(product_item, ("relationship_stability", "conflict_recovery", "misunderstanding_prevention", "emotional_alignment"), fallback_score=probability),
             "contact_distance_stability": lambda: _feature_score_strongest(product_item, ("boundary_management", "relationship_stability", "communication_expression"), fallback_score=probability),
-            "misunderstanding": lambda: _feature_score(product_item, "boundary_management"),
-            "conflict_source": lambda: _risk_control_score(risk_score),
+            "misunderstanding": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("misunderstanding_prevention", 0.38),
+                    ("communication_expression", 0.26),
+                    ("emotional_alignment", 0.22),
+                    ("conflict_recovery", 0.14),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.12,
+                cap=92,
+            ),
+            "conflict_source": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("conflict_recovery", 0.32),
+                    ("boundary_management", 0.26),
+                    ("misunderstanding_prevention", 0.24),
+                    ("emotional_alignment", 0.18),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.20,
+                cap=92,
+            ),
             "external_interference_control": lambda: _feature_score_strongest(product_item, ("boundary_management", "misunderstanding_prevention", "conflict_recovery"), fallback_score=probability),
             "reunion_chance": lambda: _feature_score(product_item, "conflict_recovery"),
-            "marriage_bridge": lambda: _feature_score(product_item, "marriage_stability", fallback_score=probability),
+            "marriage_bridge": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("marriage_stability", 0.34),
+                    ("relationship_stability", 0.26),
+                    ("practical_planning", 0.22),
+                    ("decision_consistency", 0.18),
+                ),
+                support_keys=("relationship_stability", "decision_consistency"),
+                cap=94,
+            ),
         }
     elif domain == "marriage":
         mapping = {
             "marriage_tendency": lambda: _feature_score(product_item, "marriage_stability", fallback_score=probability),
             "spouse_type": lambda: _feature_score_strongest(product_item, ("spouse_match_quality", "spouse_support_benefit"), fallback_score=probability),
-            "marriage_timing": lambda: _feature_score(product_item, "change_adaptability", fallback_score=opportunity),
+            "marriage_timing": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("marriage_timing_readiness", 0.34),
+                    ("change_adaptability", 0.24),
+                    ("practical_planning", 0.24),
+                    ("decision_consistency", 0.18),
+                ),
+                support_keys=("practical_planning", "decision_consistency"),
+                cap=94,
+            ),
             "marriage_realization": lambda: _feature_score_strongest(product_item, ("marriage_timing_readiness", "practical_planning", "decision_consistency"), fallback_score=probability),
             "life_stability": lambda: _feature_score(product_item, "practical_planning"),
             "household_management": lambda: _feature_score_strongest(product_item, ("household_stability", "household_finance_alignment", "family_responsibility"), fallback_score=probability),
-            "housing_life_design": lambda: _feature_score_strongest(product_item, ("household_stability", "practical_planning", "asset_retention"), fallback_score=probability),
+            "housing_life_design": lambda: _balanced_feature_score(
+                product_item,
+                (
+                    ("household_stability", 0.36),
+                    ("asset_retention", 0.26),
+                    ("practical_planning", 0.24),
+                    ("household_finance_alignment", 0.14),
+                ),
+                support_keys=("household_stability", "asset_retention"),
+                cap=94,
+            ),
             "couple_finance": lambda: _feature_score(product_item, "asset_retention"),
             "living_cost_standard": lambda: _feature_score_strongest(product_item, ("household_finance_alignment", "spending_control", "money_attitude"), fallback_score=probability),
-            "couple_conflict": lambda: _risk_control_score(risk_score),
+            "couple_conflict": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("conflict_recovery", 0.34),
+                    ("emotional_alignment", 0.24),
+                    ("communication_expression", 0.22),
+                    ("boundary_management", 0.20),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.20,
+                cap=92,
+            ),
             "couple_conflict_repair": lambda: _feature_score_strongest(product_item, ("conflict_recovery", "marriage_crisis_management", "communication_expression"), fallback_score=probability),
-            "family_boundary": lambda: _risk_control_score(risk_score),
+            "family_boundary": lambda: _positive_control_feature_score(
+                product_item,
+                (
+                    ("family_responsibility", 0.30),
+                    ("boundary_management", 0.26),
+                    ("inlaw_boundary_strength", 0.24),
+                    ("household_stability", 0.20),
+                ),
+                risk_score=risk_score,
+                risk_weight=0.18,
+                cap=92,
+            ),
             "inlaw_family_boundary": lambda: _feature_score_strongest(product_item, ("inlaw_boundary_strength", "family_responsibility", "boundary_management"), fallback_score=probability),
             "child_rearing_responsibility": lambda: _feature_score_strongest(product_item, ("family_responsibility", "household_stability", "responsibility_capacity"), fallback_score=probability),
             "spouse_fortune": lambda: _feature_score(product_item, "relationship_stability", fallback_score=probability),
@@ -3385,6 +3808,7 @@ def _judgment_axes_for_card(
             score = _score_from_axis_value(axis.get("value"))
         if isinstance(score, int):
             axis["score"] = score
+            axis["value"] = _score_value(score)
     return axes
 
 
@@ -4027,6 +4451,44 @@ def _topic_tone_from_score(score: int) -> str:
     if score < 50:
         return "watch"
     return "neutral"
+
+
+def _sync_topic_items_with_judgment_axes(
+    items: list[dict[str, Any]],
+    judgment_axes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    axis_by_title: dict[str, dict[str, Any]] = {}
+    for axis in judgment_axes:
+        if not isinstance(axis, dict):
+            continue
+        label = str(axis.get("label") or axis.get("title") or "").strip()
+        score = axis.get("score")
+        if not label or not isinstance(score, int):
+            continue
+        axis_by_title[_compact_match_key(label)] = axis
+    if not axis_by_title:
+        return items
+    synced: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("label") or "").strip()
+        axis = axis_by_title.get(_compact_match_key(title))
+        if not axis:
+            synced.append(item)
+            continue
+        score = axis.get("score")
+        if not isinstance(score, int):
+            synced.append(item)
+            continue
+        next_item = dict(item)
+        next_item["score"] = score
+        next_item["value"] = _score_value(score)
+        next_item["tone"] = _topic_tone_from_score(score)
+        if not str(next_item.get("definition") or "").strip():
+            next_item["definition"] = str(axis.get("meaning") or axis.get("definition") or "").strip()
+        synced.append(next_item)
+    return synced
 
 
 def _align_money_topic_items(
@@ -5274,7 +5736,10 @@ def _normalize_premium_section(
     normalized["judgment_axes"] = judgment_axes
     normalized["detail_blocks"] = detail_blocks
     normalized["product_story"] = _premium_product_story_for_card(section, product_item, judgment_axes, detail_blocks)
-    normalized["topic_items"] = _premium_topic_items(_domain_key(section), product_item=product_item)
+    normalized["topic_items"] = _sync_topic_items_with_judgment_axes(
+        _premium_topic_items(_domain_key(section), product_item=product_item),
+        judgment_axes,
+    )
     normalized["feature_axes"] = list((product_item or {}).get("feature_axes") or [])
     normalized["engine_scores"] = _engine_score_payload(product_item)
     normalized["strength_score"] = _domain_strength_score(_domain_key(section), product_item)
@@ -10794,7 +11259,14 @@ def _attach_premium_category_contract(section: dict[str, Any]) -> dict[str, Any]
     }
     enriched = dict(section)
     if synced_topic_items:
-        enriched["topic_items"] = synced_topic_items
+        enriched["topic_items"] = _sync_topic_items_with_judgment_axes(
+            synced_topic_items,
+            [
+                dict(item)
+                for item in section.get("judgment_axes") or []
+                if isinstance(item, dict)
+            ],
+        )
     enriched["category_contract"] = exposed
     return enriched
 
@@ -12522,6 +12994,28 @@ def _premium_required_judgment_pool(section: dict[str, Any]) -> list[dict[str, A
     timing_decision = section.get("timing_decision_facets") if isinstance(section.get("timing_decision_facets"), dict) else {}
     output_goal_coverage = section.get("output_goal_coverage") if isinstance(section.get("output_goal_coverage"), dict) else {}
     coverage_domains = output_goal_coverage.get("domains") if isinstance(output_goal_coverage.get("domains"), dict) else {}
+    for axis in section.get("judgment_axes") or []:
+        if not isinstance(axis, dict):
+            continue
+        label = str(axis.get("label") or axis.get("title") or "").strip()
+        if not label:
+            continue
+        score = axis.get("score")
+        if not isinstance(score, int):
+            score = _score_from_axis_value(axis.get("value"))
+        tone = "strong" if isinstance(score, int) and score >= 70 else "watch" if isinstance(score, int) and score < 50 else "neutral"
+        pool.append(
+            {
+                "source": "judgment_axis",
+                "key": str(axis.get("key") or "").strip(),
+                "label": label,
+                "score": score,
+                "tone": tone,
+                "body": str(axis.get("meaning") or axis.get("definition") or axis.get("value") or "").strip(),
+                "value": str(axis.get("value") or "").strip(),
+                "source_label": label,
+            }
+        )
     facet_domains = [_domain_key(section)]
     if facet_domains[0] == "love" and "결혼" in str(section.get("heading") or ""):
         facet_domains.append("marriage")
@@ -12727,13 +13221,25 @@ def _premium_required_match_item(
 ) -> dict[str, Any] | None:
     domain = str(required.get("_judgment_domain") or _domain_key(section))
     title = str(required.get("title") or "").strip()
+    title_key = _compact_match_key(title)
+    exact_axis_match = next(
+        (
+            item
+            for item in pool
+            if str(item.get("source") or "") == "judgment_axis"
+            and title_key
+            and _compact_match_key(str(item.get("label") or "")) == title_key
+        ),
+        None,
+    )
+    if exact_axis_match:
+        return exact_axis_match
     timing_match = _premium_required_best_timing_event(title, pool)
     if timing_match:
         return timing_match
     age_window = _premium_required_age_window(title)
     preferred = PREMIUM_REQUIRED_JUDGMENT_MATCH_LABELS.get(domain, {}).get(title, ())
     preferred_keys = [_compact_match_key(label) for label in preferred if label]
-    title_key = _compact_match_key(title)
     best: tuple[int, dict[str, Any] | None] = (0, None)
     for item in pool:
         label = str(item.get("label") or "")
@@ -12747,6 +13253,13 @@ def _premium_required_match_item(
             score += 45
         if str(item.get("required_conclusion") or "") == title:
             score += 140
+        if str(item.get("source") or "") == "judgment_axis":
+            if str(item.get("key") or "") == str(required.get("key") or "") or (_compact_match_key(label) == title_key and title_key):
+                score += 320
+            elif any(key and key in haystack for key in preferred_keys) or (title_key and title_key in haystack):
+                score += 230
+            else:
+                score -= 60
         if str(item.get("source") or "") == "output_goal_coverage":
             score += 130
         if age_window and str(item.get("source_type") or "") == "timing_event":
@@ -13818,14 +14331,16 @@ def _premium_required_judgment_cards(section: dict[str, Any]) -> list[dict[str, 
             continue
         judgment_domain = str(required.get("_judgment_domain") or domain)
         matched = _premium_required_match_item(section, required, pool)
-        if title in PREMIUM_REQUIRED_WATCH_TITLES:
+        matched_from_axis = str((matched or {}).get("source") or "") == "judgment_axis"
+        if title in PREMIUM_REQUIRED_WATCH_TITLES and not matched_from_axis:
             watch_matched = _premium_required_watch_match(pool)
             if watch_matched:
                 matched = watch_matched
+                matched_from_axis = str((matched or {}).get("source") or "") == "judgment_axis"
         matched_score = (matched or {}).get("score")
         score = max(0, min(100, int(round(matched_score)))) if isinstance(matched_score, (int, float)) else None
         matched_tone = str((matched or {}).get("tone") or "")
-        forced_watch = title in PREMIUM_REQUIRED_WATCH_TITLES
+        forced_watch = title in PREMIUM_REQUIRED_WATCH_TITLES and not matched_from_axis
         tone = "watch" if forced_watch or matched_tone in {"watch", "risk"} or _premium_required_grade(score, tone=matched_tone) == "주의" else "strong" if isinstance(score, int) and score >= 70 else "neutral"
         grade = "주의" if forced_watch else _premium_required_grade(score, tone=tone)
         cards.append(
@@ -16487,6 +17002,7 @@ def build_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
     target_year = _parse_target_year(payload)
     birth_date = _as_text(payload, "birthDate")
     birth_time = _as_text(payload, "birthTime")
+    birth_time_known = not _is_unknown_birth_time(birth_time)
     gender = _as_text(payload, "gender", "unknown") or "unknown"
     calendar_type = _as_text(payload, "calendarType", _as_text(payload, "calendar", "solar")) or "solar"
     leap_lunar_month = bool(payload.get("leapLunarMonth", False))
@@ -16538,7 +17054,13 @@ def build_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
             life_feature_summary.get("output_goal_coverage"),
             life_feature_summary["timing_decision_facets"],
         )
-    chart_payload = _chart_summary(chart, target_year, birth_year, timing_flow_signals)
+    chart_payload = _chart_summary(
+        chart,
+        target_year,
+        birth_year,
+        timing_flow_signals,
+        birth_time_known=birth_time_known,
+    )
     report_payload = _prepare_judgment_card_payload(
         _product_report_seed(product_payload),
         chart_payload,
@@ -16554,6 +17076,7 @@ def build_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "tier": tier,
             "targetYear": target_year,
             "relationshipStatus": relationship_status,
+            "birthTimeKnown": birth_time_known,
         },
         "chart": visible_chart_payload,
         "report": report_payload,

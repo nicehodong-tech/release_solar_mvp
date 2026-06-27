@@ -2404,6 +2404,7 @@ function formatPremiumBirthDate(value) {
 
 function premiumTimeLabel(value) {
   const labels = {
+    unknown: "시간 모름",
     ja: "자시",
     chuk: "축시",
     in: "인시",
