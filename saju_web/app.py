@@ -18,6 +18,8 @@ from .report_service import build_report_payload
 
 
 WEB_ROOT = Path(__file__).resolve().parent / "static"
+CANONICAL_HOST = "aisajuleehyeon.com"
+WWW_HOST = "www.aisajuleehyeon.com"
 API_CACHE_MAX_ENTRIES = 96
 API_CACHE_VERSION = "judgment-v3"
 _API_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
@@ -160,6 +162,8 @@ class SajuWebHandler(BaseHTTPRequestHandler):
     server_version = "SajuWebMVP/0.1"
 
     def do_GET(self) -> None:
+        if self._redirect_to_canonical_host():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/judgment-status":
             self._handle_judgment_status(parsed.query)
@@ -170,9 +174,13 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         self._serve_static()
 
     def do_HEAD(self) -> None:
+        if self._redirect_to_canonical_host():
+            return
         self._serve_static(include_body=False)
 
     def do_POST(self) -> None:
+        if self._redirect_to_canonical_host():
+            return
         parsed = urlparse(self.path)
         if parsed.path != "/api/judgment":
             self._send_json({"ok": False, "error": {"message": "지원하지 않는 요청입니다."}}, 404)
@@ -251,6 +259,18 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if include_body:
             self.wfile.write(data)
+
+    def _redirect_to_canonical_host(self) -> bool:
+        host = (self.headers.get("Host") or "").split(":", 1)[0].strip().lower()
+        if host != WWW_HOST:
+            return False
+        scheme = (self.headers.get("X-Forwarded-Proto") or "https").split(",", 1)[0].strip() or "https"
+        location = f"{scheme}://{CANONICAL_HOST}{self.path}"
+        self.send_response(308)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return True
 
     def _send_json(self, payload: dict[str, Any], status: int) -> None:
         data = _json_bytes(payload)
