@@ -8,7 +8,6 @@ const homeFunnel = document.querySelector("#home-funnel");
 const sideSummary = document.querySelector("#side-summary");
 const manseBoard = document.querySelector("#manse-board");
 const visitTodayCount = document.querySelector("#visit-today-count");
-const visitTotalCount = document.querySelector("#visit-total-count");
 const tierInput = form.elements.tier;
 const tierButtons = [...document.querySelectorAll(".tier-button")];
 const viewButtons = [...document.querySelectorAll("[data-view-target]")];
@@ -97,7 +96,7 @@ function formatVisitCount(value) {
 }
 
 async function updateVisitStats() {
-  if (!visitTodayCount || !visitTotalCount) {
+  if (!visitTodayCount) {
     return;
   }
   const todayKey = kstDateString();
@@ -113,13 +112,11 @@ async function updateVisitStats() {
       throw new Error("visit stats payload failed");
     }
     visitTodayCount.textContent = formatVisitCount(payload.today);
-    visitTotalCount.textContent = formatVisitCount(payload.total);
     if (mode === "count") {
       setStoredValue(VISIT_STATS_COUNTED_DATE_KEY, todayKey);
     }
   } catch (_error) {
     visitTodayCount.textContent = "-";
-    visitTotalCount.textContent = "-";
   }
 }
 

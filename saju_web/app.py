@@ -57,10 +57,7 @@ def _read_visit_stats() -> dict[str, Any]:
     except Exception:
         raw = {}
     daily = raw.get("daily") if isinstance(raw.get("daily"), dict) else {}
-    total = raw.get("total")
-    if not isinstance(total, int) or total < 0:
-        total = sum(value for value in daily.values() if isinstance(value, int) and value > 0)
-    return {"total": total, "daily": daily, "updatedAt": raw.get("updatedAt") or ""}
+    return {"daily": daily, "updatedAt": raw.get("updatedAt") or ""}
 
 
 def _write_visit_stats(stats: dict[str, Any]) -> None:
@@ -79,14 +76,12 @@ def _visit_stats_payload(*, should_count: bool) -> dict[str, Any]:
         daily = stats["daily"]
         if should_count:
             daily[today_key] = int(daily.get(today_key) or 0) + 1
-            stats["total"] = int(stats.get("total") or 0) + 1
             stats["updatedAt"] = now.isoformat(timespec="seconds")
             _write_visit_stats(stats)
         return {
             "ok": True,
             "date": today_key,
             "today": int(daily.get(today_key) or 0),
-            "total": int(stats.get("total") or 0),
         }
 
 
