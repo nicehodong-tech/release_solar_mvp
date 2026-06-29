@@ -1,4 +1,4 @@
-User-agent: *
+﻿User-agent: *
 Allow: /
 
-Sitemap: https://www.aisajuleehyeon.com/sitemap.xml
+Sitemap: https://aisajuleehyeon.com/sitemap.xml
