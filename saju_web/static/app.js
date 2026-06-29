@@ -10,7 +10,7 @@ const manseBoard = document.querySelector("#manse-board");
 const tierInput = form.elements.tier;
 const tierButtons = [...document.querySelectorAll(".tier-button")];
 const viewButtons = [...document.querySelectorAll("[data-view-target]")];
-const staticActionButtons = [...document.querySelectorAll("[data-view-target], [data-upgrade], [data-input-target]")];
+const staticActionButtons = [...document.querySelectorAll("[data-view-target], [data-upgrade], [data-input-target], [data-share-site]")];
 const panels = {
   summary: document.querySelector("#summary"),
   premium: document.querySelector("#premium"),
@@ -337,6 +337,24 @@ function shareServiceUrl() {
   }
 }
 
+function shareIconHtml() {
+  return `
+    <span class="share-icon-stack" aria-hidden="true">
+      <span class="share-icon is-kakao"></span>
+      <span class="share-icon is-instagram"></span>
+    </span>
+    <span>공유하기</span>
+  `;
+}
+
+function buildSiteShareText() {
+  return [
+    "AI 사주 : 이현",
+    "생년월일을 입력하면 정통 명리 이론을 기반으로 무료 사주 분석을 확인할 수 있습니다.",
+    "재물운, 직업운, 애정운, 성격, 인생 구간을 한 화면에서 정리합니다.",
+  ].join("\n");
+}
+
 function buildResultShareText() {
   const report = currentPayload?.report || {};
   const sections = Array.isArray(report.premium_sections) ? report.premium_sections : [];
@@ -420,6 +438,29 @@ async function shareCurrentResult() {
   const text = buildResultShareText();
   const shareData = {
     title: "AI 사주 : 이현 사주 분석 결과",
+    text,
+    url,
+  };
+  try {
+    if (navigator.share) {
+      await navigator.share(shareData);
+      showShareToast("공유창을 열었습니다.");
+      return;
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      return;
+    }
+  }
+  const copied = await copyTextToClipboard(`${text}\n\n${url}`);
+  showShareToast(copied ? "공유 문구와 링크를 복사했습니다." : "복사에 실패했습니다. 다시 시도해주세요.");
+}
+
+async function shareSiteIntro() {
+  const url = shareServiceUrl();
+  const text = buildSiteShareText();
+  const shareData = {
+    title: "AI 사주 : 이현 무료 사주 분석",
     text,
     url,
   };
@@ -1827,7 +1868,7 @@ function renderPremiumMobileHero(report, sections) {
         <a class="service-blog-button premium-blog-button is-top" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
           사주명리 공간 : 이현 블로그
         </a>
-        <button class="premium-share-button is-top" type="button" data-share-result="true">결과 공유하기</button>
+        <button class="premium-share-button is-top" type="button" data-share-result="true">${shareIconHtml()}</button>
       </div>
     </section>
   `;
@@ -6990,7 +7031,7 @@ function renderPremiumResultFooter() {
       <div class="premium-result-footer-actions">
         <button class="premium-footer-action" type="button" data-input-target="birth">출생 정보 수정</button>
         <button class="premium-footer-action" type="button" data-view-target="basis">명식표 보기</button>
-        <button class="premium-footer-action premium-share-button" type="button" data-share-result="true">결과 공유하기</button>
+        <button class="premium-footer-action premium-share-button" type="button" data-share-result="true">${shareIconHtml()}</button>
         <a class="service-blog-button premium-blog-button premium-footer-action is-bottom" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
           사주명리 공간 : 이현 블로그
         </a>
@@ -10097,6 +10138,11 @@ function handleSurfaceAction(event) {
   if (button.dataset.shareResult) {
     event.preventDefault();
     void shareCurrentResult();
+    return true;
+  }
+  if (button.dataset.shareSite) {
+    event.preventDefault();
+    void shareSiteIntro();
     return true;
   }
   if (button.dataset.upgrade) {

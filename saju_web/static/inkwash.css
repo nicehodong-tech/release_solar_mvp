@@ -345,6 +345,7 @@ body[data-view="premium"] .premium-mobile-hero-actions .premium-blog-button.is-t
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 7px;
   min-height: 42px;
   padding: 0 16px;
   border: 1px solid rgba(30, 30, 30, 0.14);
@@ -360,6 +361,66 @@ body[data-view="premium"] .premium-mobile-hero-actions .premium-blog-button.is-t
   box-shadow: 0 10px 22px rgba(24, 24, 24, 0.055);
   appearance: none;
   cursor: pointer;
+}
+
+.share-icon-stack {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.share-icon {
+  position: relative;
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  border: 1.5px solid rgba(34, 36, 35, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.share-icon.is-kakao {
+  border-radius: 999px;
+  background: rgba(224, 219, 205, 0.72);
+}
+
+.share-icon.is-kakao::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  bottom: -3px;
+  width: 6px;
+  height: 6px;
+  border-bottom: 1.5px solid rgba(34, 36, 35, 0.36);
+  border-left: 1.5px solid rgba(34, 36, 35, 0.36);
+  border-radius: 1px;
+  background: inherit;
+  transform: rotate(-28deg);
+}
+
+.share-icon.is-instagram {
+  border-radius: 5px;
+  background: rgba(239, 237, 230, 0.76);
+}
+
+.share-icon.is-instagram::before {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border: 1.35px solid rgba(34, 36, 35, 0.42);
+  border-radius: 999px;
+}
+
+.share-icon.is-instagram::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(34, 36, 35, 0.42);
 }
 
 .premium-share-button:hover {
@@ -775,6 +836,19 @@ body[data-view="home"] .input-blog-button {
   min-height: 44px;
   margin-top: 2px;
   background: rgba(247, 247, 243, 0.92);
+}
+
+body[data-view="home"] .input-share-button {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 2px;
+  gap: 7px;
+  background: rgba(247, 247, 243, 0.92);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 850;
+  appearance: none;
+  cursor: pointer;
 }
 
 body[data-view="premium"] .premium-blog-button {
