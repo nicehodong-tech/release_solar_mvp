@@ -30,6 +30,7 @@ const COUPANG_POPUP_IFRAME_HTML =
   window.LEEHYEON_COUPANG_POPUP_IFRAME_HTML ||
   '<iframe src="https://coupa.ng/cnBqRZ" width="120" height="240" frameborder="0" scrolling="no" referrerpolicy="unsafe-url" browsingtopics></iframe>';
 const COUPANG_POPUP_IMAGE_URL = window.LEEHYEON_COUPANG_POPUP_IMAGE_URL || "";
+const SERVICE_SHARE_URL = window.LEEHYEON_SERVICE_SHARE_URL || "https://aisajuleehyeon.com/";
 const REPORT_SESSION_KEY = "leehyeon:lastPremiumReport";
 const AFFILIATE_RETURN_VIEW_KEY = "leehyeon:coupangReturnView";
 const AFFILIATE_LEFT_PAGE_KEY = "leehyeon:coupangPageVisited";
@@ -57,6 +58,7 @@ let loadingTicker = null;
 let loadingStartedAt = 0;
 let loadingMessageIndex = 0;
 let loadingDisplayedPercent = 0;
+let shareToastTimer = null;
 
 function storedValue(key) {
   try {
@@ -317,6 +319,123 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function cleanShareLine(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/\.$/, "")
+    .trim();
+}
+
+function shareServiceUrl() {
+  try {
+    const url = new URL(SERVICE_SHARE_URL);
+    return url.href;
+  } catch (_error) {
+    return "https://aisajuleehyeon.com/";
+  }
+}
+
+function buildResultShareText() {
+  const report = currentPayload?.report || {};
+  const sections = Array.isArray(report.premium_sections) ? report.premium_sections : [];
+  const summary = premiumProfileSummary(report);
+  const profileType = cleanShareLine(premiumDisplayProfileType(summary.profile_type || ""));
+  const headline = cleanShareLine(
+    firstSentences(cleanPremiumDisplayText(summary.headline || ""), 1) ||
+      firstSentences(cleanPremiumDisplayText(summary.summary || ""), 1),
+  );
+  const strongest = premiumStrongestSectionFromReport(report, sections);
+  const risk = premiumPrimaryRiskSection(sections, report);
+  const strongestTitle = cleanShareLine(premiumNavTitle(strongest));
+  const riskTitle = cleanShareLine(premiumNavTitle(risk));
+  const lines = ["AI 사주 : 이현", "사주 분석 결과를 공유합니다."];
+  if (profileType) {
+    lines.push(`종합 결과: ${profileType}`);
+  }
+  if (headline && headline !== profileType) {
+    lines.push(`핵심 해석: ${headline}`);
+  }
+  if (strongestTitle) {
+    lines.push(`강하게 나타나는 운: ${strongestTitle}`);
+  }
+  if (riskTitle) {
+    lines.push(`주의해서 볼 운: ${riskTitle}`);
+  }
+  lines.push("생년월일을 입력하면 같은 방식으로 무료 사주 분석을 확인할 수 있습니다.");
+  return lines.filter(Boolean).join("\n");
+}
+
+function showShareToast(message) {
+  let toast = document.querySelector(".share-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.className = "share-toast";
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.classList.add("is-visible");
+  if (shareToastTimer) {
+    window.clearTimeout(shareToastTimer);
+  }
+  shareToastTimer = window.setTimeout(() => {
+    toast.classList.remove("is-visible");
+  }, 2300);
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_error) {}
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    return copied;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function shareCurrentResult() {
+  if (!currentPayload?.ok) {
+    showShareToast("공유할 분석 결과가 없습니다.");
+    return;
+  }
+  const url = shareServiceUrl();
+  const text = buildResultShareText();
+  const shareData = {
+    title: "AI 사주 : 이현 사주 분석 결과",
+    text,
+    url,
+  };
+  try {
+    if (navigator.share) {
+      await navigator.share(shareData);
+      showShareToast("공유창을 열었습니다.");
+      return;
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      return;
+    }
+  }
+  const copied = await copyTextToClipboard(`${text}\n\n${url}`);
+  showShareToast(copied ? "공유 문구와 링크를 복사했습니다." : "복사에 실패했습니다. 다시 시도해주세요.");
 }
 
 function sentenceList(value) {
@@ -1704,9 +1823,12 @@ function renderPremiumMobileHero(report, sections) {
       <div class="premium-mobile-hero-meta" aria-label="분석 기준">
         <span>${escapeHtml(premiumRequestLine())}</span>
       </div>
-      <a class="service-blog-button premium-blog-button is-top" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
-        사주명리 공간 : 이현 블로그
-      </a>
+      <div class="premium-mobile-hero-actions">
+        <a class="service-blog-button premium-blog-button is-top" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
+          사주명리 공간 : 이현 블로그
+        </a>
+        <button class="premium-share-button is-top" type="button" data-share-result="true">결과 공유하기</button>
+      </div>
     </section>
   `;
 }
@@ -6868,6 +6990,7 @@ function renderPremiumResultFooter() {
       <div class="premium-result-footer-actions">
         <button class="premium-footer-action" type="button" data-input-target="birth">출생 정보 수정</button>
         <button class="premium-footer-action" type="button" data-view-target="basis">명식표 보기</button>
+        <button class="premium-footer-action premium-share-button" type="button" data-share-result="true">결과 공유하기</button>
         <a class="service-blog-button premium-blog-button premium-footer-action is-bottom" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
           사주명리 공간 : 이현 블로그
         </a>
@@ -9969,6 +10092,11 @@ function handleSurfaceAction(event) {
       const target = document.getElementById(button.dataset.scrollTarget);
       target?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
+    return true;
+  }
+  if (button.dataset.shareResult) {
+    event.preventDefault();
+    void shareCurrentResult();
     return true;
   }
   if (button.dataset.upgrade) {
