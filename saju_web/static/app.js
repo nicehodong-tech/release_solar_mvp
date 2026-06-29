@@ -7,7 +7,6 @@ const fortuneSpotlight = document.querySelector("#fortune-spotlight");
 const homeFunnel = document.querySelector("#home-funnel");
 const sideSummary = document.querySelector("#side-summary");
 const manseBoard = document.querySelector("#manse-board");
-const visitTodayCount = document.querySelector("#visit-today-count");
 const tierInput = form.elements.tier;
 const tierButtons = [...document.querySelectorAll(".tier-button")];
 const viewButtons = [...document.querySelectorAll("[data-view-target]")];
@@ -41,7 +40,6 @@ const REPORT_SESSION_RESTORE_MAX_AGE_MS = 10 * 60 * 1000;
 const REPORT_CLIENT_CACHE_PREFIX = "leehyeon:reportCache:";
 const REPORT_CLIENT_CACHE_VERSION = "report-client-v172";
 const REPORT_CLIENT_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const VISIT_STATS_COUNTED_DATE_KEY = "leehyeon:visitStatsCountedDate";
 const LOADING_MESSAGES = [
   "분석을 시작했습니다. 생년월일과 태어난 시간을 기준으로 명식을 계산하고 있습니다.",
   "월령과 오행의 강약을 정리하고 있습니다. 잠시만 기다려주세요.",
@@ -81,43 +79,6 @@ function setStoredValue(key, value) {
   try {
     localStorage.setItem(key, value);
   } catch (_error) {}
-}
-
-function kstDateString() {
-  return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
-}
-
-function formatVisitCount(value) {
-  const numberValue = Number(value);
-  if (!Number.isFinite(numberValue) || numberValue < 0) {
-    return "-";
-  }
-  return Math.round(numberValue).toLocaleString("ko-KR");
-}
-
-async function updateVisitStats() {
-  if (!visitTodayCount) {
-    return;
-  }
-  const todayKey = kstDateString();
-  const countedToday = storedValue(VISIT_STATS_COUNTED_DATE_KEY) === todayKey;
-  const mode = countedToday ? "read" : "count";
-  try {
-    const response = await fetch(`/api/visit-stats?mode=${mode}`, { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error("visit stats request failed");
-    }
-    const payload = await response.json();
-    if (!payload || payload.ok !== true) {
-      throw new Error("visit stats payload failed");
-    }
-    visitTodayCount.textContent = formatVisitCount(payload.today);
-    if (mode === "count") {
-      setStoredValue(VISIT_STATS_COUNTED_DATE_KEY, todayKey);
-    }
-  } catch (_error) {
-    visitTodayCount.textContent = "-";
-  }
 }
 
 function removeStoredValue(key) {
@@ -10176,7 +10137,6 @@ const initialTier = "premium";
 applyTierSelection(initialTier);
 renderFortuneSpotlight();
 renderHomeFunnel();
-updateVisitStats();
 clearStatus();
 const shouldReturnToPremium = hasFreshAffiliateReturn();
 const inputEditorRequested = storedValue(INPUT_EDITOR_REQUEST_KEY) === "1";

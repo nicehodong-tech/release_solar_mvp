@@ -26,38 +26,6 @@
   --ink-pine-art: url("/assets/ink-pine.png");
 }
 
-.site-visit-footer {
-  width: min(100%, 920px);
-  margin: 18px auto 88px;
-  padding: 0 18px;
-  display: flex;
-  justify-content: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  color: rgba(42, 44, 46, 0.48);
-  font-size: 12px;
-  letter-spacing: 0;
-}
-
-.site-visit-footer span {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  white-space: nowrap;
-}
-
-.site-visit-footer strong {
-  color: rgba(28, 30, 32, 0.72);
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-@media (min-width: 820px) {
-  .site-visit-footer {
-    margin-bottom: 36px;
-  }
-}
-
 /* Coupang Partners transition popup. */
 .affiliate-popup-backdrop {
   position: fixed;
