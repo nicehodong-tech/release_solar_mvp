@@ -338,13 +338,7 @@ function shareServiceUrl() {
 }
 
 function shareIconHtml() {
-  return `
-    <span class="share-icon-stack" aria-hidden="true">
-      <span class="share-icon is-kakao"></span>
-      <span class="share-icon is-instagram"></span>
-    </span>
-    <span>공유하기</span>
-  `;
+  return "<span>공유하기</span>";
 }
 
 function buildSiteShareText() {
