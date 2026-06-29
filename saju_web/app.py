@@ -8,6 +8,7 @@ import json
 import os
 import time
 from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Semaphore, Thread
@@ -18,6 +19,9 @@ from .report_service import build_report_payload
 
 
 WEB_ROOT = Path(__file__).resolve().parent / "static"
+DATA_ROOT = Path(os.environ.get("SAJU_DATA_DIR", Path(__file__).resolve().parent / ".runtime"))
+VISIT_STATS_FILE = DATA_ROOT / "visit_stats.json"
+KST = timezone(timedelta(hours=9))
 API_CACHE_MAX_ENTRIES = 96
 API_CACHE_VERSION = "judgment-v3"
 _API_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
@@ -26,6 +30,7 @@ API_JOB_MAX_ENTRIES = 64
 _API_JOBS: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _API_JOBS_LOCK = Lock()
 _API_JOB_SEMAPHORE = Semaphore(1)
+_VISIT_STATS_LOCK = Lock()
 MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -42,6 +47,47 @@ MIME_TYPES = {
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _read_visit_stats() -> dict[str, Any]:
+    try:
+        raw = json.loads(VISIT_STATS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError
+    except Exception:
+        raw = {}
+    daily = raw.get("daily") if isinstance(raw.get("daily"), dict) else {}
+    total = raw.get("total")
+    if not isinstance(total, int) or total < 0:
+        total = sum(value for value in daily.values() if isinstance(value, int) and value > 0)
+    return {"total": total, "daily": daily, "updatedAt": raw.get("updatedAt") or ""}
+
+
+def _write_visit_stats(stats: dict[str, Any]) -> None:
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    VISIT_STATS_FILE.write_text(
+        json.dumps(stats, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _visit_stats_payload(*, should_count: bool) -> dict[str, Any]:
+    now = datetime.now(KST)
+    today_key = now.date().isoformat()
+    with _VISIT_STATS_LOCK:
+        stats = _read_visit_stats()
+        daily = stats["daily"]
+        if should_count:
+            daily[today_key] = int(daily.get(today_key) or 0) + 1
+            stats["total"] = int(stats.get("total") or 0) + 1
+            stats["updatedAt"] = now.isoformat(timespec="seconds")
+            _write_visit_stats(stats)
+        return {
+            "ok": True,
+            "date": today_key,
+            "today": int(daily.get(today_key) or 0),
+            "total": int(stats.get("total") or 0),
+        }
 
 
 def _payload_cache_key(payload: dict[str, Any]) -> str:
@@ -160,6 +206,9 @@ class SajuWebHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/visit-stats":
+            self._handle_visit_stats(parsed.query)
+            return
         if parsed.path == "/api/judgment-status":
             self._handle_judgment_status(parsed.query)
             return
@@ -232,6 +281,11 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": {"message": job.get("errorMessage") or "분석 결과 생성에 실패했습니다."}}, 500)
             return
         self._send_json(_pending_response(job_id, job), 202)
+
+    def _handle_visit_stats(self, query: str) -> None:
+        params = parse_qs(query)
+        mode = (params.get("mode") or ["read"])[0].strip().lower()
+        self._send_json(_visit_stats_payload(should_count=mode == "count"), 200)
 
     def _serve_static(self, *, include_body: bool = True) -> None:
         raw_path = self.path.split("?", 1)[0]
