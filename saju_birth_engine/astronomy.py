@@ -89,22 +89,34 @@ def _unwrap_to_previous(raw_longitude: float, previous_unwrapped: float) -> floa
     return candidate
 
 
-@lru_cache(maxsize=512)
-def solar_longitude_crossing_utc(year: int, target_longitude: float) -> datetime:
+@lru_cache(maxsize=96)
+def _solar_longitude_samples(year: int) -> tuple[tuple[datetime, float], ...]:
     start = datetime(year, 1, 1, tzinfo=timezone.utc)
     end = datetime(year + 1, 1, 10, tzinfo=timezone.utc)
     step = timedelta(hours=6)
+    samples: list[tuple[datetime, float]] = []
+    current_time = start
+    previous_unwrapped = apparent_solar_longitude(start)
+    samples.append((start, previous_unwrapped))
+    current_time += step
+    while current_time <= end:
+        current_raw = apparent_solar_longitude(current_time)
+        current_unwrapped = _unwrap_to_previous(current_raw, previous_unwrapped)
+        samples.append((current_time, current_unwrapped))
+        previous_unwrapped = current_unwrapped
+        current_time += step
+    return tuple(samples)
 
-    prev_time = start
-    prev_unwrapped = apparent_solar_longitude(prev_time)
+
+@lru_cache(maxsize=4096)
+def solar_longitude_crossing_utc(year: int, target_longitude: float) -> datetime:
+    samples = _solar_longitude_samples(year)
+    prev_time, prev_unwrapped = samples[0]
     target = target_longitude
     while target < prev_unwrapped:
         target += 360.0
 
-    current_time = start + step
-    while current_time <= end:
-        current_raw = apparent_solar_longitude(current_time)
-        current_unwrapped = _unwrap_to_previous(current_raw, prev_unwrapped)
+    for current_time, current_unwrapped in samples[1:]:
         if prev_unwrapped <= target <= current_unwrapped:
             lo = prev_time
             hi = current_time
@@ -120,6 +132,5 @@ def solar_longitude_crossing_utc(year: int, target_longitude: float) -> datetime
             return hi.replace(microsecond=0)
         prev_time = current_time
         prev_unwrapped = current_unwrapped
-        current_time += step
 
     raise RuntimeError(f"Solar longitude {target_longitude} crossing not found for {year}.")

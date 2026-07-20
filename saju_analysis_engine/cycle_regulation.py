@@ -28,8 +28,8 @@ from .relation_polarity import (
 )
 
 
-CYCLE_REGULATION_VERSION = "cycle_regulation_v3"
-PRINCIPLE_MATRIX_VERSION = "cycle_principle_matrix_v2"
+CYCLE_REGULATION_VERSION = "cycle_regulation_v4_relation_two_axis"
+PRINCIPLE_MATRIX_VERSION = "cycle_principle_matrix_v3_relation_two_axis"
 
 ROLE_ORDER = ("resource", "peer", "output", "wealth", "officer")
 
@@ -223,7 +223,7 @@ ELEMENT_BRIDGE_THEORY = {
     ("fire", "earth", "metal"): "화극금의 충돌은 토가 살아 있을 때 화생토생금으로 풀립니다.",
     ("earth", "metal", "water"): "토극수의 충돌은 금이 살아 있을 때 토생금생수로 풀립니다.",
     ("metal", "water", "wood"): "금극목의 충돌은 수가 살아 있을 때 금생수생목으로 풀립니다.",
-    ("water", "wood", "fire"): "수극화의 충돌은 목이 살아 있을 때 수생목생화로 풀립니다.",
+    ("water", "wood", "fire"): "수극화의 충돌은 목 기운이 중간에서 이어 줄 때 수생목생화로 정리됩니다.",
 }
 
 ELEMENT_REVERSE_CONTROL_THEORY = {
@@ -1747,6 +1747,7 @@ def _branch_condition_tags(chart_structure: Any, signal: dict[str, Any]) -> tupl
         elif relation_type in DISRUPTIVE_RELATIONS:
             if polarity.polarity == "supportive":
                 support.append(f"branch_disruption_releases_burden_{'_'.join(matched)}")
+                pressure.append(f"branch_disruption_structural_friction_{'_'.join(matched)}")
             elif polarity.polarity == "burdensome":
                 pressure.append(f"branch_disruption_damages_useful_{'_'.join(matched)}")
             elif polarity.polarity == "mixed":
@@ -1758,6 +1759,8 @@ def _branch_condition_tags(chart_structure: Any, signal: dict[str, Any]) -> tupl
                 "positions": list(getattr(interaction, "positions", []) or []),
                 "matched_elements": matched,
                 "polarity": polarity.polarity,
+                "intrinsic_friction": polarity.intrinsic_friction,
+                "effective_friction": polarity.effective_friction,
                 "intensity": str(getattr(interaction, "intensity", "")),
                 "basis_code": str(getattr(interaction, "basis_code", "")),
             }
@@ -2362,9 +2365,13 @@ def _attach_governance_context(chart_structure: Any, signals: list[dict[str, Any
             score += 2
         elif month_fit_verdict == "month_cycle_burdens_month":
             score += 2
+        effect_strength = max(35, min(98, score))
         enriched_signal = {
             **signal,
-            "score": max(35, min(98, score)),
+            # ``score`` is retained as a compatibility alias.  It measures how
+            # strongly the relation materializes, not whether it is auspicious.
+            "score": effect_strength,
+            "effect_strength": effect_strength,
             "governance_context": governance,
             "pattern_cycle_context": pattern_cycle,
             "condition_context": condition,
@@ -3010,6 +3017,11 @@ def _branch_cycle_signal(chart_structure: Any, interaction: Any) -> dict[str, An
     basis_codes.extend(f"cycle_branch_support_element_{element}" for element in polarity.support_elements)
     basis_codes.extend(f"cycle_branch_pressure_element_{element}" for element in polarity.pressure_elements)
     basis_codes.extend(f"cycle_branch_overuse_element_{element}" for element in polarity.overuse_elements)
+    counter_signals = []
+    if relation_type in DISRUPTIVE_RELATIONS and polarity.effective_friction > 0.0:
+        counter_signals.append(f"cycle_branch_structural_friction_{relation_type}")
+        basis_codes.append(f"cycle_branch_intrinsic_friction_{polarity.intrinsic_friction:.4f}")
+        basis_codes.append(f"cycle_branch_effective_friction_{polarity.effective_friction:.4f}")
     return {
         "signal_id": signal_id,
         "layer": "cycle_regulation",
@@ -3038,6 +3050,7 @@ def _branch_cycle_signal(chart_structure: Any, interaction: Any) -> dict[str, An
         "domain_links": domain_links,
         "sentence": _branch_cycle_sentence(relation_type, activated, judgment),
         "reality_score": min(99, int(primary_context.get("reality_score") or 0) + intensity_bonus),
+        "counter_signals": counter_signals,
         "basis_codes": _unique(basis_codes),
     }
 
@@ -3956,7 +3969,11 @@ def _element_edge_matrix_item(chart_structure: Any, *, source: str, target: str,
 def _branch_relation_matrix_items(chart_structure: Any) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for interaction in list(getattr(chart_structure, "branch_interactions", []) or []):
-        polarity = branch_relation_polarity(chart_structure.element_profile, interaction)
+        polarity = branch_relation_polarity(
+            chart_structure.element_profile,
+            interaction,
+            getattr(chart_structure, "pattern_profile", None),
+        )
         activated_elements = relation_activated_elements(interaction)
         activated_groups = _unique(
             [
@@ -3975,6 +3992,8 @@ def _branch_relation_matrix_items(chart_structure: Any) -> list[dict[str, Any]]:
                 "polarity": str(getattr(polarity, "polarity", "") or ""),
                 "useful_score": int(getattr(polarity, "useful_score", 0) or 0),
                 "pressure_score": int(getattr(polarity, "pressure_score", 0) or 0),
+                "intrinsic_friction": float(getattr(polarity, "intrinsic_friction", 0.0) or 0.0),
+                "effective_friction": float(getattr(polarity, "effective_friction", 0.0) or 0.0),
                 "domain_links": _unique(
                     list(getattr(interaction, "domain_links", []) or [])
                     + [domain for group in activated_groups for domain in ROLE_DOMAIN_LINKS.get(group, [])]
@@ -3982,6 +4001,13 @@ def _branch_relation_matrix_items(chart_structure: Any) -> list[dict[str, Any]]:
                 "basis_codes": _unique(
                     [
                         f"principle_matrix_branch_relation_{getattr(interaction, 'relation_type', '')}",
+                        *(
+                            [
+                                f"principle_matrix_branch_structural_friction_{getattr(interaction, 'relation_type', '')}"
+                            ]
+                            if float(getattr(polarity, "effective_friction", 0.0) or 0.0) > 0.0
+                            else []
+                        ),
                         *[f"principle_matrix_branch_element_{element}" for element in activated_elements],
                     ]
                 ),
@@ -4128,12 +4154,19 @@ def build_cycle_regulation_profile(chart_structure: Any) -> dict[str, Any]:
             if signal.get("polarity") == "mixed"
             else 2,
             -int(signal.get("reality_score", 0)),
-            -int(signal.get("score", 0)),
+            -int(signal.get("effect_strength", signal.get("score", 0))),
             str(signal.get("signal_id", "")),
         )
     )
     return {
         "version": CYCLE_REGULATION_VERSION,
+        "score_contract": {
+            "effect_strength_field": "effect_strength",
+            "legacy_strength_alias": "score",
+            "effect_strength_semantics": "magnitude_not_quality",
+            "quality_direction_field": "polarity",
+            "public_quality_rule": "derive_by_metric_context",
+        },
         "signals": signals,
         "top_signal_ids": [str(signal["signal_id"]) for signal in signals[:8]],
         "domain_summary": _domain_summary(signals),

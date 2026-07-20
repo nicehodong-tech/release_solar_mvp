@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
-import os
 import time
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,9 +21,12 @@ WEB_ROOT = Path(__file__).resolve().parent / "static"
 CANONICAL_HOST = "aisajuleehyeon.com"
 WWW_HOST = "www.aisajuleehyeon.com"
 API_CACHE_MAX_ENTRIES = 96
-API_CACHE_VERSION = "judgment-v3"
+API_CACHE_VERSION = "judgment-v20-trait-layer"
 _API_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 _API_CACHE_LOCK = Lock()
+API_DETAIL_KEY_MAX_ENTRIES = 96
+_API_DETAIL_KEYS: "OrderedDict[str, str]" = OrderedDict()
+_API_DETAIL_KEYS_LOCK = Lock()
 API_JOB_MAX_ENTRIES = 64
 _API_JOBS: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _API_JOBS_LOCK = Lock()
@@ -72,6 +75,31 @@ def _job_id_from_cache_key(cache_key: str) -> str:
     return hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:32]
 
 
+def _detail_token_from_cache_key(cache_key: str) -> str:
+    return _job_id_from_cache_key(cache_key)
+
+
+def _detail_key_set(token: str, cache_key: str) -> None:
+    if not token or not cache_key:
+        return
+    with _API_DETAIL_KEYS_LOCK:
+        _API_DETAIL_KEYS[token] = cache_key
+        _API_DETAIL_KEYS.move_to_end(token)
+        while len(_API_DETAIL_KEYS) > API_DETAIL_KEY_MAX_ENTRIES:
+            _API_DETAIL_KEYS.popitem(last=False)
+
+
+def _detail_key_get(token: str) -> str | None:
+    if not token:
+        return None
+    with _API_DETAIL_KEYS_LOCK:
+        cache_key = _API_DETAIL_KEYS.get(token)
+        if cache_key is None:
+            return None
+        _API_DETAIL_KEYS.move_to_end(token)
+        return cache_key
+
+
 def _cache_get(key: str) -> bytes | None:
     with _API_CACHE_LOCK:
         data = _API_CACHE.get(key)
@@ -87,6 +115,144 @@ def _cache_set(key: str, data: bytes) -> None:
         _API_CACHE.move_to_end(key)
         while len(_API_CACHE) > API_CACHE_MAX_ENTRIES:
             _API_CACHE.popitem(last=False)
+
+
+def _strip_initial_section(section: dict[str, Any]) -> dict[str, Any]:
+    next_section = _compact_section_for_transport(section)
+    domain = str(next_section.get("domain") or "")
+    if domain == "timing":
+        next_section.pop("timing_map", None)
+        next_section.pop("timing_decision_facets", None)
+    if domain in {"year_2026", "year_2027"}:
+        next_section.pop("metric_groups", None)
+        next_section.pop("detail_blocks", None)
+        next_section.pop("topic_items", None)
+    return next_section
+
+
+_INTERNAL_METRIC_FIELDS = {
+    "score_components",
+    "judgment_components",
+    "gyeokguk_action_sources",
+}
+
+
+def _compact_metric_for_transport(metric: Any) -> Any:
+    if not isinstance(metric, dict):
+        return metric
+    return {
+        key: value
+        for key, value in metric.items()
+        if key not in _INTERNAL_METRIC_FIELDS
+    }
+
+
+def _compact_metric_list_for_transport(items: Any) -> list[Any]:
+    return [
+        _compact_metric_for_transport(item)
+        for item in list(items or [])
+    ]
+
+
+def _compact_section_for_transport(section: dict[str, Any]) -> dict[str, Any]:
+    """Remove calculation-only metric diagnostics from the browser payload."""
+    next_section = dict(section)
+    domain = str(next_section.get("domain") or "")
+    for field in ("representative_metrics", "feature_axes"):
+        if isinstance(next_section.get(field), list):
+            next_section[field] = _compact_metric_list_for_transport(next_section[field])
+
+    # The browser renders annual details from metric_groups. feature_axes is an
+    # exact second copy of those items and adds no visible information.
+    if domain in {"year_2026", "year_2027"}:
+        next_section.pop("feature_axes", None)
+        compact_groups: list[Any] = []
+        for group in list(next_section.get("metric_groups") or []):
+            if not isinstance(group, dict):
+                compact_groups.append(group)
+                continue
+            next_group = dict(group)
+            next_group["items"] = _compact_metric_list_for_transport(next_group.get("items"))
+            compact_groups.append(next_group)
+        next_section["metric_groups"] = compact_groups
+
+    # judgment_axes is the internal scoring mirror of the public feature axes.
+    # No current screen reads it; retaining it triples the same metric payload.
+    next_section.pop("judgment_axes", None)
+    return next_section
+
+
+def _initial_payload_from_full(full_payload: dict[str, Any], detail_token: str) -> dict[str, Any]:
+    """Return the fast first-screen payload while preserving the full cache entry."""
+    initial = dict(full_payload)
+    report = dict(initial.get("report") or {})
+    sections = report.get("analysis_sections")
+    if isinstance(sections, list):
+        report["analysis_sections"] = [
+            _strip_initial_section(section)
+            for section in sections
+            if isinstance(section, dict) and str(section.get("domain") or "") not in {"timing", "year_2026", "year_2027"}
+        ]
+    screen_contract = report.get("analysis_screen_contract")
+    if isinstance(screen_contract, dict):
+        report["analysis_screen_contract"] = {
+            key: screen_contract.get(key)
+            for key in ("summary", "detail_menu", "loading")
+            if key in screen_contract
+        }
+    report["analysis_detail_units"] = {}
+    report["analysis_engine_contract"] = {}
+    report["factor_sections"] = []
+    report["detail_deferred"] = True
+    report["detail_token"] = detail_token
+    initial["report"] = report
+    initial["detailToken"] = detail_token
+    initial["detailDeferred"] = True
+    return initial
+
+
+def _initial_payload_bytes_from_full_bytes(full_data: bytes, detail_token: str) -> bytes:
+    try:
+        full_payload = json.loads(full_data.decode("utf-8") or "{}")
+    except Exception:
+        return full_data
+    if not isinstance(full_payload, dict):
+        return full_data
+    return _json_bytes(_initial_payload_from_full(full_payload, detail_token))
+
+
+def _detail_payload_from_full(full_payload: dict[str, Any], detail_token: str) -> dict[str, Any]:
+    report = dict((full_payload or {}).get("report") or {})
+    detail_report = {
+        "analysis_sections": [
+            _compact_section_for_transport(section)
+            for section in list(report.get("analysis_sections") or [])
+            if isinstance(section, dict)
+        ],
+        "analysis_detail_units": report.get("analysis_detail_units") or {},
+        "analysis_engine_contract": report.get("analysis_engine_contract") or {},
+        "analysis_screen_contract": report.get("analysis_screen_contract") or {},
+        "factor_sections": report.get("factor_sections") or [],
+        "analysis_profile_summary": report.get("analysis_profile_summary") or {},
+        "analysis_profile_panels": report.get("analysis_profile_panels") or [],
+        "analysis_profile_cards": report.get("analysis_profile_cards") or [],
+        "detail_deferred": False,
+        "detail_token": detail_token,
+    }
+    return {
+        "ok": True,
+        "detailToken": detail_token,
+        "detailDeferred": False,
+        "chart": (full_payload or {}).get("chart") or {},
+        "report": detail_report,
+    }
+
+
+def _detail_payload_bytes_from_full_bytes(full_data: bytes, detail_token: str) -> bytes:
+    full_payload = json.loads(full_data.decode("utf-8") or "{}")
+    if not isinstance(full_payload, dict):
+        raise ValueError("상세 결과 형식이 올바르지 않습니다.")
+    return _json_bytes(_detail_payload_from_full(full_payload, detail_token))
 
 
 def _job_snapshot(job_id: str) -> dict[str, Any] | None:
@@ -121,10 +287,10 @@ def _run_judgment_job(job_id: str, cache_key: str, payload: dict[str, Any]) -> N
             if cached is not None:
                 _job_update(job_id, status="done", data=cached, cacheStatus="HIT")
                 return
-            result = build_report_payload(_payload_for_build(payload))
-            data = _json_bytes(result)
-            _cache_set(cache_key, data)
-            _job_update(job_id, status="done", data=data, cacheStatus="MISS")
+            full_result = build_report_payload(_payload_for_build(payload), defer_detail=False)
+            full_data = _json_bytes(full_result)
+            _cache_set(cache_key, full_data)
+            _job_update(job_id, status="done", data=full_data, cacheStatus="MISS")
     except ValueError as exc:
         _job_update(job_id, status="error", errorMessage=str(exc))
     except Exception:
@@ -168,6 +334,9 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/judgment-status":
             self._handle_judgment_status(parsed.query)
             return
+        if parsed.path == "/api/judgment-detail":
+            self._handle_judgment_detail(parsed.query)
+            return
         if parsed.path.startswith("/api/"):
             self._send_json({"ok": False, "error": {"message": "지원하지 않는 요청입니다."}}, 404)
             return
@@ -195,15 +364,32 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 raise ValueError("요청 형식이 올바르지 않습니다.")
             cache_key = _payload_cache_key(payload)
+            detail_token = _detail_token_from_cache_key(cache_key)
+            _detail_key_set(detail_token, cache_key)
             cached = _cache_get(cache_key)
             if cached is not None:
-                self._send_json_bytes(cached, 200, cache_status="HIT")
+                self._send_json_bytes(
+                    _initial_payload_bytes_from_full_bytes(cached, detail_token),
+                    200,
+                    cache_status="HIT-SLIM",
+                )
                 return
             if payload.get("async"):
-                job_id = _job_id_from_cache_key(cache_key)
+                job_id = detail_token
                 job = _ensure_judgment_job(job_id, cache_key, payload)
+                if job.get("status") == "initial" and job.get("data"):
+                    self._send_json_bytes(
+                        _initial_payload_bytes_from_full_bytes(job["data"], detail_token),
+                        200,
+                        cache_status="INITIAL-SLIM",
+                    )
+                    return
                 if job.get("status") == "done" and job.get("data"):
-                    self._send_json_bytes(job["data"], 200, cache_status=str(job.get("cacheStatus") or "JOB"))
+                    self._send_json_bytes(
+                        _initial_payload_bytes_from_full_bytes(job["data"], detail_token),
+                        200,
+                        cache_status=f"{str(job.get('cacheStatus') or 'JOB')}-SLIM",
+                    )
                     return
                 if job.get("status") == "error":
                     self._send_json({"ok": False, "error": {"message": job.get("errorMessage") or "분석 결과 생성에 실패했습니다."}}, 500)
@@ -222,7 +408,11 @@ class SajuWebHandler(BaseHTTPRequestHandler):
                 500,
             )
             return
-        self._send_json_bytes(data, 200, cache_status="MISS")
+        self._send_json_bytes(
+            _initial_payload_bytes_from_full_bytes(data, detail_token),
+            200,
+            cache_status="MISS-SLIM",
+        )
 
     def _handle_judgment_status(self, query: str) -> None:
         params = parse_qs(query)
@@ -234,13 +424,53 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         if job is None:
             self._send_json({"ok": False, "error": {"message": "분석 작업을 찾을 수 없습니다."}}, 404)
             return
+        if job.get("status") == "initial" and job.get("data"):
+            cache_key = _detail_key_get(job_id)
+            detail_token = _detail_token_from_cache_key(cache_key) if cache_key else job_id
+            self._send_json_bytes(
+                _initial_payload_bytes_from_full_bytes(job["data"], detail_token),
+                200,
+                cache_status="INITIAL-SLIM",
+            )
+            return
         if job.get("status") == "done" and job.get("data"):
-            self._send_json_bytes(job["data"], 200, cache_status=str(job.get("cacheStatus") or "JOB"))
+            cache_key = _detail_key_get(job_id)
+            detail_token = _detail_token_from_cache_key(cache_key) if cache_key else job_id
+            self._send_json_bytes(
+                _initial_payload_bytes_from_full_bytes(job["data"], detail_token),
+                200,
+                cache_status=f"{str(job.get('cacheStatus') or 'JOB')}-SLIM",
+            )
             return
         if job.get("status") == "error":
             self._send_json({"ok": False, "error": {"message": job.get("errorMessage") or "분석 결과 생성에 실패했습니다."}}, 500)
             return
         self._send_json(_pending_response(job_id, job), 202)
+
+    def _handle_judgment_detail(self, query: str) -> None:
+        params = parse_qs(query)
+        token = (params.get("token") or params.get("detailToken") or [""])[0].strip()
+        if not token:
+            self._send_json({"ok": False, "error": {"message": "상세 결과 번호가 없습니다."}}, 400)
+            return
+        cache_key = _detail_key_get(token)
+        full_data = _cache_get(cache_key) if cache_key else None
+        if full_data is None:
+            job = _job_snapshot(token)
+            if job and job.get("status") == "done" and job.get("data"):
+                full_data = job["data"]
+            elif job and job.get("status") in {"queued", "running", "initial"}:
+                self._send_json(_pending_response(token, job), 202)
+                return
+        if full_data is None:
+            self._send_json({"ok": False, "error": {"message": "상세 결과를 찾을 수 없습니다. 다시 분석해주세요."}}, 404)
+            return
+        try:
+            detail_data = _detail_payload_bytes_from_full_bytes(full_data, token)
+        except Exception:
+            self._send_json({"ok": False, "error": {"message": "상세 결과를 정리하지 못했습니다."}}, 500)
+            return
+        self._send_json_bytes(detail_data, 200, cache_status="DETAIL")
 
     def _serve_static(self, *, include_body: bool = True) -> None:
         raw_path = self.path.split("?", 1)[0]
@@ -277,13 +507,18 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         self._send_json_bytes(data, status)
 
     def _send_json_bytes(self, data: bytes, status: int, cache_status: str | None = None) -> None:
+        accepts_gzip = "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+        response_data = gzip.compress(data, compresslevel=5) if accepts_gzip and len(data) > 1024 else data
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Vary", "Accept-Encoding")
+        if response_data is not data:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(response_data)))
         if cache_status:
             self.send_header("X-Saju-Cache", cache_status)
         self.end_headers()
-        self.wfile.write(data)
+        self.wfile.write(response_data)
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -291,8 +526,8 @@ class SajuWebHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local saju web MVP.")
-    parser.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
-    parser.add_argument("--port", default=int(os.environ.get("PORT", "8765")), type=int)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", default=8765, type=int)
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.host, args.port), SajuWebHandler)
     print(f"Serving saju web MVP at http://{args.host}:{args.port}")

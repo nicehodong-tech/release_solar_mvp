@@ -1,4 +1,4 @@
-﻿"""Customer-facing prose profiles for report rendering.
+"""Customer-facing prose profiles for report rendering.
 
 This module keeps prose that product editors are likely to patch away from the
 report renderer. The analysis engine should not depend on these sentences.

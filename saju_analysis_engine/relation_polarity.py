@@ -1,8 +1,12 @@
-"""Polarity rules for branch combinations and conflicts.
+"""Direction and structural cost rules for branch relations.
 
-Branch relations are not automatically good or bad. A combine, clash,
-punishment, harm, or break is judged by the element it activates and by whether
-that element is useful or burdensome for the natal structure.
+A branch relation has two independent meanings.  The element it activates can
+be useful or burdensome for the natal structure, while the form of the
+relation can still carry binding or disruptive cost.  In particular, a clash,
+punishment, harm, or break does not become friction-free merely because it
+moves a useful element.  Keeping both axes here prevents downstream domain,
+timing, and public-metric scorers from silently collapsing them into one
+good/bad flag.
 """
 
 from __future__ import annotations
@@ -16,6 +20,36 @@ from .models import BranchInteraction, ElementProfile, PatternProfile
 COMBINE_RELATIONS = {"six_combine", "three_harmony", "three_harmony_half", "three_meeting"}
 DISRUPTIVE_RELATIONS = {"clash", "punishment", "harm", "break", "self_punishment"}
 
+# Relative structural friction is deliberately normalized.  These values do
+# not predict a concrete event by themselves; they preserve the cost side of a
+# relation so that palace, ten-god, month command, daeun, and annual evidence
+# can decide where and how strongly that cost becomes material.
+DISRUPTIVE_RELATION_FRICTION: dict[str, float] = {
+    "punishment": 1.00,
+    "clash": 0.88,
+    "self_punishment": 0.78,
+    "harm": 0.60,
+    "break": 0.44,
+}
+
+RELATION_INTENSITY_MULTIPLIER: dict[str, float] = {
+    "strong": 1.15,
+    "moderate": 1.00,
+    "medium": 1.00,
+    "mild": 0.72,
+    "low": 0.58,
+    "weak": 0.48,
+}
+
+# A useful activation reduces the realised cost, but never erases it.  A
+# burdensome activation retains the whole structural pressure.
+RELATION_FRICTION_RETENTION: dict[str, float] = {
+    "supportive": 0.36,
+    "mixed": 0.68,
+    "neutral": 0.62,
+    "burdensome": 1.00,
+}
+
 
 @dataclass(frozen=True)
 class RelationPolarity:
@@ -26,6 +60,28 @@ class RelationPolarity:
     activated_elements: tuple[str, ...]
     useful_score: int
     pressure_score: int
+    intrinsic_friction: float
+    effective_friction: float
+
+
+def relation_intrinsic_friction(relation_type: str, intensity: str = "moderate") -> float:
+    """Return the relation-form cost before useful/burdensome modulation."""
+
+    base = DISRUPTIVE_RELATION_FRICTION.get(str(relation_type or ""), 0.0)
+    intensity_factor = RELATION_INTENSITY_MULTIPLIER.get(str(intensity or ""), 0.82)
+    return round(min(1.20, base * intensity_factor), 4)
+
+
+def relation_effective_friction(
+    relation_type: str,
+    polarity: str,
+    intensity: str = "moderate",
+) -> float:
+    """Return the retained cost after elemental direction is considered."""
+
+    intrinsic = relation_intrinsic_friction(relation_type, intensity)
+    retention = RELATION_FRICTION_RETENTION.get(str(polarity or "neutral"), 0.62)
+    return round(intrinsic * retention, 4)
 
 
 def _unique(values: list[str]) -> tuple[str, ...]:
@@ -195,6 +251,16 @@ def branch_relation_polarity(
     else:
         polarity = "neutral"
 
+    intrinsic_friction = relation_intrinsic_friction(
+        interaction.relation_type,
+        interaction.intensity,
+    )
+    effective_friction = relation_effective_friction(
+        interaction.relation_type,
+        polarity,
+        interaction.intensity,
+    )
+
     return RelationPolarity(
         polarity=polarity,
         support_elements=_unique(support),
@@ -203,4 +269,6 @@ def branch_relation_polarity(
         activated_elements=activated,
         useful_score=useful_score,
         pressure_score=pressure_score,
+        intrinsic_friction=intrinsic_friction,
+        effective_friction=effective_friction,
     )

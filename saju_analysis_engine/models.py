@@ -13,6 +13,97 @@ RelationshipStatus = Literal["single", "interested", "dating", "long_term", "pre
 
 
 @dataclass(frozen=True)
+class ClassicalConditionEntry:
+    day_stem: str
+    month_branch: str
+    day_element: str
+    month_element: str
+    season_label: str
+    month_command_stem: str
+    month_command_ten_god: str
+    month_command_group: str
+    regular_pattern: str
+    climate_need_elements: list[str]
+    capacity_need_groups: list[str]
+    pattern_support_groups: list[str]
+    pattern_caution_groups: list[str]
+    priority_order: list[str]
+    review_status: str
+    confidence: Confidence
+    strong_conclusion_allowed: bool
+    basis_codes: list[str]
+    counter_signals: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class UsefulElementDecision:
+    element: str
+    role_type: str
+    role_group: str
+    priority: int
+    confidence: Confidence
+    action_state: str
+    domain_links: list[str]
+    basis_codes: list[str]
+    counter_signals: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PatternViabilityDecision:
+    pattern: str
+    pattern_ten_god: str
+    pattern_group: str
+    status: str
+    score: int
+    confidence: Confidence
+    support_groups: list[str]
+    burden_groups: list[str]
+    decisive_factors: list[str]
+    basis_codes: list[str]
+    counter_signals: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ExpertDomainProjection:
+    domain: Domain
+    priority: int
+    confidence: Confidence
+    opportunity_path: str
+    risk_path: str
+    activation_condition: str
+    sustaining_condition: str
+    loss_condition: str
+    conflict_condition: str
+    timing_condition: str
+    score_adjustments: dict[str, int]
+    basis_codes: list[str]
+    counter_signals: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ExpertTrace:
+    priority_order: list[str]
+    selected_primary_basis: list[str]
+    promoted_signals: list[str]
+    suppressed_signals: list[str]
+    gate_results: dict[str, Any]
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ExpertPriorityAdjudication:
+    version: str
+    classical_condition: ClassicalConditionEntry
+    useful_element_decisions: list[UsefulElementDecision]
+    pattern_viability_decisions: list[PatternViabilityDecision]
+    domain_projections: dict[str, ExpertDomainProjection]
+    expert_trace: ExpertTrace
+    summary: dict[str, Any]
+    basis_codes: list[str]
+    counter_signals: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class ElementScore:
     element: str
     raw_score: float
@@ -63,6 +154,24 @@ class BranchInteraction:
 
 
 @dataclass(frozen=True)
+class BranchPairCombination:
+    pair_id: str
+    branches: list[str]
+    positions: list[str]
+    elements: list[str]
+    element_relation: str
+    relation_label: str
+    source_element: str
+    target_element: str
+    formal_relation_types: list[str]
+    intensity: str
+    domain_links: list[str]
+    basis_codes: list[str]
+    trait_keywords: list[str]
+    interpretation: str
+
+
+@dataclass(frozen=True)
 class AuxiliaryMiscSignal:
     key: str
     label: str
@@ -87,6 +196,7 @@ class AuxiliaryProfile:
     year_branch_group: str = "unknown_group"
     day_sal_by_position: dict[str, list[str]] = field(default_factory=dict)
     year_sal_by_position: dict[str, list[str]] = field(default_factory=dict)
+    twelve_shinsal_signals: list[AuxiliaryMiscSignal] = field(default_factory=list)
     misc_shinsal_signals: list[AuxiliaryMiscSignal] = field(default_factory=list)
 
 
@@ -120,6 +230,254 @@ class PatternProfile:
     regular_pattern: str = ""
     pattern_family: str = ""
     special_pattern_flags: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class GyeokgukCandidate:
+    pattern: str
+    source_ten_god: str
+    source_group: str
+    source_stem: str
+    source_element: str
+    source_weight: float
+    source_priority: str
+    source_phase: str
+    protruded: bool
+    protrusion_positions: list[str]
+    rooted: bool
+    root_positions: list[str]
+    month_authority: str
+    clarity_state: str
+    formation_state: str
+    support_roles: list[str]
+    burden_roles: list[str]
+    favorable_elements: list[str]
+    unfavorable_elements: list[str]
+    score: int
+    confidence: Confidence
+    basis_codes: list[str]
+    counter_signals: list[str]
+
+
+@dataclass(frozen=True)
+class GyeokgukTenGodActionRule:
+    rule_key: str
+    pattern: str
+    pattern_ten_god: str
+    pattern_group: str
+    acting_ten_god: str
+    acting_group: str
+    relation_to_pattern: str
+    action_key: str
+    action_nature: str
+    role_grade: str
+    center_effect: str
+    role_in_pattern_logic: str
+    pattern_effect_state: str
+    pattern_resolution_state: str
+    pattern_resolution_logic: str
+    excess_disease: str
+    deficiency_gap: str
+    protrusion_effect: str
+    hidden_effect: str
+    rooting_effect: str
+    unrooted_effect: str
+    timing_activation: str
+    event_manifestations: dict[str, str]
+    classical_action_tags: list[str]
+    domain_priority: list[str]
+    success_logic: str
+    failure_logic: str
+    domain_projections: dict[str, str]
+    favorable_conditions: list[str]
+    unfavorable_conditions: list[str]
+    judgment_order: list[str]
+    basis_codes: list[str]
+
+
+@dataclass(frozen=True)
+class GyeokgukTenGodActionMatch:
+    rule_key: str
+    pattern: str
+    acting_ten_god: str
+    acting_group: str
+    relation_to_pattern: str
+    action_key: str
+    action_nature: str
+    role_grade: str
+    center_effect: str
+    role_in_pattern_logic: str
+    presence_state: str
+    presence_score: int
+    month_fit_state: str
+    verdict: str
+    functional_role: str
+    functional_role_label: str
+    pattern_effect_state: str
+    pattern_resolution_state: str
+    pattern_resolution_logic: str
+    activation_context: str
+    context_judgment_state: str
+    context_judgment_summary: str
+    context_judgment_path: list[str]
+    day_master_strength_context: str
+    climate_context: str
+    position_context: dict[str, Any]
+    branch_relation_context: dict[str, Any]
+    excess_disease: str
+    deficiency_gap: str
+    protrusion_effect: str
+    hidden_effect: str
+    rooting_effect: str
+    unrooted_effect: str
+    timing_activation: str
+    event_manifestations: dict[str, str]
+    classical_action_tags: list[str]
+    domain_priority: list[str]
+    expert_summary: str
+    domain_projections: dict[str, str]
+    judgment_order: list[str]
+    basis_codes: list[str]
+    counter_signals: list[str]
+
+
+@dataclass(frozen=True)
+class GyeokgukDualTenGodActionRule:
+    rule_key: str
+    pattern: str
+    pattern_ten_god: str
+    pattern_group: str
+    first_ten_god: str
+    first_group: str
+    second_ten_god: str
+    second_group: str
+    first_relation_to_pattern: str
+    second_relation_to_pattern: str
+    first_to_second_relation: str
+    pattern_center_bridge: dict[str, Any]
+    sequence_key: str
+    chain_grade: str
+    chain_nature: str
+    pattern_effect: str
+    combination_resolution_state: str
+    combination_resolution_logic: str
+    exact_pair_key: str
+    exact_pair_category: str
+    exact_pair_name: str
+    exact_pair_effect: str
+    exact_pair_risk: str
+    exact_pair_timing: str
+    pattern_combination_state: str
+    primary_actor: str
+    secondary_actor: str
+    actor_hierarchy_logic: str
+    disease_medicine_logic: str
+    first_then_second_activation: str
+    second_then_first_activation: str
+    timing_activation: str
+    activation_order_profile: dict[str, Any]
+    event_manifestations: dict[str, str]
+    interaction_judgment: dict[str, str]
+    visibility_interaction: dict[str, str]
+    classical_action_tags: list[str]
+    first_single_classical_action_tags: list[str]
+    second_single_classical_action_tags: list[str]
+    domain_priority: list[str]
+    success_logic: str
+    failure_logic: str
+    domain_projections: dict[str, str]
+    favorable_conditions: list[str]
+    unfavorable_conditions: list[str]
+    judgment_order: list[str]
+    basis_codes: list[str]
+
+
+@dataclass(frozen=True)
+class GyeokgukDualTenGodActionMatch:
+    rule_key: str
+    pattern: str
+    pattern_ten_god: str
+    pattern_group: str
+    first_ten_god: str
+    first_group: str
+    second_ten_god: str
+    second_group: str
+    first_relation_to_pattern: str
+    second_relation_to_pattern: str
+    first_to_second_relation: str
+    pattern_center_bridge: dict[str, Any]
+    sequence_key: str
+    chain_grade: str
+    chain_nature: str
+    presence_state: str
+    presence_score: int
+    month_fit_state: str
+    verdict: str
+    functional_role: str
+    functional_role_label: str
+    pattern_combination_state: str
+    combination_resolution_state: str
+    combination_resolution_logic: str
+    exact_pair_key: str
+    exact_pair_category: str
+    exact_pair_name: str
+    exact_pair_effect: str
+    exact_pair_risk: str
+    exact_pair_timing: str
+    activation_context: str
+    context_judgment_state: str
+    context_judgment_summary: str
+    context_judgment_path: list[str]
+    day_master_strength_context: str
+    climate_context: str
+    position_context: dict[str, Any]
+    branch_relation_context: dict[str, Any]
+    primary_actor: str
+    secondary_actor: str
+    actor_hierarchy_logic: str
+    disease_medicine_logic: str
+    first_then_second_activation: str
+    second_then_first_activation: str
+    timing_activation: str
+    activation_order_profile: dict[str, Any]
+    event_manifestations: dict[str, str]
+    interaction_judgment: dict[str, str]
+    visibility_interaction: dict[str, str]
+    classical_action_tags: list[str]
+    first_single_classical_action_tags: list[str]
+    second_single_classical_action_tags: list[str]
+    domain_priority: list[str]
+    expert_summary: str
+    domain_projections: dict[str, str]
+    judgment_order: list[str]
+    basis_codes: list[str]
+    counter_signals: list[str]
+
+
+@dataclass(frozen=True)
+class GyeokgukProfile:
+    primary_pattern: str
+    primary_ten_god: str
+    primary_group: str
+    family: str
+    formation_state: str
+    clarity_state: str
+    candidates: list[GyeokgukCandidate]
+    month_branch: str
+    month_command_stem: str
+    month_command_ten_god: str
+    active_hidden_stem: str
+    active_hidden_ten_god: str
+    protruded_month_stems: list[str]
+    favorable_elements: list[str]
+    unfavorable_elements: list[str]
+    success_conditions: list[str]
+    failure_conditions: list[str]
+    ten_god_action_matches: list[GyeokgukTenGodActionMatch]
+    dual_ten_god_action_matches: list[GyeokgukDualTenGodActionMatch]
+    basis_codes: list[str]
+    decision_notes: list[str]
+    rule_version: str = "gyeokguk_profile_v1"
 
 
 @dataclass(frozen=True)
@@ -161,6 +519,7 @@ class SourcePersonalityTrait:
 
 @dataclass(frozen=True)
 class SourcePersonalityProfile:
+    month_day_pillar_profile: SourcePersonalityTrait | None
     day_pillar_profile: SourcePersonalityTrait | None
     month_branch_profile: SourcePersonalityTrait | None
     trait_keywords: list[str]
@@ -301,6 +660,7 @@ class ElementCombinationSignal:
     counter_signals: list[str]
     trait_keywords: list[str]
     interpretation: str
+    ordered_stems: list[str] = field(default_factory=list)
     monthly_variant_note: str = ""
     day_master_variant_note: str = ""
 
@@ -310,10 +670,11 @@ class ElementCombinationProfile:
     heavenly_stem_signals: list[ElementCombinationSignal]
     hidden_stem_signals: list[ElementCombinationSignal]
     stem_branch_signals: list[ElementCombinationSignal]
+    month_hidden_visible_signals: list[ElementCombinationSignal]
     top_signal_ids: list[str]
     domain_notes: dict[str, list[str]]
     summary_sentences: list[str]
-    rule_version: str = "element_combination_v1"
+    rule_version: str = "element_combination_v2"
 
 
 @dataclass(frozen=True)
@@ -598,6 +959,7 @@ class ChartStructure:
     ten_god_profile: TenGodProfile
     position_signals: dict[str, PositionSignal]
     branch_interactions: list[BranchInteraction]
+    branch_pair_combinations: list[BranchPairCombination]
     auxiliary_profile: AuxiliaryProfile
     combination_profile: CombinationProfile
     element_combination_profile: ElementCombinationProfile
@@ -609,11 +971,14 @@ class ChartStructure:
     month_governance_profile: MonthGovernanceProfile
     chart_types: list[ChartType]
     pattern_profile: PatternProfile
+    gyeokguk_profile: GyeokgukProfile
     life_feature_profile: LifeFeatureProfile
     source_personality_profile: SourcePersonalityProfile
     source_reading_profile: SourceReadingProfile
     career_field_profile: CareerFieldProfile
     structure_tags: list[str]
+    gender: str = "unknown"
+    gyeokguk_contextual_profile: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -710,6 +1075,7 @@ class EventPacket:
     template_slots: dict[str, Any] = field(default_factory=dict)
     relationship_status: RelationshipStatus = "unknown"
     feature_axes: list[dict[str, Any]] = field(default_factory=list)
+    expert_projection_summary: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -756,6 +1122,7 @@ class ProductOutputItem:
     relationship_context: str = ""
     feature_axes: list[dict[str, Any]] = field(default_factory=list)
     judgment_context: dict[str, Any] = field(default_factory=dict)
+    expert_projection_summary: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -873,9 +1240,27 @@ class ProductOutput:
     premium_candidate_sections: list[CandidateReportSection] = field(default_factory=list)
     premium_detail_sections: list[PremiumDetailMatch] = field(default_factory=list)
     premium_profile_contract: dict[str, Any] = field(default_factory=dict)
+    expert_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # This object is request-local and the report layer copies each branch
+        # before it edits it. Avoid deep-copying the complete evidence tree:
+        # several metric diagnostics are intentionally large and already plain
+        # dictionaries/lists by this point.
+        payload = dict(self.__dict__)
+        for field_name in (
+            "items",
+            "sections",
+            "section_selection_judgments",
+            "selected_report_sections",
+            "premium_candidate_sections",
+            "premium_detail_sections",
+        ):
+            payload[field_name] = [
+                dict(item.__dict__) if hasattr(item, "__dict__") else item
+                for item in getattr(self, field_name)
+            ]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -886,6 +1271,7 @@ class AnalysisResult:
     calibration_profile: CalibrationProfile
     warnings: list[str]
     trace: dict[str, Any] = field(default_factory=dict)
+    expert_adjudication: ExpertPriorityAdjudication | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -1,4 +1,4 @@
-﻿"""Dedicated customer-facing blocks for each catalog entry."""
+"""Dedicated customer-facing blocks for each catalog entry."""
 
 from __future__ import annotations
 

@@ -15,6 +15,7 @@ from typing import Any
 from .branch_reality_profiles import branch_domain_texture, branch_position_texture
 from .constants import BRANCH_HIDDEN_STEMS, ELEMENT_CONTROLS, ELEMENT_GENERATES, STEM_METADATA, TEN_GOD_GROUPS
 from .cycle_regulation import build_cycle_regulation_profile
+from .gyeokguk_ten_god_actions import TEN_GOD_EXACT_ACTION_PROFILE, TEN_GOD_EXACT_NUANCE
 from .models import AnalysisResult, BranchInteraction, Domain, EventPacket, PositionSignal
 from .relation_polarity import branch_relation_polarity
 from .rendering import DOMAIN_LABELS
@@ -2794,68 +2795,141 @@ def _cycle_signal_domain_judgment(signal_id: str, domain: Domain, material: dict
 
 
 def _cycle_flow_codes_for_packet(packet: EventPacket, signal_id: str) -> dict[str, Any]:
+    return _cycle_flow_contexts_for_packet(packet, [signal_id]).get(
+        signal_id,
+        _empty_cycle_flow_context(),
+    )
+
+
+def _empty_cycle_flow_context() -> dict[str, Any]:
+    return {
+        "flow_triggered": False,
+        "trigger_grades": [],
+        "source_hits": [],
+        "relation_hits": [],
+        "branch_grades": [],
+        "edge_contexts": [],
+        "basis_codes": [],
+        "counter_signals": [],
+    }
+
+
+def _cycle_flow_contexts_for_packet(
+    packet: EventPacket,
+    signal_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Index every cycle-flow code once for all cycle signals on a packet."""
+
+    ordered_signal_ids = sorted(
+        dict.fromkeys(str(signal_id) for signal_id in signal_ids if signal_id),
+        key=len,
+        reverse=True,
+    )
+    contexts = {signal_id: _empty_cycle_flow_context() for signal_id in ordered_signal_ids}
+    seen_values = {
+        signal_id: {
+            "trigger": set(),
+            "source": set(),
+            "relation": set(),
+            "branch": set(),
+            "edge": set(),
+        }
+        for signal_id in ordered_signal_ids
+    }
     domain = packet.domain
-    prefix = f"cycle_flow_trigger_{domain}_{signal_id}_"
-    source_prefix = f"cycle_flow_source_{domain}_{signal_id}_"
-    relation_prefix = f"cycle_flow_relation_{domain}_{signal_id}_"
-    branch_prefix = f"cycle_flow_branch_reality_{domain}_{signal_id}_"
-    edge_prefix = f"cycle_flow_edge_{domain}_{signal_id}_"
+    kind_prefixes = (
+        ("trigger", f"cycle_flow_trigger_{domain}_"),
+        ("source", f"cycle_flow_source_{domain}_"),
+        ("relation", f"cycle_flow_relation_{domain}_"),
+        ("branch", f"cycle_flow_branch_reality_{domain}_"),
+        ("edge", f"cycle_flow_edge_{domain}_"),
+    )
     basis = [str(code) for code in list(packet.basis_codes or [])]
     counters = [str(code) for code in list(packet.counter_signals or [])]
-    codes = basis + counters
-
-    def suffixes(code_prefix: str) -> list[str]:
-        values: list[str] = []
-        for code in codes:
-            if code.startswith(code_prefix):
-                suffix = code[len(code_prefix):]
-                if suffix.endswith("_cost"):
-                    suffix = suffix[:-5]
-                if suffix and suffix not in values:
-                    values.append(suffix)
-        return values
-
-    trigger_grades = suffixes(prefix)
-    source_hits = suffixes(source_prefix)
-    relation_hits = suffixes(relation_prefix)
-    branch_grades = suffixes(branch_prefix)
-    edge_contexts: list[dict[str, Any]] = []
-    seen_edges: set[tuple[str, str, str, str]] = set()
-    for code in codes:
-        if not code.startswith(edge_prefix):
+    for source_name, raw_code in [
+        *[("basis_codes", code) for code in basis],
+        *[("counter_signals", code) for code in counters],
+    ]:
+        code = raw_code[:-5] if raw_code.endswith("_cost") else raw_code
+        kind = ""
+        remainder = ""
+        for candidate_kind, prefix in kind_prefixes:
+            if code.startswith(prefix):
+                kind = candidate_kind
+                remainder = code[len(prefix):]
+                break
+        if not kind:
             continue
-        suffix = code[len(edge_prefix):]
-        if suffix.endswith("_cost"):
-            suffix = suffix[:-5]
-        parts = suffix.split("_")
-        if len(parts) < 4:
-            continue
-        source_group, edge_relation, target_group = parts[0], parts[1], parts[2]
-        grade = "_".join(parts[3:])
-        marker = (source_group, edge_relation, target_group, grade)
-        if marker in seen_edges:
-            continue
-        seen_edges.add(marker)
-        edge_contexts.append(
-            {
-                "source_group": source_group,
-                "relation": edge_relation,
-                "target_group": target_group,
-                "grade": grade,
-                "active": grade in {"edge_flow_relation_triggers", "edge_flow_both_roles"},
-                "soft_active": grade == "edge_flow_relation_touches_role",
-            }
+        signal_id = next(
+            (
+                candidate
+                for candidate in ordered_signal_ids
+                if remainder.startswith(f"{candidate}_")
+            ),
+            "",
         )
-    return {
-        "flow_triggered": bool(trigger_grades or source_hits or relation_hits or any(edge.get("active") for edge in edge_contexts)),
-        "trigger_grades": trigger_grades,
-        "source_hits": source_hits,
-        "relation_hits": relation_hits,
-        "branch_grades": branch_grades,
-        "edge_contexts": edge_contexts,
-        "basis_codes": [code for code in basis if signal_id in code and code.startswith("cycle_flow_")],
-        "counter_signals": [code for code in counters if signal_id in code and code.startswith("cycle_flow_")],
-    }
+        if not signal_id:
+            continue
+        suffix = remainder[len(signal_id) + 1:]
+        if not suffix:
+            continue
+        context = contexts[signal_id]
+        if raw_code not in context[source_name]:
+            context[source_name].append(raw_code)
+        seen = seen_values[signal_id]
+        if kind == "edge":
+            parts = suffix.split("_")
+            if len(parts) < 4:
+                continue
+            source_group, edge_relation, target_group = parts[0], parts[1], parts[2]
+            grade = "_".join(parts[3:])
+            marker = (source_group, edge_relation, target_group, grade)
+            if marker in seen["edge"]:
+                continue
+            seen["edge"].add(marker)
+            context["edge_contexts"].append(
+                {
+                    "source_group": source_group,
+                    "relation": edge_relation,
+                    "target_group": target_group,
+                    "grade": grade,
+                    "active": grade in {"edge_flow_relation_triggers", "edge_flow_both_roles"},
+                    "soft_active": grade == "edge_flow_relation_touches_role",
+                }
+            )
+            continue
+        target_key = {
+            "trigger": "trigger_grades",
+            "source": "source_hits",
+            "relation": "relation_hits",
+            "branch": "branch_grades",
+        }[kind]
+        if suffix not in seen[kind]:
+            seen[kind].add(suffix)
+            context[target_key].append(suffix)
+
+    for context in contexts.values():
+        context["flow_triggered"] = bool(
+            context["trigger_grades"]
+            or context["source_hits"]
+            or context["relation_hits"]
+            or any(edge.get("active") for edge in context["edge_contexts"])
+        )
+    # Preserve the former audit contract exactly. These ledgers intentionally
+    # include every cycle-flow code that names the signal, not only the four
+    # score-bearing prefix families indexed above.
+    for signal_id, context in contexts.items():
+        context["basis_codes"] = [
+            code
+            for code in basis
+            if signal_id in code and code.startswith("cycle_flow_")
+        ]
+        context["counter_signals"] = [
+            code
+            for code in counters
+            if signal_id in code and code.startswith("cycle_flow_")
+        ]
+    return contexts
 
 
 def _cycle_reality_grade_score(grade: str) -> int:
@@ -3084,11 +3158,15 @@ def _build_cycle_adjudication_context(
         if material.get("layer") == "cycle_regulation" and str(material.get("signal_id") or "")
     ]
     items: list[dict[str, Any]] = []
+    flow_contexts = _cycle_flow_contexts_for_packet(
+        packet,
+        [str(material.get("signal_id") or "") for material in cycle_materials],
+    )
     for material in cycle_materials:
         signal_id = str(material.get("signal_id") or "")
         judgment = _cycle_signal_domain_judgment(signal_id, domain, material)
         configured_judgment = signal_id in CYCLE_SIGNAL_DOMAIN_JUDGMENTS and domain in CYCLE_SIGNAL_DOMAIN_JUDGMENTS[signal_id]
-        flow_context = _cycle_flow_codes_for_packet(packet, signal_id)
+        flow_context = flow_contexts.get(signal_id, _empty_cycle_flow_context())
         pattern_context = dict(material.get("pattern_cycle_context") or {})
         branch_context = dict(material.get("branch_reality_context") or {})
         condition_context = dict(material.get("condition_context") or {})
@@ -4950,6 +5028,8 @@ def _material_coverage(materials: list[dict[str, Any]]) -> dict[str, bool]:
         "ten_god_distribution": "ten_god_distribution" in layers,
         "integrated_pair_action": "integrated_pair_action" in layers,
         "stem_reception": "day_stem_reception" in layers,
+        "gyeokguk_core_action": "gyeokguk_core_action" in layers,
+        "gyeokguk_flow_action": "gyeokguk_flow_action" in layers,
         "fortune_activation": "fortune_activation" in layers,
     }
 
@@ -4967,25 +5047,1073 @@ def _dedupe_materials(materials: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
-def build_domain_judgment_context(analysis: AnalysisResult, packet: EventPacket) -> dict[str, Any]:
+def _gyeokguk_action_context_rank(match: Any, *, source: str) -> int:
+    context_rank = {
+        "constructive_by_context": 34,
+        "medicine_or_regulator": 34,
+        "risk_by_context": 34,
+        "structure_supports_expression": 34,
+        "medicine_can_work": 34,
+        "month_pressure_confirms_risk": 34,
+        "risk_is_reinforced": 34,
+        "context_strengthens_action": 28,
+        "context_strengthens_pair": 28,
+        "conditional_by_context": 15,
+        "context_weakens_action": 6,
+        "context_weakens_pair": 6,
+        "not_activated": 0,
+    }.get(str(getattr(match, "context_judgment_state", "")), 0)
+    if source == "dual":
+        grade_rank = {
+            "medicine_chain": 28,
+            "constructive_chain": 28,
+            "supportive_chain": 22,
+            "mediated_tension_chain": 22,
+            "success_chain": 22,
+            "support_chain": 22,
+            "risk_chain": 22,
+            "compounded_burden_chain": 22,
+            "conditional_chain": 14,
+            "mixed_chain": 8,
+            "disease_chain": 4,
+        }.get(str(getattr(match, "chain_grade", "")), 0)
+    else:
+        grade_rank = {
+            "core": 28,
+            "core_overload": 28,
+            "strong_regulator": 28,
+            "danger": 28,
+            "breaker": 28,
+            "breaker_or_medicine": 22,
+            "regulator_or_breaker": 22,
+            "support": 22,
+            "regulator": 22,
+            "burden": 14,
+            "conditioned_support": 14,
+            "mixed": 8,
+            "source": 8,
+        }.get(str(getattr(match, "role_grade", "")), 0)
+    return int(getattr(match, "presence_score", 0) or 0) + context_rank + grade_rank
+
+
+def _gyeokguk_match_identity(source: str, match: Any) -> tuple[str, str, str]:
+    if source == "dual":
+        return (
+            "dual",
+            str(getattr(match, "exact_pair_category", "") or getattr(match, "exact_pair_key", "")),
+            str(getattr(match, "rule_key", "")),
+        )
+    return (
+        "single",
+        str(getattr(match, "action_key", "")),
+        str(getattr(match, "rule_key", "")),
+    )
+
+
+def _gyeokguk_exact_profile_domain_basis(match: Any) -> dict[str, list[str]]:
+    payload: dict[str, list[str]] = {
+        "single": [],
+        "first": [],
+        "second": [],
+        "all": [],
+    }
+    prefixes = {
+        "single": "gyeokguk_action_exact_profile_domain:",
+        "first": "gyeokguk_dual_first_exact_profile_domain:",
+        "second": "gyeokguk_dual_second_exact_profile_domain:",
+    }
+    for code in list(getattr(match, "basis_codes", []) or []):
+        text = str(code)
+        for key, prefix in prefixes.items():
+            if text.startswith(prefix):
+                domain = text.split(":", 1)[1]
+                payload[key].append(domain)
+                payload["all"].append(domain)
+    return {
+        key: list(dict.fromkeys(values))
+        for key, values in payload.items()
+        if values
+    }
+
+
+def _gyeokguk_match_has_pattern_center_bridge(match: Any) -> bool:
+    return any(
+        str(code).startswith("gyeokguk_dual_pattern_center_bridge:")
+        for code in list(getattr(match, "basis_codes", []) or [])
+    )
+
+
+def _gyeokguk_pattern_center_relevance_score(profile: Any, source: str, match: Any) -> int:
+    pattern_ten_god = str(getattr(profile, "primary_ten_god", "") or "")
+    pattern_group = str(getattr(profile, "primary_group", "") or "")
+    if source == "dual":
+        direct = (
+            str(getattr(match, "first_ten_god", "") or "") == pattern_ten_god
+            or str(getattr(match, "second_ten_god", "") or "") == pattern_ten_god
+        )
+        same_group = (
+            str(getattr(match, "first_group", "") or "") == pattern_group
+            or str(getattr(match, "second_group", "") or "") == pattern_group
+        )
+        if direct:
+            return 46
+        if same_group:
+            return 32
+        if _gyeokguk_match_has_pattern_center_bridge(match):
+            return 28
+        return -10
+
+    acting_ten_god = str(getattr(match, "acting_ten_god", "") or "")
+    acting_group = str(getattr(match, "acting_group", "") or "")
+    if acting_ten_god == pattern_ten_god:
+        return 42
+    if acting_group == pattern_group:
+        return 30
+    if str(getattr(match, "relation_to_pattern", "") or ""):
+        return 8
+    return -8
+
+
+def _gyeokguk_center_axis_score(match: Any) -> dict[str, Any]:
+    """Score how fully a match is grounded in the required judgment axes."""
+
+    def has_text(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(has_text(item) for item in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return any(has_text(item) for item in value)
+        return bool(str(value or "").strip())
+
+    visibility_interaction = dict(getattr(match, "visibility_interaction", {}) or {})
+    position_context = dict(getattr(match, "position_context", {}) or {})
+    branch_context = dict(getattr(match, "branch_relation_context", {}) or {})
+    axis_scores = {
+        "month_command": 12 if has_text(getattr(match, "month_fit_state", "")) else 0,
+        "day_master_strength": 8 if has_text(getattr(match, "day_master_strength_context", "")) else 0,
+        "climate": 8 if has_text(getattr(match, "climate_context", "")) else 0,
+        "protrusion": 5 if has_text(getattr(match, "protrusion_effect", "") or visibility_interaction.get("protrusion", "")) else 0,
+        "rooting": 5 if has_text(getattr(match, "rooting_effect", "") or visibility_interaction.get("rooting", "")) else 0,
+        "hidden_stems": 5 if has_text(getattr(match, "hidden_effect", "") or visibility_interaction.get("hidden_stem", "")) else 0,
+        "unrooted": 3 if has_text(getattr(match, "unrooted_effect", "") or visibility_interaction.get("unrooted", "")) else 0,
+        "position": 5 if has_text(position_context or visibility_interaction.get("position", "")) else 0,
+        "branch_interactions": 5 if has_text(branch_context or visibility_interaction.get("branch_interaction", "")) else 0,
+        "flow_activation": 4 if has_text(getattr(match, "timing_activation", "")) else 0,
+    }
+    return {
+        "score": sum(axis_scores.values()),
+        "axes": axis_scores,
+    }
+
+
+def _gyeokguk_exact_ten_god_specificity_score(source: str, match: Any) -> dict[str, Any]:
+    """Score whether the selected action carries exact ten-god meaning, not only a generic group."""
+
+    if source == "dual":
+        ten_gods = [
+            str(getattr(match, "first_ten_god", "") or ""),
+            str(getattr(match, "second_ten_god", "") or ""),
+        ]
+    else:
+        ten_gods = [str(getattr(match, "acting_ten_god", "") or "")]
+
+    domains: list[str] = []
+    exact_faces = 0
+    for ten_god in ten_gods:
+        profile = dict(TEN_GOD_EXACT_ACTION_PROFILE.get(ten_god, {}) or {})
+        if TEN_GOD_EXACT_NUANCE.get(ten_god):
+            exact_faces += 1
+        domains.extend(str(domain) for domain in list(profile.get("domains", []) or []) if domain)
+
+    score = min(18, exact_faces * 4 + len(set(domains)) * 2)
+    if source == "dual" and str(getattr(match, "exact_pair_category", "") or ""):
+        score += 6
+    if source == "dual" and str(getattr(match, "exact_pair_effect", "") or "") and str(getattr(match, "exact_pair_risk", "") or ""):
+        score += 4
+
+    return {
+        "score": min(28, score),
+        "ten_gods": ten_gods,
+        "domains": sorted(set(domains)),
+        "has_exact_pair": source == "dual" and bool(str(getattr(match, "exact_pair_category", "") or "")),
+    }
+
+
+def _gyeokguk_center_selection_components(profile: Any, source: str, match: Any) -> dict[str, Any]:
+    context_rank = _gyeokguk_action_context_rank(match, source=source)
+    pattern_center = _gyeokguk_pattern_center_relevance_score(profile, source, match)
+    axis_score = _gyeokguk_center_axis_score(match)
+    exact_score = _gyeokguk_exact_ten_god_specificity_score(source, match)
+    total = context_rank + pattern_center + int(axis_score["score"]) + int(exact_score["score"])
+    return {
+        "context_rank": context_rank,
+        "pattern_center_relevance": pattern_center,
+        "required_axis_score": int(axis_score["score"]),
+        "required_axis_breakdown": dict(axis_score["axes"]),
+        "exact_ten_god_score": int(exact_score["score"]),
+        "exact_ten_god_basis": exact_score,
+        "total": total,
+    }
+
+
+def _gyeokguk_global_center_action_index(analysis: AnalysisResult, limit: int = 3) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Select the natal center actions once, then let each domain reuse them."""
+
+    profile = analysis.chart_structure.gyeokguk_profile
+    support_tags = {
+        "siksang_saengjae",
+        "jaesaenggwan",
+        "gwanin_sangsaeng",
+        "salin_sangsaeng",
+        "siksin_jesal",
+        "jaeseong_generates_gwanseong",
+        "gwanseong_generates_inseong",
+        "siksang_controls_gwanseong",
+        "gwanseong_controls_bigeop",
+        "bigeop_generates_siksang",
+        "inseong_generates_bigeop",
+    }
+    caution_tags = {
+        "sanggwan_gyeongwan",
+        "jaegeukin",
+        "bigeop_jaengjae",
+        "inseong_dosik",
+        "jaesaengsal",
+        "gwansal_honhap",
+        "inbi_overload",
+        "siksang_overload",
+        "jaeda_sinyak_risk",
+        "gwansal_overload",
+        "bigeop_controls_wealth",
+        "wealth_controls_resource",
+        "inseong_controls_output",
+    }
+
+    def candidate_tags(source: str, match: Any) -> set[str]:
+        tags = {str(tag) for tag in list(getattr(match, "classical_action_tags", []) or [])}
+        if source == "dual":
+            tags.update(str(tag) for tag in list(getattr(match, "first_single_classical_action_tags", []) or []))
+            tags.update(str(tag) for tag in list(getattr(match, "second_single_classical_action_tags", []) or []))
+        return tags
+
+    def candidate_direct_center(source: str, match: Any) -> bool:
+        pattern_ten_god = str(getattr(profile, "primary_ten_god", "") or "")
+        pattern_group = str(getattr(profile, "primary_group", "") or "")
+        if source == "dual":
+            return (
+                str(getattr(match, "first_ten_god", "") or "") == pattern_ten_god
+                or str(getattr(match, "second_ten_god", "") or "") == pattern_ten_god
+                or str(getattr(match, "first_group", "") or "") == pattern_group
+                or str(getattr(match, "second_group", "") or "") == pattern_group
+            )
+        return (
+            str(getattr(match, "acting_ten_god", "") or "") == pattern_ten_god
+            or str(getattr(match, "acting_group", "") or "") == pattern_group
+        )
+
+    candidates: list[dict[str, Any]] = []
+    for match in list(getattr(profile, "dual_ten_god_action_matches", []) or []):
+        components = _gyeokguk_center_selection_components(profile, "dual", match)
+        score = int(components["total"])
+        tags = candidate_tags("dual", match)
+        candidates.append(
+            {
+                "score": score,
+                "selection_components": components,
+                "source_order": 0,
+                "presence_score": int(getattr(match, "presence_score", 0) or 0),
+                "source": "dual",
+                "rule_key": str(getattr(match, "rule_key", "")),
+                "match": match,
+                "tags": tags,
+                "direct_center": candidate_direct_center("dual", match),
+                "center_bridge": _gyeokguk_match_has_pattern_center_bridge(match),
+                "support": bool(tags & support_tags),
+                "caution": bool(tags & caution_tags),
+            }
+        )
+    for match in list(getattr(profile, "ten_god_action_matches", []) or []):
+        components = _gyeokguk_center_selection_components(profile, "single", match)
+        score = int(components["total"])
+        tags = candidate_tags("single", match)
+        candidates.append(
+            {
+                "score": score,
+                "selection_components": components,
+                "source_order": 1,
+                "presence_score": int(getattr(match, "presence_score", 0) or 0),
+                "source": "single",
+                "rule_key": str(getattr(match, "rule_key", "")),
+                "match": match,
+                "tags": tags,
+                "direct_center": candidate_direct_center("single", match),
+                "center_bridge": False,
+                "support": bool(tags & support_tags),
+                "caution": bool(tags & caution_tags),
+            }
+        )
+
+    selected: dict[tuple[str, str, str], dict[str, int]] = {}
+    seen_categories: set[tuple[str, str]] = set()
+
+    def sorted_candidates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            items,
+            key=lambda item: (
+                -int(item["score"]),
+                int(item["source_order"]),
+                -int(item["presence_score"]),
+                str(item["rule_key"]),
+            ),
+        )
+
+    def add_candidate(candidate: dict[str, Any] | None) -> None:
+        if candidate is None or len(selected) >= limit:
+            return
+        source = str(candidate["source"])
+        match = candidate["match"]
+        identity = _gyeokguk_match_identity(source, match)
+        category = (identity[0], identity[1])
+        if category in seen_categories:
+            return
+        seen_categories.add(category)
+        selected[identity] = {
+            "rank": len(selected) + 1,
+            "score": int(candidate["score"]),
+            "presence_score": int(candidate["presence_score"]),
+            "source_order": int(candidate["source_order"]),
+            "selection_components": dict(candidate.get("selection_components", {}) or {}),
+        }
+
+    def best_candidate(predicate) -> dict[str, Any] | None:
+        matches = [candidate for candidate in candidates if predicate(candidate)]
+        return sorted_candidates(matches)[0] if matches else None
+
+    add_candidate(best_candidate(lambda item: item["source"] == "dual" and item["direct_center"] and item["support"]))
+    add_candidate(best_candidate(lambda item: item["source"] == "dual" and item["center_bridge"] and item["caution"]))
+    add_candidate(best_candidate(lambda item: item["source"] == "single" and item["direct_center"]))
+
+    for candidate in sorted_candidates(candidates):
+        if len(selected) >= limit:
+            break
+        add_candidate(candidate)
+    return selected
+
+
+def _gyeokguk_domain_aliases(domain: Domain) -> tuple[str, ...]:
+    return {
+        "money": ("money",),
+        "career": ("career", "reputation"),
+        "love": ("love", "relationship", "people", "partner"),
+        "marriage": ("marriage", "partner", "family", "relationship"),
+    }.get(domain, (domain,))
+
+
+def _gyeokguk_action_matches_domain(match: Any, domain: Domain) -> bool:
+    aliases = _gyeokguk_domain_aliases(domain)
+    if any(alias in list(getattr(match, "domain_priority", []) or []) for alias in aliases):
+        return True
+    projections = getattr(match, "domain_projections", {}) or {}
+    return isinstance(projections, dict) and any(alias in projections for alias in aliases)
+
+
+def _gyeokguk_projection_for_domain(match: Any, domain: Domain) -> str:
+    aliases = _gyeokguk_domain_aliases(domain)
+    projections = getattr(match, "domain_projections", {}) or {}
+    if not isinstance(projections, dict):
+        return ""
+    for alias in aliases:
+        text = str(projections.get(alias, "") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _gyeokguk_domain_relevance_score(match: Any, domain: Domain) -> int:
+    aliases = _gyeokguk_domain_aliases(domain)
+    priority = [str(item) for item in list(getattr(match, "domain_priority", []) or [])]
+    projections = getattr(match, "domain_projections", {}) or {}
+    score = 0
+    for alias in aliases:
+        if alias in priority:
+            # The first material in each domain must be the center action that
+            # actually explains that domain, not merely the globally strongest
+            # action repeated across every section.
+            score = max(score, 130 - min(priority.index(alias), 5) * 16)
+        if isinstance(projections, dict) and str(projections.get(alias, "") or "").strip():
+            score = max(score, 20)
+    return score
+
+
+def _gyeokguk_single_operation_axes(match: Any) -> dict[str, Any]:
+    """Preserve the single-ten-god action as judgment material, not prose only."""
+
+    acting = str(getattr(match, "acting_ten_god", "") or "")
+    return {
+        "operation_type": "single_ten_god",
+        "acting_ten_god": acting,
+        "acting_ten_god_label": _ten_god_label(acting),
+        "acting_group": getattr(match, "acting_group", ""),
+        "relation_to_pattern": getattr(match, "relation_to_pattern", ""),
+        "action_key": getattr(match, "action_key", ""),
+        "action_nature": getattr(match, "action_nature", ""),
+        "role_grade": getattr(match, "role_grade", ""),
+        "center_effect": getattr(match, "center_effect", ""),
+        "role_in_pattern_logic": getattr(match, "role_in_pattern_logic", ""),
+        "pattern_effect_state": getattr(match, "pattern_effect_state", ""),
+        "pattern_resolution_state": getattr(match, "pattern_resolution_state", ""),
+        "pattern_resolution_logic": getattr(match, "pattern_resolution_logic", ""),
+        "activation_context": getattr(match, "activation_context", ""),
+    }
+
+
+def _gyeokguk_dual_operation_axes(match: Any) -> dict[str, Any]:
+    """Preserve the ordered two-ten-god chain and its disease/medicine logic."""
+
+    first = str(getattr(match, "first_ten_god", "") or "")
+    second = str(getattr(match, "second_ten_god", "") or "")
+    pattern_ten_god = str(getattr(match, "pattern_ten_god", "") or "")
+    return {
+        "operation_type": "dual_ten_god_chain",
+        "pattern_ten_god": pattern_ten_god,
+        "pattern_ten_god_label": _ten_god_label(pattern_ten_god),
+        "first_ten_god": first,
+        "first_ten_god_label": _ten_god_label(first),
+        "first_group": getattr(match, "first_group", ""),
+        "first_relation_to_pattern": getattr(match, "first_relation_to_pattern", ""),
+        "second_ten_god": second,
+        "second_ten_god_label": _ten_god_label(second),
+        "second_group": getattr(match, "second_group", ""),
+        "second_relation_to_pattern": getattr(match, "second_relation_to_pattern", ""),
+        "first_to_second_relation": getattr(match, "first_to_second_relation", ""),
+        "sequence_key": getattr(match, "sequence_key", ""),
+        "chain_grade": getattr(match, "chain_grade", ""),
+        "chain_nature": getattr(match, "chain_nature", ""),
+        "pattern_combination_state": getattr(match, "pattern_combination_state", ""),
+        "combination_resolution_state": getattr(match, "combination_resolution_state", ""),
+        "combination_resolution_logic": getattr(match, "combination_resolution_logic", ""),
+        "primary_actor": getattr(match, "primary_actor", ""),
+        "secondary_actor": getattr(match, "secondary_actor", ""),
+        "actor_hierarchy_logic": getattr(match, "actor_hierarchy_logic", ""),
+        "disease_medicine_logic": getattr(match, "disease_medicine_logic", ""),
+        "first_then_second_activation": getattr(match, "first_then_second_activation", ""),
+        "second_then_first_activation": getattr(match, "second_then_first_activation", ""),
+    }
+
+
+def _gyeokguk_reality_axes(match: Any) -> dict[str, Any]:
+    """Keep where the action is visible, rooted, hidden, and eventized."""
+
+    return {
+        "presence_state": getattr(match, "presence_state", ""),
+        "presence_score": getattr(match, "presence_score", 0),
+        "month_fit_state": getattr(match, "month_fit_state", ""),
+        "verdict": getattr(match, "verdict", ""),
+        "day_master_strength_context": getattr(match, "day_master_strength_context", ""),
+        "climate_context": getattr(match, "climate_context", ""),
+        "position_context": dict(getattr(match, "position_context", {}) or {}),
+        "branch_relation_context": dict(getattr(match, "branch_relation_context", {}) or {}),
+        "protrusion_effect": getattr(match, "protrusion_effect", ""),
+        "rooting_effect": getattr(match, "rooting_effect", ""),
+        "hidden_effect": getattr(match, "hidden_effect", ""),
+        "unrooted_effect": getattr(match, "unrooted_effect", ""),
+        "event_manifestations": dict(getattr(match, "event_manifestations", {}) or {}),
+        "timing_activation": getattr(match, "timing_activation", ""),
+    }
+
+
+def _gyeokguk_eventization_basis(match: Any, context_axes: dict[str, Any], reality_axes: dict[str, Any]) -> dict[str, Any]:
+    """Preserve the route from gyeokguk theory to event-level judgment."""
+
+    visibility_interaction = dict(getattr(match, "visibility_interaction", {}) or {})
+    position_context = reality_axes["position_context"] or visibility_interaction.get("position", "")
+    branch_relation_context = reality_axes["branch_relation_context"] or visibility_interaction.get("branch_interaction", "")
+    return {
+        "month_fit_state": getattr(match, "month_fit_state", ""),
+        "day_master_strength": getattr(match, "day_master_strength_context", ""),
+        "climate": getattr(match, "climate_context", ""),
+        "presence_state": getattr(match, "presence_state", ""),
+        "presence_score": getattr(match, "presence_score", 0),
+        "visibility_path": {
+            "protrusion": reality_axes["protrusion_effect"] or visibility_interaction.get("protrusion", ""),
+            "rooting": reality_axes["rooting_effect"] or visibility_interaction.get("rooting", ""),
+            "hidden_stems": reality_axes["hidden_effect"] or visibility_interaction.get("hidden_stem", ""),
+            "unrooted": reality_axes["unrooted_effect"] or visibility_interaction.get("unrooted", ""),
+            "position": position_context,
+            "branch_interactions": branch_relation_context,
+        },
+        "luck_activation": reality_axes["timing_activation"],
+        "judgment_order": context_axes["judgment_order"],
+        "judgment_path": context_axes["context_judgment_path"],
+    }
+
+
+def _gyeokguk_exact_ten_god_faces(match: Any) -> dict[str, Any]:
+    """Extract exact ten-god action faces from rule basis codes."""
+
+    def profile_payload(ten_god: str) -> dict[str, Any]:
+        profile = dict(TEN_GOD_EXACT_ACTION_PROFILE.get(ten_god, {}) or {})
+        return {
+            "ten_god": ten_god,
+            "label": _ten_god_label(ten_god),
+            "nuance": TEN_GOD_EXACT_NUANCE.get(ten_god, ""),
+            "excess": profile.get("excess", ""),
+            "deficiency": profile.get("deficiency", ""),
+            "protruded": profile.get("protruded", ""),
+            "hidden": profile.get("hidden", ""),
+            "rooted": profile.get("rooted", ""),
+            "unrooted": profile.get("unrooted", ""),
+            "domains": list(profile.get("domains", []) or []),
+        }
+
+    codes = [str(code) for code in list(getattr(match, "basis_codes", []) or [])]
+    single = [
+        code.split(":", 1)[1]
+        for code in codes
+        if code.startswith("gyeokguk_action_exact_profile_domain:")
+    ]
+    first = [
+        code.split(":", 1)[1]
+        for code in codes
+        if code.startswith("gyeokguk_dual_first_exact_profile_domain:")
+    ]
+    second = [
+        code.split(":", 1)[1]
+        for code in codes
+        if code.startswith("gyeokguk_dual_second_exact_profile_domain:")
+    ]
+    return {
+        "single_profile": profile_payload(str(getattr(match, "acting_ten_god", "") or "")),
+        "first_profile": profile_payload(str(getattr(match, "first_ten_god", "") or "")),
+        "second_profile": profile_payload(str(getattr(match, "second_ten_god", "") or "")),
+        "single_domains": list(dict.fromkeys(single)),
+        "first_domains": list(dict.fromkeys(first)),
+        "second_domains": list(dict.fromkeys(second)),
+        "all_domains": list(dict.fromkeys([*single, *first, *second])),
+    }
+
+
+def _gyeokguk_context_axes(match: Any) -> dict[str, Any]:
+    return {
+        "context_judgment_state": getattr(match, "context_judgment_state", ""),
+        "context_judgment_summary": getattr(match, "context_judgment_summary", ""),
+        "context_judgment_path": list(getattr(match, "context_judgment_path", []) or []),
+        "domain_priority": list(getattr(match, "domain_priority", []) or []),
+        "expert_summary": getattr(match, "expert_summary", ""),
+        "judgment_order": list(getattr(match, "judgment_order", []) or []),
+        "basis_codes": list(getattr(match, "basis_codes", []) or []),
+        "counter_signals": list(getattr(match, "counter_signals", []) or []),
+    }
+
+
+def _gyeokguk_single_action_material(
+    analysis: AnalysisResult,
+    match: Any,
+    domain: Domain,
+    center_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    profile = analysis.chart_structure.gyeokguk_profile
+    center_meta = dict(center_meta or {})
+    pattern_label = PATTERN_LABELS.get(profile.primary_pattern, profile.primary_pattern)
+    role_label = _ten_god_label(str(getattr(match, "acting_ten_god", "")))
+    domain_name = _domain_label(domain)
+    projection = _gyeokguk_projection_for_domain(match, domain)
+    summary = str(getattr(match, "context_judgment_summary", "") or getattr(match, "expert_summary", "") or "").strip()
+    excess = str(getattr(match, "excess_disease", "") or "").strip()
+    deficiency = str(getattr(match, "deficiency_gap", "") or "").strip()
+    protrusion = str(getattr(match, "protrusion_effect", "") or "").strip()
+    rooting = str(getattr(match, "rooting_effect", "") or "").strip()
+    hidden = str(getattr(match, "hidden_effect", "") or "").strip()
+    effect_parts = [part for part in (projection, summary, excess, deficiency) if part]
+    operation_axes = _gyeokguk_single_operation_axes(match)
+    reality_axes = _gyeokguk_reality_axes(match)
+    context_axes = _gyeokguk_context_axes(match)
+    exact_ten_god_faces = _gyeokguk_exact_ten_god_faces(match)
+    pattern_identity = {
+        "pattern": profile.primary_pattern,
+        "pattern_label": pattern_label,
+        "pattern_center_ten_god": profile.primary_ten_god,
+        "pattern_center_ten_god_label": _ten_god_label(profile.primary_ten_god),
+        "month_command_ten_god": profile.month_command_ten_god,
+        "month_command_ten_god_label": _ten_god_label(profile.month_command_ten_god),
+        "pattern_family": profile.family,
+        "formation_state": profile.formation_state,
+        "clarity_state": profile.clarity_state,
+    }
+    action_identity = {
+        **pattern_identity,
+        "acting_ten_god": getattr(match, "acting_ten_god", ""),
+        "acting_ten_god_label": role_label,
+        "relation_to_pattern": getattr(match, "relation_to_pattern", ""),
+        "action_key": getattr(match, "action_key", ""),
+        "action_nature": getattr(match, "action_nature", ""),
+        "center_effect": getattr(match, "center_effect", ""),
+        "exact_ten_god_domains": exact_ten_god_faces["single_domains"],
+    }
+    sentence = _material_sentence(
+        " ".join(
+            [
+                f"격국은 {pattern_label}을 중심으로 잡히며, {role_label} 작용이 {domain_name} 판단에 직접 걸립니다.",
+                *effect_parts[:3],
+            ]
+        )
+    )
+    return {
+        "layer": "gyeokguk_core_action",
+        "label": f"{pattern_label} {role_label}",
+        "priority": "primary",
+        "source": "single",
+        "center_selected": bool(center_meta),
+        "center_rank": int(center_meta.get("rank", 0) or 0),
+        "center_selection_score": int(center_meta.get("score", 0) or 0),
+        "center_selection_components": dict(center_meta.get("selection_components", {}) or {}),
+        "pattern": profile.primary_pattern,
+        "action_identity": action_identity,
+        "exact_profile_domain_basis": _gyeokguk_exact_profile_domain_basis(match),
+        "exact_ten_god_faces": exact_ten_god_faces,
+        "acting_ten_god": getattr(match, "acting_ten_god", ""),
+        "acting_ten_god_label": role_label,
+        "action_key": getattr(match, "action_key", ""),
+        "action_nature": getattr(match, "action_nature", ""),
+        "role_grade": getattr(match, "role_grade", ""),
+        "presence_score": getattr(match, "presence_score", 0),
+        "month_fit_state": getattr(match, "month_fit_state", ""),
+        "context_judgment_state": getattr(match, "context_judgment_state", ""),
+        "context_judgment_summary": summary,
+        "context_judgment_path": list(getattr(match, "context_judgment_path", []) or []),
+        "domain_projection": projection,
+        "excess_disease": excess,
+        "deficiency_gap": deficiency,
+        "protrusion_effect": protrusion,
+        "hidden_effect": hidden,
+        "rooting_effect": rooting,
+        "unrooted_effect": getattr(match, "unrooted_effect", ""),
+        "timing_activation": getattr(match, "timing_activation", ""),
+        "operation_axes": operation_axes,
+        "reality_axes": reality_axes,
+        "context_axes": context_axes,
+        "event_manifestations": reality_axes["event_manifestations"],
+        "visibility_axes": {
+            "protrusion": protrusion,
+            "rooting": rooting,
+            "hidden": hidden,
+            "unrooted": getattr(match, "unrooted_effect", ""),
+            "position": reality_axes["position_context"],
+            "branch_relation": reality_axes["branch_relation_context"],
+        },
+        "eventization_basis": _gyeokguk_eventization_basis(match, context_axes, reality_axes),
+        "judgment_order": list(getattr(match, "judgment_order", []) or []),
+        "sentence": sentence,
+        "basis_codes": list(getattr(match, "basis_codes", []) or []),
+        "mechanic_codes": [
+            str(code)
+            for code in list(getattr(match, "basis_codes", []) or [])
+            if str(code).startswith("gyeokguk_single_mechanic:")
+        ],
+        "counter_signals": list(getattr(match, "counter_signals", []) or []),
+    }
+
+
+def _gyeokguk_dual_action_material(
+    analysis: AnalysisResult,
+    match: Any,
+    domain: Domain,
+    center_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    profile = analysis.chart_structure.gyeokguk_profile
+    center_meta = dict(center_meta or {})
+    pattern_label = PATTERN_LABELS.get(profile.primary_pattern, profile.primary_pattern)
+    first_label = _ten_god_label(str(getattr(match, "first_ten_god", "")))
+    second_label = _ten_god_label(str(getattr(match, "second_ten_god", "")))
+    pair_name = str(getattr(match, "exact_pair_name", "") or f"{first_label}-{second_label}")
+    domain_name = _domain_label(domain)
+    projection = _gyeokguk_projection_for_domain(match, domain)
+    summary = str(getattr(match, "context_judgment_summary", "") or getattr(match, "expert_summary", "") or "").strip()
+    effect = str(getattr(match, "exact_pair_effect", "") or "").strip()
+    risk = str(getattr(match, "exact_pair_risk", "") or "").strip()
+    disease_logic = str(getattr(match, "disease_medicine_logic", "") or "").strip()
+    operation_axes = _gyeokguk_dual_operation_axes(match)
+    reality_axes = _gyeokguk_reality_axes(match)
+    context_axes = _gyeokguk_context_axes(match)
+    exact_ten_god_faces = _gyeokguk_exact_ten_god_faces(match)
+    pattern_identity = {
+        "pattern": profile.primary_pattern,
+        "pattern_label": pattern_label,
+        "pattern_center_ten_god": profile.primary_ten_god,
+        "pattern_center_ten_god_label": _ten_god_label(profile.primary_ten_god),
+        "month_command_ten_god": profile.month_command_ten_god,
+        "month_command_ten_god_label": _ten_god_label(profile.month_command_ten_god),
+        "pattern_family": profile.family,
+        "formation_state": profile.formation_state,
+        "clarity_state": profile.clarity_state,
+    }
+    action_identity = {
+        **pattern_identity,
+        "first_ten_god": getattr(match, "first_ten_god", ""),
+        "first_ten_god_label": first_label,
+        "second_ten_god": getattr(match, "second_ten_god", ""),
+        "second_ten_god_label": second_label,
+        "pattern_ten_god": getattr(match, "pattern_ten_god", ""),
+        "pattern_ten_god_label": _ten_god_label(str(getattr(match, "pattern_ten_god", ""))),
+        "pattern_group": getattr(match, "pattern_group", ""),
+        "first_relation_to_pattern": getattr(match, "first_relation_to_pattern", ""),
+        "second_relation_to_pattern": getattr(match, "second_relation_to_pattern", ""),
+        "first_to_second_relation": getattr(match, "first_to_second_relation", ""),
+        "sequence_key": getattr(match, "sequence_key", ""),
+        "chain_nature": getattr(match, "chain_nature", ""),
+        "exact_pair_key": getattr(match, "exact_pair_key", ""),
+        "exact_pair_category": getattr(match, "exact_pair_category", ""),
+        "exact_pair_name": pair_name,
+        "exact_pair_effect": effect,
+        "exact_pair_risk": risk,
+        "exact_pair_timing": getattr(match, "exact_pair_timing", ""),
+        "first_then_second_activation": getattr(match, "first_then_second_activation", ""),
+        "second_then_first_activation": getattr(match, "second_then_first_activation", ""),
+        "first_exact_ten_god_domains": exact_ten_god_faces["first_domains"],
+        "second_exact_ten_god_domains": exact_ten_god_faces["second_domains"],
+    }
+    sentence = _material_sentence(
+        " ".join(
+            [
+                f"격국은 {pattern_label}을 중심으로 잡히며, {pair_name} 작용이 {domain_name} 판단의 핵심 연결부입니다.",
+                *[part for part in (projection, summary, effect, risk) if part][:3],
+            ]
+        )
+    )
+    return {
+        "layer": "gyeokguk_core_action",
+        "label": f"{pattern_label} {pair_name}",
+        "priority": "primary",
+        "source": "dual",
+        "center_selected": bool(center_meta),
+        "center_rank": int(center_meta.get("rank", 0) or 0),
+        "center_selection_score": int(center_meta.get("score", 0) or 0),
+        "center_selection_components": dict(center_meta.get("selection_components", {}) or {}),
+        "pattern": profile.primary_pattern,
+        "action_identity": action_identity,
+        "exact_profile_domain_basis": _gyeokguk_exact_profile_domain_basis(match),
+        "exact_ten_god_faces": exact_ten_god_faces,
+        "first_ten_god": getattr(match, "first_ten_god", ""),
+        "first_ten_god_label": first_label,
+        "second_ten_god": getattr(match, "second_ten_god", ""),
+        "second_ten_god_label": second_label,
+        "first_to_second_relation": getattr(match, "first_to_second_relation", ""),
+        "sequence_key": getattr(match, "sequence_key", ""),
+        "chain_grade": getattr(match, "chain_grade", ""),
+        "exact_pair_key": getattr(match, "exact_pair_key", ""),
+        "exact_pair_category": getattr(match, "exact_pair_category", ""),
+        "exact_pair_name": pair_name,
+        "exact_pair_effect": effect,
+        "exact_pair_risk": risk,
+        "exact_pair_timing": getattr(match, "exact_pair_timing", ""),
+        "pattern_combination_state": getattr(match, "pattern_combination_state", ""),
+        "primary_actor": getattr(match, "primary_actor", ""),
+        "secondary_actor": getattr(match, "secondary_actor", ""),
+        "disease_medicine_logic": disease_logic,
+        "first_then_second_activation": getattr(match, "first_then_second_activation", ""),
+        "second_then_first_activation": getattr(match, "second_then_first_activation", ""),
+        "presence_score": getattr(match, "presence_score", 0),
+        "month_fit_state": getattr(match, "month_fit_state", ""),
+        "context_judgment_state": getattr(match, "context_judgment_state", ""),
+        "context_judgment_summary": summary,
+        "context_judgment_path": list(getattr(match, "context_judgment_path", []) or []),
+        "domain_projection": projection,
+        "timing_activation": getattr(match, "timing_activation", ""),
+        "operation_axes": operation_axes,
+        "reality_axes": reality_axes,
+        "context_axes": context_axes,
+        "event_manifestations": reality_axes["event_manifestations"],
+        "interaction_judgment": dict(getattr(match, "interaction_judgment", {}) or {}),
+        "visibility_interaction": dict(getattr(match, "visibility_interaction", {}) or {}),
+        "visibility_axes": {
+            "interaction": dict(getattr(match, "interaction_judgment", {}) or {}),
+            "visibility": dict(getattr(match, "visibility_interaction", {}) or {}),
+            "position": reality_axes["position_context"],
+            "branch_relation": reality_axes["branch_relation_context"],
+        },
+        "eventization_basis": {
+            **_gyeokguk_eventization_basis(match, context_axes, reality_axes),
+            "judgment_path": context_axes["context_judgment_path"],
+            "activation_order": {
+                "first_then_second": getattr(match, "first_then_second_activation", ""),
+                "second_then_first": getattr(match, "second_then_first_activation", ""),
+            },
+        },
+        "judgment_order": list(getattr(match, "judgment_order", []) or []),
+        "sentence": sentence,
+        "basis_codes": list(getattr(match, "basis_codes", []) or []),
+        "mechanic_codes": [
+            str(code)
+            for code in list(getattr(match, "basis_codes", []) or [])
+            if str(code).startswith("gyeokguk_dual_mechanic:")
+        ],
+        "counter_signals": list(getattr(match, "counter_signals", []) or []),
+    }
+
+
+def _gyeokguk_core_action_materials(analysis: AnalysisResult, domain: Domain, limit: int = 3) -> list[dict[str, Any]]:
+    profile = analysis.chart_structure.gyeokguk_profile
+    center_index = _gyeokguk_global_center_action_index(analysis)
+    candidates: list[tuple[int, str, Any, dict[str, int]]] = []
+    for match in list(getattr(profile, "dual_ten_god_action_matches", []) or []):
+        if _gyeokguk_action_matches_domain(match, domain):
+            center_meta = center_index.get(_gyeokguk_match_identity("dual", match), {})
+            center_bonus = 110 - int(center_meta.get("rank", 0) or 0) * 18 if center_meta else 0
+            candidates.append((
+                _gyeokguk_action_context_rank(match, source="dual")
+                + _gyeokguk_domain_relevance_score(match, domain)
+                + center_bonus,
+                "dual",
+                match,
+                center_meta,
+            ))
+    for match in list(getattr(profile, "ten_god_action_matches", []) or []):
+        if _gyeokguk_action_matches_domain(match, domain):
+            center_meta = center_index.get(_gyeokguk_match_identity("single", match), {})
+            center_bonus = 110 - int(center_meta.get("rank", 0) or 0) * 18 if center_meta else 0
+            candidates.append((
+                _gyeokguk_action_context_rank(match, source="single")
+                + _gyeokguk_domain_relevance_score(match, domain)
+                + center_bonus,
+                "single",
+                match,
+                center_meta,
+            ))
+    if not candidates:
+        for match in list(getattr(profile, "dual_ten_god_action_matches", []) or []):
+            center_meta = center_index.get(_gyeokguk_match_identity("dual", match), {})
+            if center_meta:
+                candidates.append((int(center_meta.get("score", 0) or 0), "dual", match, center_meta))
+        for match in list(getattr(profile, "ten_god_action_matches", []) or []):
+            center_meta = center_index.get(_gyeokguk_match_identity("single", match), {})
+            if center_meta:
+                candidates.append((int(center_meta.get("score", 0) or 0), "single", match, center_meta))
+    candidates.sort(key=lambda item: (-item[0], 0 if item[1] == "dual" else 1))
+
+    materials: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    deferred_center_candidates: list[tuple[int, str, Any, dict[str, int]]] = []
+    selected_center_count = 0
+
+    def append_material(source: str, match: Any, center_meta: dict[str, int]) -> None:
+        if source == "dual":
+            materials.append(_gyeokguk_dual_action_material(analysis, match, domain, center_meta))
+        else:
+            materials.append(_gyeokguk_single_action_material(analysis, match, domain, center_meta))
+
+    for score, source, match, center_meta in candidates:
+        key = (
+            source,
+            str(getattr(match, "exact_pair_category", "") or getattr(match, "action_key", "")),
+        )
+        if key in seen:
+            continue
+        if center_meta and selected_center_count >= 1:
+            deferred_center_candidates.append((score, source, match, center_meta))
+            continue
+        seen.add(key)
+        append_material(source, match, center_meta)
+        if center_meta:
+            selected_center_count += 1
+        if len(materials) >= limit:
+            break
+    for _, source, match, center_meta in deferred_center_candidates:
+        if len(materials) >= limit:
+            break
+        key = (
+            source,
+            str(getattr(match, "exact_pair_category", "") or getattr(match, "action_key", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        append_material(source, match, center_meta)
+    return materials
+
+
+def _gyeokguk_flow_action_material(
+    analysis: AnalysisResult,
+    match: Any,
+    domain: Domain,
+    source: str,
+    center_meta: dict[str, Any] | None,
+    target_years: list[int],
+) -> dict[str, Any]:
+    if source == "dual":
+        material = _gyeokguk_dual_action_material(analysis, match, domain, center_meta)
+    else:
+        material = _gyeokguk_single_action_material(analysis, match, domain, center_meta)
+
+    label = str(material.get("label") or "")
+    domain_name = _domain_label(domain)
+    timing_activation = str(getattr(match, "timing_activation", "") or "").strip()
+    event_manifestations = dict(getattr(match, "event_manifestations", {}) or {})
+    flow_basis = {
+        "target_years": list(target_years),
+        "timing_activation": timing_activation,
+        "luck_activation_event": str(event_manifestations.get("luck_activation", "") or "").strip(),
+        "domain_projection": _gyeokguk_projection_for_domain(match, domain),
+        "judgment_order": list(getattr(match, "judgment_order", []) or []),
+        "event_manifestations": event_manifestations,
+    }
+    if source == "dual":
+        flow_basis.update(
+            {
+                "exact_pair_timing": str(getattr(match, "exact_pair_timing", "") or "").strip(),
+                "first_then_second_activation": str(getattr(match, "first_then_second_activation", "") or "").strip(),
+                "second_then_first_activation": str(getattr(match, "second_then_first_activation", "") or "").strip(),
+            }
+        )
+
+    basis_codes = list(material.get("basis_codes", []) or [])
+    basis_codes.extend(
+        [
+            "gyeokguk_flow_action",
+            f"gyeokguk_flow_action_source:{source}",
+            f"gyeokguk_flow_action_domain:{domain}",
+        ]
+    )
+    basis_codes.extend(f"gyeokguk_flow_action_target_year:{year}" for year in target_years)
+
+    sentence = _material_sentence(
+        f"대운·세운에서 {label} 작용이 현실화되는 시기에는 {domain_name} 판단에서 {timing_activation}"
+    )
+    material.update(
+        {
+            "layer": "gyeokguk_flow_action",
+            "priority": "timing",
+            "flow_selected": True,
+            "target_years": list(target_years),
+            "flow_activation_basis": flow_basis,
+            "sentence": sentence,
+            "basis_codes": list(dict.fromkeys(code for code in basis_codes if code)),
+        }
+    )
+    return material
+
+
+def _gyeokguk_flow_action_materials(analysis: AnalysisResult, domain: Domain, limit: int = 2) -> list[dict[str, Any]]:
+    target_years = [
+        int(year)
+        for year in list(analysis.trace.get("target_years", []) or [])
+        if isinstance(year, int)
+    ]
+    if not target_years:
+        return []
+
+    profile = analysis.chart_structure.gyeokguk_profile
+    center_index = _gyeokguk_global_center_action_index(analysis)
+    candidates: list[tuple[int, str, Any, dict[str, Any]]] = []
+
+    def flow_score(match: Any, source: str, center_meta: dict[str, Any]) -> int:
+        event_manifestations = dict(getattr(match, "event_manifestations", {}) or {})
+        timing_activation = str(getattr(match, "timing_activation", "") or "").strip()
+        timing_score = 24 if timing_activation else 0
+        luck_event_score = 18 if str(event_manifestations.get("luck_activation", "") or "").strip() else 0
+        center_bonus = 95 - int(center_meta.get("rank", 0) or 0) * 18 if center_meta else 0
+        return (
+            _gyeokguk_action_context_rank(match, source=source)
+            + _gyeokguk_domain_relevance_score(match, domain)
+            + timing_score
+            + luck_event_score
+            + center_bonus
+        )
+
+    for match in list(getattr(profile, "dual_ten_god_action_matches", []) or []):
+        if not _gyeokguk_action_matches_domain(match, domain):
+            continue
+        center_meta = center_index.get(_gyeokguk_match_identity("dual", match), {})
+        candidates.append((flow_score(match, "dual", center_meta), "dual", match, center_meta))
+    for match in list(getattr(profile, "ten_god_action_matches", []) or []):
+        if not _gyeokguk_action_matches_domain(match, domain):
+            continue
+        center_meta = center_index.get(_gyeokguk_match_identity("single", match), {})
+        candidates.append((flow_score(match, "single", center_meta), "single", match, center_meta))
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda item: (-item[0], 0 if item[1] == "dual" else 1))
+    materials: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for _, source, match, center_meta in candidates:
+        key = (
+            source,
+            str(getattr(match, "exact_pair_category", "") or getattr(match, "action_key", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        materials.append(_gyeokguk_flow_action_material(analysis, match, domain, source, center_meta, target_years))
+        if len(materials) >= limit:
+            break
+    return materials
+
+
+def _domain_judgment_shared_materials(
+    analysis: AnalysisResult,
+    domain: Domain,
+) -> dict[str, Any]:
+    """Build the chart-level judgment layers that every packet in a domain shares."""
+
+    before_pattern = [
+        _month_command_material(analysis, domain),
+        _month_governance_material(analysis, domain),
+    ]
+    after_pattern: list[dict[str, Any]] = []
+    after_pattern.extend(_cycle_regulation_materials(analysis, domain))
+    after_pattern.append(_element_material(analysis, domain))
+    after_pattern.append(_strength_material(analysis, domain))
+    after_pattern.extend(_branch_foundation_materials(analysis, domain))
+    after_pattern.extend(_hidden_stem_materials(analysis, domain))
+    after_pattern.append(_ten_god_material(analysis, domain))
+    after_pattern.extend(_gyeokguk_core_action_materials(analysis, domain))
+    after_pattern.extend(_gyeokguk_flow_action_materials(analysis, domain))
+    after_pattern.extend(_branch_relation_materials(analysis, domain))
+
+    after_flow: list[dict[str, Any]] = []
+    after_flow.extend(_element_combo_materials(analysis, domain))
+    after_flow.extend(_stem_reception_materials(analysis, domain))
+    after_flow.extend(_integrated_materials(analysis, domain))
+    return {
+        "before_pattern": before_pattern,
+        "after_pattern": after_pattern,
+        "after_flow": after_flow,
+        "cycle_principle_matrix": _cycle_principle_matrix_context(analysis, domain),
+    }
+
+
+def build_domain_judgment_context(
+    analysis: AnalysisResult,
+    packet: EventPacket,
+    *,
+    shared_materials_by_domain: dict[Domain, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Build a report-ready judgment context for one ProductOutputItem."""
 
     domain = packet.domain
-    materials: list[dict[str, Any]] = []
-    materials.append(_month_command_material(analysis, domain))
-    materials.append(_month_governance_material(analysis, domain))
+    shared = None
+    if shared_materials_by_domain is not None:
+        shared = shared_materials_by_domain.get(domain)
+        if shared is None:
+            shared = _domain_judgment_shared_materials(analysis, domain)
+            shared_materials_by_domain[domain] = shared
+    if shared is None:
+        shared = _domain_judgment_shared_materials(analysis, domain)
+
+    materials: list[dict[str, Any]] = [
+        dict(material)
+        for material in list(shared.get("before_pattern") or [])
+    ]
     materials.append(_pattern_need_material(analysis, domain, packet))
-    materials.extend(_cycle_regulation_materials(analysis, domain))
-    materials.append(_element_material(analysis, domain))
-    materials.append(_strength_material(analysis, domain))
-    materials.extend(_branch_foundation_materials(analysis, domain))
-    materials.extend(_hidden_stem_materials(analysis, domain))
-    materials.append(_ten_god_material(analysis, domain))
-    materials.extend(_branch_relation_materials(analysis, domain))
+    materials.extend(
+        dict(material)
+        for material in list(shared.get("after_pattern") or [])
+    )
     materials.extend(_flow_branch_relation_materials(analysis, packet, domain))
-    materials.extend(_element_combo_materials(analysis, domain))
-    materials.extend(_stem_reception_materials(analysis, domain))
-    materials.extend(_integrated_materials(analysis, domain))
+    materials.extend(
+        dict(material)
+        for material in list(shared.get("after_flow") or [])
+    )
     materials.append(_fortune_material(analysis, packet))
     materials = _dedupe_materials(materials)
 
@@ -4997,7 +6125,7 @@ def build_domain_judgment_context(analysis: AnalysisResult, packet: EventPacket)
     reality_conclusions = _reality_conclusion_sentences(domain, materials)
     fortune_conclusions = _fortune_conclusion_sentences(analysis, packet)
     cycle_adjudication = _build_cycle_adjudication_context(domain, materials, packet)
-    cycle_principle_matrix = _cycle_principle_matrix_context(analysis, domain)
+    cycle_principle_matrix = dict(shared.get("cycle_principle_matrix") or {})
 
     return {
         "version": JUDGMENT_CONTEXT_VERSION,
@@ -5035,6 +6163,8 @@ def build_domain_judgment_context(analysis: AnalysisResult, packet: EventPacket)
             "cycle_adjudication": str(cycle_adjudication.get("primary_cycle", {}).get("adjudication") or ""),
             "element_basis": next((m["sentence"] for m in materials if m.get("layer") == "element_distribution"), ""),
             "ten_god_basis": next((m["sentence"] for m in materials if m.get("layer") == "ten_god_distribution"), ""),
+            "gyeokguk_action_basis": next((m["sentence"] for m in materials if m.get("layer") == "gyeokguk_core_action"), ""),
+            "gyeokguk_flow_basis": next((m["sentence"] for m in materials if m.get("layer") == "gyeokguk_flow_action"), ""),
             "branch_basis": next((m["sentence"] for m in materials if m.get("layer") == "branch_relations"), ""),
             "flow_branch_basis": next((m["sentence"] for m in materials if m.get("layer") == "flow_branch_relations"), ""),
             "fortune_basis": next((m["sentence"] for m in materials if m.get("layer") == "fortune_activation"), ""),

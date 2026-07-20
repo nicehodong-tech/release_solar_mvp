@@ -1110,6 +1110,7 @@ def _score_combination_profiles(
         list(element_combination_profile.heavenly_stem_signals)
         + list(element_combination_profile.stem_branch_signals)
         + list(element_combination_profile.hidden_stem_signals)
+        + list(element_combination_profile.month_hidden_visible_signals)
     )
     for signal in element_signals:
         if signal.signal_id not in element_top_ids or not {"career", "money"}.intersection(signal.domain_links):

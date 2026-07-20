@@ -7,16 +7,27 @@ leaking into page-level code.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
 from functools import lru_cache
 from math import ceil
 import re
+from threading import local
 from typing import Any
 
 from saju_analysis_engine import (
+    TEN_GOD_DIRECTION_RULES,
     analyze_chart,
     build_product_output,
     build_timing_decision_payload_from_flows,
+)
+from saju_analysis_engine.core_keyword_dictionary import (
+    core_keywords_for_exact_section,
+    core_keywords_for_query,
+    core_section_field,
+    core_section_heading,
+    core_source_section_profile,
 )
 from saju_analysis_engine.branch_reality_profiles import (
     branch_domain_texture,
@@ -28,13 +39,65 @@ from saju_analysis_engine.premium_category_topics import (
     premium_topic_definition,
     premium_topic_items,
 )
+from saju_analysis_engine.tongbyeon_phrase_bank import (
+    compose_tongbyeon_timing_sentence,
+    select_tongbyeon_summary_phrase,
+    select_tongbyeon_timing_phrase,
+    timing_lifecycle_category,
+    tongbyeon_surface_text,
+    tongbyeon_surface_title,
+)
+from saju_analysis_engine.ten_gods import main_hidden_stem, ten_god_for
+from saju_analysis_engine.timing_scoring import (
+    event_relation_hits,
+    timing_activation_modifier,
+    timing_base_score,
+)
+from saju_analysis_engine.constants import BRANCH_HIDDEN_STEMS
 from saju_birth_engine import BirthInput, BirthChartResult, build_birth_chart
 from saju_birth_engine.pillars import year_pillar_for_gregorian_year
 
+from .annual_metric_contracts import (
+    ANNUAL_METRIC_CONTRACTS,
+    annual_contract_grade,
+)
 
-SUPPORTED_TIERS: set[str] = {"free", "basic", "premium"}
+
+_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL = local()
+
+
+@lru_cache(maxsize=4096)
+def _cached_core_keywords_for_query(query: str, limit: int = 7) -> tuple[str, ...]:
+    return tuple(core_keywords_for_query(query, limit=limit))
+
+
+def _compact_core_keyword_query(parts: list[Any], *, limit: int = 7) -> list[str]:
+    compact_parts: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = str(part or "").strip()
+        if not text:
+            continue
+        text = re.sub(r"\s+", " ", text)
+        if len(text) > 140:
+            text = text[:140]
+        key = _compact_match_key(text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        compact_parts.append(text)
+        if len(compact_parts) >= 40:
+            break
+    if not compact_parts:
+        return []
+    query = "\n".join(compact_parts)
+    return list(_cached_core_keywords_for_query(query, limit=limit))
+
+
+PUBLIC_MVP_TIER = "public_mvp"
+SUPPORTED_TIERS: set[str] = {"free", "basic", "premium", PUBLIC_MVP_TIER}
 SUPPORTED_GENDERS: set[str] = {"male", "female", "unknown"}
-SUPPORTED_CALENDAR_TYPES: set[str] = {"solar"}
+SUPPORTED_CALENDAR_TYPES: set[str] = {"solar", "lunar"}
 SUPPORTED_RELATIONSHIP_STATUSES: set[str] = {
     "single",
     "interested",
@@ -49,7 +112,38 @@ CUSTOMER_COPY_REPLACEMENTS: tuple[tuple[str, str], ...] = (
     ("돈이 들어오는 방식과 손에 남는 방식", "수익 발생 방식과 자산화 방식"),
     ("수입의 크기보다 손에 남는 돈", "수입 규모보다 자산화되는 금액"),
     ("들어오는 돈과 손에 남는 돈", "수입 규모와 자산화되는 금액"),
-    ("돈이 들어오는 자리와 손에 남는 돈", "수익 발생 지점과 자산화되는 금액"),
+    ("돈이 들어오는 자리와 손에 남는 돈", "수익 발생 조건과 자산화되는 금액"),
+    ("수입이 생기는 자리와 재산으로 남는 자리를 나누어", "수입이 발생하는 조건과 재산으로 남는 조건을 구분하여"),
+    ("수입이 생기는 자리와 재산으로 남는 자리", "수입이 발생하는 조건과 재산으로 남는 조건"),
+    ("돈이 실제로 움직이는 자리를 정합니다", "돈이 실제로 움직이는 조건을 정합니다"),
+    ("사회적 평판이 생기는 자리를 정합니다", "사회적 평판이 형성되는 조건을 정합니다"),
+    ("인생에서 현실 조건이 형성되는 자리를 잡습니다", "인생에서 현실 조건이 형성되는 방식을 정합니다"),
+    ("사회적 자리와 직업 환경", "사회적 역할과 직업 환경"),
+    ("실제 자리와 책임", "실제 책임과 기록"),
+    ("책임 있는 자리", "책임 있는 역할"),
+    ("제도권 자리", "제도권 역할"),
+    ("관성 자리라", "관성 위치라"),
+    ("사회적 자리로 이어진다", "사회적 역할로 이어진다"),
+    ("생활 자리에서 확인", "생활 기반에서 확인"),
+    ("조직 안의 자리로 만들고", "조직 안의 역할로 만들고"),
+    ("돈이 붙기 시작하는 자리", "돈이 붙기 시작하는 조건"),
+    ("기반으로 자리 잡는", "기반으로 굳어지는"),
+    ("결정권이 늦게 따라오는 자리를", "결정권이 늦게 따라오는 환경을"),
+    ("결정권이 없는 자리는", "결정권이 없는 환경은"),
+    ("권한이 없는 자리보다", "권한이 없는 환경보다"),
+    ("권한 없이 책임만 맡는 자리는", "권한 없이 책임만 맡는 환경은"),
+    ("기준이 정해진 자리", "기준이 정해진 환경"),
+    ("인정받는 자리", "인정받는 환경"),
+    ("낯선 자리", "낯선 환경"),
+    ("자리가 있어야", "기반이 있어야"),
+    ("자리는 피해야", "환경은 피해야"),
+    ("자리에서 평가", "환경에서 평가"),
+    ("자리에서 판정", "환경에서 판정"),
+    ("자리에서 강점", "역할에서 강점"),
+    ("자리에서 강합니다", "역할에서 강합니다"),
+    ("자리에서 명예", "역할에서 명예"),
+    ("자리에서 경력", "환경에서 경력"),
+    ("자리에서 성과", "환경에서 성과"),
     ("손에 남는 돈", "실질 수익"),
     ("손에 남는 금액", "실질 금액"),
     ("손에 남는 수입", "실질 수입"),
@@ -68,6 +162,83 @@ CUSTOMER_COPY_REPLACEMENTS: tuple[tuple[str, str], ...] = (
     ("판단이 강합니다", "판단이 뚜렷합니다"),
     ("공동 자금 기준 필요", "지분·명의 안정성"),
     ("정산 기준 필요", "수익 배분 안정성"),
+    ("해석·대응책", "흐름과 기준"),
+    ("해석과 대응책", "흐름과 기준"),
+    ("대응책", "관리 기준"),
+    ("보완 항목", "주의 지표"),
+    ("핵심 항목", "강한 지표"),
+    ("전체 항목", "전체 지표"),
+    ("재물 형성력", "재물 형성력"),
+    ("재물 규모 확장력", "재물 규모 확장"),
+    ("수입 창출력", "수입 창출력"),
+    ("재주 수익화", "재능 수익화"),
+    ("성과 보상력", "성과 보상"),
+    ("자금 운용 안정성", "재정 관리"),
+    ("자산화 능력", "자산화"),
+    ("계약·명의 안정성", "계약·명의 안정"),
+    ("계약·문서 안정성", "문서 안정"),
+    ("채권·미수금 회수력", "채권 회수"),
+    ("공동자금 운영력", "공동재정"),
+    ("공동 자금 운영력", "공동재정"),
+    ("부채·보증 관리력", "부채·보증 관리"),
+    ("재정 방어력", "손실 방어"),
+    ("후반 축재력", "후반 자산운"),
+    ("금전 기준성", "금전 기준"),
+    ("직업 적성", "직업 적합도"),
+    ("직업 분야", "적합 분야"),
+    ("성취 축적력", "경력 축적"),
+    ("평가·명예 전환력", "평가와 인정"),
+    ("승진·직함 가능성", "직책 상승"),
+    ("권한 확보력", "권한 확보력"),
+    ("책임·권한 균형", "책임과 권한"),
+    ("보상 협상력", "보상 조건"),
+    ("전문 자산화", "전문성 축적"),
+    ("조직 적응력", "조직 적응"),
+    ("소속 전환력", "직업 전환"),
+    ("업무 조건 감별력", "피해야 할 업무"),
+    ("끌림의 기준", "호감 기준"),
+    ("상대 선택력", "상대 선택"),
+    ("상대 신뢰 감별력", "상대 신뢰"),
+    ("인연 형성력", "인연 형성"),
+    ("관계 진전력", "관계 진전"),
+    ("관계 속도 조절력", "관계 속도"),
+    ("애정 표현성", "애정 표현"),
+    ("정서 수용력", "정서 수용"),
+    ("오해 조정력", "오해 조정"),
+    ("갈등 관리력", "갈등 관리"),
+    ("주변 개입 관리력", "주변 개입"),
+    ("결혼 연결력", "결혼 연결"),
+    ("혼인 성향", "결혼관"),
+    ("배우자상", "배우자 조건"),
+    ("결혼 현실화력", "결혼 현실화"),
+    ("가정 운영력", "가정 운영"),
+    ("생활비 기준성", "생활비 기준"),
+    ("부부 갈등 조정력", "부부 갈등"),
+    ("부부 갈등 회복성", "갈등 회복"),
+    ("가족 책임 경계력", "가족 책임 경계"),
+    ("배우자 복", "배우자 안정"),
+    ("혼인 위기 대응력", "혼인 위기 대응"),
+    ("결혼 지속력", "결혼 지속"),
+    ("대인 조율감", "관계 조율"),
+    ("판단 기준", "자기 신뢰"),
+    ("판단 방식", "자기 신뢰"),
+    ("감정 반응성", "감정 조절"),
+    ("감정 반응", "감정 조절"),
+    ("압박 대응력", "문제 해결력"),
+    ("압박 대응", "문제 해결력"),
+    ("부담이 커질 때", "문제 해결력"),
+    ("부담이 커졌을 때", "문제 해결력"),
+    ("문제 발생 시 해결 능력", "문제 해결력"),
+    ("행동 속도", "실행 속도"),
+    ("움직이는 속도", "실행 속도"),
+    ("관심 몰입도", "몰입력"),
+    ("관심 몰입", "몰입력"),
+    ("대인 거리감", "관계 거리 조절력"),
+    ("관계 거리감", "관계 거리 조절력"),
+    ("표현 전달력", "표현력"),
+    ("공적 인정 기반", "공적 인정"),
+    ("명예를 지켜내는 기준", "평판 관리"),
+    ("사회적 도약성", "사회적 상승"),
     ("좋은 연도와 주의 연도가 뚜렷합니다", "좋은 연도와 주의 연도가 따로 드러납니다"),
     ("맡은 일의 결과가 보수와 계약 조건으로 확정됩니다", "일의 대가가 보수로 분명히 잡힙니다"),
     ("직업운은 성과가 평가와 보상으로 확정되는 힘이 강합니다", "직업운은 결과가 직함과 평판으로 굳어집니다"),
@@ -83,6 +254,7 @@ CUSTOMER_COPY_REPLACEMENTS: tuple[tuple[str, str], ...] = (
     ("강점과 손실 지점이 뚜렷하게 갈립니다", "강점과 손실 지점이 뚜렷하게 나뉩니다"),
     ("함께 강하게 잡힙니다", "함께 뚜렷합니다"),
     ("강하게 잡힙니다", "뚜렷합니다"),
+    ("흥미를 끄는 힘", "주목을 끄는 능력"),
     ("결혼은 생활 기준이 맞을 때 안정됩니다.", "결혼은 감정보다 생활 기준에서 먼저 시험을 받습니다."),
     ("할 수 있습니다", "합니다"),
     ("될 수 있습니다", "됩니다"),
@@ -105,7 +277,27 @@ CUSTOMER_COPY_REPLACEMENTS: tuple[tuple[str, str], ...] = (
     ("흐려질 수 있습니다", "흐려집니다"),
     ("받아들일 수 있습니다", "받아들여집니다"),
     ("깎일 수 있습니다", "깎입니다"),
-    ("살아납니다", "분명해집니다"),
+    ("작용한다.", "작용합니다."),
+    ("드러난다.", "드러납니다."),
+    ("넘어간다.", "넘어갑니다."),
+    ("안정된다.", "안정됩니다."),
+    ("강해진다.", "강해집니다."),
+    ("중요해진다.", "중요해집니다."),
+    ("커진다.", "커집니다."),
+    ("강하게 드러나는 영역", "강하게 드러나는 분야"),
+    ("주의해서 볼 영역", "먼저 살필 분야"),
+    ("관리가 필요한 영역", "먼저 살필 분야"),
+    ("영역입니다", "분야입니다"),
+    ("흐름을 조절해야 하는 배합", "속도와 방향을 정밀하게 조절해야 하는 배합"),
+    ("흐름을 조절해야", "속도와 방향을 조절해야"),
+    ("결과를 가르는 세부 지점", "결론을 달라지게 만드는 세부 기준"),
+    ("이 분야에서 가장 뚜렷하게 작용합니다.", "이 분야의 판정을 가장 선명하게 가릅니다."),
+    ("보완점", "필요 조건"),
+    ("보완 기준", "필요 기준"),
+    ("보강 기준", "필요 기준"),
+    ("보완 오행", "부족 오행"),
+    ("힘입니다", "능력입니다"),
+    ("나눕니다", "구분합니다"),
     ("중요합니다", "핵심입니다"),
     ("봐야 합니다", "확인해야 합니다"),
         ("편이 좋습니다", "편이 낫습니다"),
@@ -154,18 +346,48 @@ STEM_HANJA_BY_KEY: dict[str, str] = {
     "gye": "癸",
 }
 
+STEM_KEY_BY_HANJA: dict[str, str] = {value: key for key, value in STEM_HANJA_BY_KEY.items()}
+
+DISPLAY_HIDDEN_STEMS_BY_BRANCH_KEY: dict[str, list[str]] = {
+    "ja": ["im", "gye"],
+    "chuk": ["gye", "sin", "gi"],
+    "in": ["mu", "byeong", "gap"],
+    "myo": ["gap", "eul"],
+    "jin": ["eul", "gye", "mu"],
+    "sa": ["mu", "gyeong", "byeong"],
+    "o": ["byeong", "gi", "jeong"],
+    "mi": ["jeong", "eul", "gi"],
+    "sin": ["mu", "im", "gyeong"],
+    "yu": ["gyeong", "sin"],
+    "sul": ["sin", "jeong", "mu"],
+    "hae": ["mu", "gap", "im"],
+}
+
 TEN_GOD_LABEL_BY_KEY: dict[str, str] = {
     "self": "일간",
+    "日干": "일간",
+    "日元": "일간",
     "bi_gyeon": "비견",
+    "比肩": "비견",
     "geob_jae": "겁재",
+    "劫財": "겁재",
     "sik_sin": "식신",
+    "食神": "식신",
     "sang_gwan": "상관",
+    "傷官": "상관",
     "pyeon_jae": "편재",
+    "偏財": "편재",
     "jeong_jae": "정재",
+    "正財": "정재",
     "pyeon_gwan": "편관",
+    "偏官": "편관",
+    "七殺": "편관",
     "jeong_gwan": "정관",
+    "正官": "정관",
     "pyeon_in": "편인",
+    "偏印": "편인",
     "jeong_in": "정인",
+    "正印": "정인",
 }
 
 BRANCH_HANJA_BY_KEY: dict[str, str] = {
@@ -509,23 +731,218 @@ def _as_text(payload: dict[str, Any], key: str, default: str = "") -> str:
     return str(value).strip()
 
 
+@lru_cache(maxsize=1)
+def _product_metric_meaning_text_set() -> frozenset[str]:
+    try:
+        return frozenset(
+            str(meaning)
+            for domain_meanings in PRODUCT_DOMAIN_METRIC_MEANINGS.values()
+            for meaning in domain_meanings.values()
+        )
+    except NameError:
+        return frozenset()
+
+
+@lru_cache(maxsize=8192)
+def _is_product_metric_meaning_text(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return text in _product_metric_meaning_text_set()
+
+
+@lru_cache(maxsize=32768)
 def _clean_customer_copy_text(value: str) -> str:
-    text = value
+    raw_text = str(value or "").strip()
+    if _is_product_metric_meaning_text(raw_text):
+        return raw_text
+    text = tongbyeon_surface_text(value)
     for before, after in CUSTOMER_COPY_REPLACEMENTS:
         text = text.replace(before, after)
     return text
 
 
-def _clean_customer_copy_value(value: Any) -> Any:
+def _clean_customer_copy_value(value: Any, _memo: dict[int, Any] | None = None) -> Any:
     if isinstance(value, str):
         return _clean_customer_copy_text(value)
+    memo = {} if _memo is None else _memo
+    value_id = id(value)
+    if value_id in memo:
+        return memo[value_id]
     if isinstance(value, list):
-        return [_clean_customer_copy_value(item) for item in value]
+        cleaned_list: list[Any] = []
+        memo[value_id] = cleaned_list
+        cleaned_list.extend(_clean_customer_copy_value(item, memo) for item in value)
+        return cleaned_list
     if isinstance(value, tuple):
-        return tuple(_clean_customer_copy_value(item) for item in value)
+        cleaned_tuple = tuple(_clean_customer_copy_value(item, memo) for item in value)
+        memo[value_id] = cleaned_tuple
+        return cleaned_tuple
     if isinstance(value, dict):
-        return {key: _clean_customer_copy_value(item) for key, item in value.items()}
+        if value.get("source_verified") is True:
+            cleaned_verified = dict(value)
+            memo[value_id] = cleaned_verified
+            return cleaned_verified
+        cleaned_dict: dict[Any, Any] = {}
+        memo[value_id] = cleaned_dict
+        cleaned_dict.update(
+            {key: _clean_customer_copy_value(item, memo) for key, item in value.items()}
+        )
+        return cleaned_dict
     return value
+
+
+PRODUCT_METRIC_LABEL_RESTORE_ALIASES: dict[str, dict[str, str]] = {
+    "money": {
+        "재물 기반": "재물 형성력",
+        "수입 발생": "수입 창출력",
+        "문서 안정": "계약 안정성",
+    },
+    "career": {
+        "권한 확보": "권한 확보력",
+    },
+    "marriage": {
+        "혼인 안정성": "결혼 안정성",
+    },
+    "honor": {
+        "공적 인정": "사회적 인정",
+    },
+}
+
+
+def _public_product_metric_label(label: Any) -> str:
+    text = str(label or "").strip()
+    if not text:
+        return text
+    risk_display_map = globals().get("PRODUCT_RISK_DISPLAY_MAP", {})
+    if text in risk_display_map:
+        return str(risk_display_map[text][0])
+    if text in {str(item[0]) for item in risk_display_map.values()}:
+        return text
+    display_map = globals().get("PRODUCT_METRIC_DISPLAY_MAP", {})
+    if text in display_map:
+        return str(display_map[text][0])
+    if text in {str(item[0]) for item in display_map.values()}:
+        return text
+    return text
+
+
+def _restore_product_metric_label(domain: str, label: Any) -> str:
+    text = str(label or "").strip()
+    if not text:
+        return text
+    labels = [spec[0] for spec in PRODUCT_DOMAIN_METRIC_SPECS.get(domain, ())]
+    if text in labels:
+        return _public_product_metric_label(text)
+    restored = PRODUCT_METRIC_LABEL_RESTORE_ALIASES.get(domain, {}).get(text, text)
+    return _public_product_metric_label(restored)
+
+
+def _restore_product_metric_labels_in_section(section: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(section, dict):
+        return section
+    domain = _domain_key(section)
+    specs = PRODUCT_DOMAIN_METRIC_SPECS.get(domain)
+    if not specs:
+        return section
+    exact_labels = [_public_product_metric_label(spec[0]) for spec in specs]
+    next_section = dict(section)
+    restored_list_cache: dict[int, list[dict[str, Any]]] = {}
+    for key in ("feature_axes", "representative_metrics", "judgment_axes"):
+        source_items = next_section.get(key)
+        source_list_id = id(source_items)
+        cached_items = restored_list_cache.get(source_list_id)
+        if cached_items is not None:
+            next_section[key] = cached_items
+            continue
+        restored_items: list[dict[str, Any]] = []
+        for index, item in enumerate(list(source_items or [])):
+            if not isinstance(item, dict):
+                continue
+            next_item = dict(item)
+            if index < len(exact_labels):
+                source_label = str(specs[index][0])
+                if exact_labels[index] != source_label:
+                    next_item["source_label"] = source_label
+                next_item["label"] = exact_labels[index]
+            else:
+                next_item["label"] = _restore_product_metric_label(domain, next_item.get("label"))
+            restored_items.append(next_item)
+        if restored_items:
+            restored_list_cache[source_list_id] = restored_items
+            next_section[key] = restored_items
+    for key in ("strong_metric_label", "watch_metric_label"):
+        if next_section.get(key):
+            next_section[key] = _restore_product_metric_label(domain, next_section.get(key))
+    verdict = next_section.get("section_verdict")
+    if isinstance(verdict, dict):
+        next_verdict = dict(verdict)
+        for key in ("strong_label", "watch_label"):
+            if next_verdict.get(key):
+                next_verdict[key] = _restore_product_metric_label(domain, next_verdict.get(key))
+        next_section["section_verdict"] = next_verdict
+    return next_section
+
+
+def _restore_product_metric_labels(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    root = dict(payload)
+
+    def restore_sections(container: dict[str, Any]) -> None:
+        for key in ("premium_sections", "analysis_sections"):
+            sections = container.get(key)
+            if isinstance(sections, list):
+                container[key] = [
+                    _restore_product_metric_labels_in_section(section) if isinstance(section, dict) else section
+                    for section in sections
+                ]
+
+    restore_sections(root)
+    report = root.get("report")
+    if isinstance(report, dict):
+        next_report = dict(report)
+        restore_sections(next_report)
+        root["report"] = next_report
+    screen_contract = root.get("analysis_screen_contract") or (root.get("report") or {}).get("analysis_screen_contract")
+    if isinstance(screen_contract, dict):
+        next_contract = dict(screen_contract)
+        cards: list[dict[str, Any]] = []
+        for card in list(next_contract.get("domain_summary_cards") or []):
+            if not isinstance(card, dict):
+                continue
+            domain = str(card.get("domain") or "").strip()
+            next_card = dict(card)
+            for key in ("strong_label", "watch_label"):
+                if next_card.get(key):
+                    next_card[key] = _restore_product_metric_label(domain, next_card.get(key))
+            restored_metrics = []
+            domain_specs = PRODUCT_DOMAIN_METRIC_SPECS.get(domain, ())
+            exact_labels = [_public_product_metric_label(spec[0]) for spec in domain_specs]
+            for index, metric in enumerate(list(next_card.get("representative_metrics") or [])):
+                if not isinstance(metric, dict):
+                    continue
+                next_metric = dict(metric)
+                if index < len(exact_labels):
+                    source_label = str(domain_specs[index][0])
+                    if exact_labels[index] != source_label:
+                        next_metric["source_label"] = source_label
+                    next_metric["label"] = exact_labels[index]
+                else:
+                    next_metric["label"] = _restore_product_metric_label(domain, next_metric.get("label"))
+                restored_metrics.append(next_metric)
+            if restored_metrics:
+                next_card["representative_metrics"] = restored_metrics
+            cards.append(next_card)
+        if cards:
+            next_contract["domain_summary_cards"] = cards
+        if "report" in root and isinstance(root["report"], dict) and screen_contract is root["report"].get("analysis_screen_contract"):
+            next_report = dict(root["report"])
+            next_report["analysis_screen_contract"] = next_contract
+            root["report"] = next_report
+        else:
+            root["analysis_screen_contract"] = next_contract
+    return root
 
 
 def _parse_birth_date(value: str) -> tuple[int, int, int]:
@@ -571,6 +988,60 @@ def _parse_target_year(payload: dict[str, Any]) -> int:
     return target_year
 
 
+def _display_hidden_stem_keys(branch_key: str, fallback: list[str] | None = None) -> list[str]:
+    standard = list(DISPLAY_HIDDEN_STEMS_BY_BRANCH_KEY.get(str(branch_key or ""), []))
+    extras = [STEM_KEY_BY_HANJA.get(str(item), str(item)) for item in list(fallback or []) if str(item)]
+    merged: list[str] = []
+    for stem_key in [*standard, *extras]:
+        if stem_key and stem_key not in merged:
+            merged.append(stem_key)
+    return merged
+
+
+def _display_hidden_stems_for_pillar(
+    chart: BirthChartResult,
+    pillar_key: str,
+    branch_key: str,
+) -> tuple[list[str], list[str], list[str], list[str], list[dict[str, Any]]]:
+    source_hidden = list(chart.hidden_stems.get(pillar_key, []))
+    hidden_keys = _display_hidden_stem_keys(branch_key, source_hidden)
+    calculation_pairs = list(BRANCH_HIDDEN_STEMS.get(branch_key, []))
+    calculation_keys = [str(stem_key) for stem_key, _weight in calculation_pairs]
+    calculation_weights = {
+        str(stem_key): float(weight)
+        for stem_key, weight in calculation_pairs
+    }
+    day_stem_key = getattr(chart.day_pillar, "stem_key", "")
+    hidden_stems = [_stem_label(stem_key) for stem_key in hidden_keys]
+    hidden_ten_gods = [
+        _ten_god_label(ten_god_for(day_stem_key, stem_key))
+        for stem_key in hidden_keys
+        if day_stem_key and stem_key
+    ]
+    calculation_hidden_stems = [_stem_label(stem_key) for stem_key in calculation_keys]
+    calculation_hidden_ten_gods = [
+        _ten_god_label(ten_god_for(day_stem_key, stem_key))
+        for stem_key in calculation_keys
+        if day_stem_key and stem_key
+    ]
+    entries = [
+        {
+            "stem": _stem_label(stem_key),
+            "tenGod": _ten_god_label(ten_god_for(day_stem_key, stem_key)),
+            "calculationRole": "weighted_hidden_stem" if stem_key in calculation_weights else "reference_trace",
+            "calculationWeight": calculation_weights.get(stem_key, 0.0),
+        }
+        for stem_key in hidden_keys
+    ]
+    return (
+        hidden_stems,
+        hidden_ten_gods,
+        calculation_hidden_stems,
+        calculation_hidden_ten_gods,
+        entries,
+    )
+
+
 def _pillar_rows(chart: BirthChartResult, *, birth_time_known: bool = True) -> list[dict[str, Any]]:
     pillar_map = {
         "year": chart.year_pillar,
@@ -583,6 +1054,16 @@ def _pillar_rows(chart: BirthChartResult, *, birth_time_known: bool = True) -> l
         if key == "hour" and not birth_time_known:
             continue
         pillar = pillar_map[key]
+        (
+            hidden_stems,
+            hidden_ten_gods,
+            calculation_hidden_stems,
+            calculation_hidden_ten_gods,
+            hidden_stem_entries,
+        ) = _display_hidden_stems_for_pillar(chart, key, pillar.branch_key)
+        branch_main_ten_god = _ten_god_label(
+            ten_god_for(chart.day_pillar.stem_key, main_hidden_stem(pillar.branch_key))
+        )
         rows.append(
             {
                 "key": key,
@@ -590,9 +1071,14 @@ def _pillar_rows(chart: BirthChartResult, *, birth_time_known: bool = True) -> l
                 "stem": pillar.stem,
                 "branch": pillar.branch,
                 "pillar": pillar.label,
-                "tenGod": chart.ten_gods_by_stem.get(key, ""),
-                "hiddenStems": list(chart.hidden_stems.get(key, [])),
-                "hiddenTenGods": list(chart.ten_gods_by_branch_hidden.get(key, [])),
+                "tenGod": _ten_god_label(chart.ten_gods_by_stem.get(key, "")),
+                "branchTenGod": branch_main_ten_god,
+                "branchTenGodLabel": branch_main_ten_god,
+                "hiddenStems": hidden_stems,
+                "hiddenTenGods": hidden_ten_gods,
+                "calculationHiddenStems": calculation_hidden_stems,
+                "calculationHiddenTenGods": calculation_hidden_ten_gods,
+                "hiddenStemEntries": hidden_stem_entries,
             }
         )
     return rows
@@ -659,7 +1145,7 @@ def _annual_rows(target_year: int, birth_year: int, count: int = 10) -> list[dic
     return rows
 
 
-def _timing_target_years(birth_year: int, *, start_age: int = 20, end_age: int = 79) -> list[int]:
+def _timing_target_years(birth_year: int, *, start_age: int = 1, end_age: int = 80) -> list[int]:
     start_year = max(1900, birth_year + start_age - 1)
     end_year = min(2100, birth_year + end_age - 1)
     return list(range(start_year, end_year + 1))
@@ -674,6 +1160,7 @@ def _analysis_context_cached(
     relationship_status: str,
     target_year: int,
     leap_lunar_month: bool,
+    include_sub_periods: bool,
 ) -> tuple[BirthChartResult, int, list[int], Any]:
     payload = {
         "birthDate": birth_date,
@@ -694,7 +1181,7 @@ def _analysis_context_cached(
         chart,
         target_years=product_target_years,
         relationship_status=relationship_status,  # type: ignore[arg-type]
-        include_sub_periods=False,
+        include_sub_periods=include_sub_periods,
     )
     return chart, birth_year, product_target_years, analysis
 
@@ -716,10 +1203,14 @@ def _timing_annual_rows(flow_signals: list[Any], birth_year: int) -> list[dict[s
                 "branchKey": pillar.branch_key,
                 "pillar": getattr(flow, "year_pillar", None) or pillar.label,
                 "stemTenGod": getattr(flow, "year_stem_ten_god", ""),
+                "stemTenGodLabel": _ten_god_label(getattr(flow, "year_stem_ten_god", "")),
                 "branchTenGod": getattr(flow, "year_branch_main_ten_god", ""),
+                "branchTenGodLabel": _ten_god_label(getattr(flow, "year_branch_main_ten_god", "")),
                 "daeunPillar": getattr(flow, "daeun_pillar", "") or "",
                 "daeunStemTenGod": getattr(flow, "daeun_stem_ten_god", "") or "",
+                "daeunStemTenGodLabel": _ten_god_label(getattr(flow, "daeun_stem_ten_god", "")),
                 "daeunBranchTenGod": getattr(flow, "daeun_branch_main_ten_god", "") or "",
+                "daeunBranchTenGodLabel": _ten_god_label(getattr(flow, "daeun_branch_main_ten_god", "")),
                 "domainScores": dict(getattr(flow, "domain_scores", {}) or {}),
                 "basisCodes": list(getattr(flow, "basis_codes", []) or [])[:8],
                 "counterSignals": list(getattr(flow, "counter_signals", []) or [])[:8],
@@ -744,6 +1235,7 @@ def _chart_summary(
     birth_year: int,
     timing_flow_signals: list[Any] | None = None,
     birth_time_known: bool = True,
+    gender: str = "unknown",
 ) -> dict[str, Any]:
     display_start_age = _daeun_start_display_age(chart.daeun_start_age)
     current_order = _current_daeun_order(display_start_age, target_year, birth_year)
@@ -776,6 +1268,7 @@ def _chart_summary(
             "hourRuleLabel": HOUR_RULE_LABEL if birth_time_known else "생시 미상",
             "koreanAge": target_year - birth_year + 1,
             "birthTimeKnown": birth_time_known,
+            "gender": gender if gender in SUPPORTED_GENDERS else "unknown",
         },
         "boundarySensitive": chart.boundary_sensitive,
         "daeunBoundarySensitive": chart.daeun_boundary_sensitive,
@@ -792,7 +1285,7 @@ def _build_birth_input(payload: dict[str, Any]) -> BirthInput:
     if gender not in SUPPORTED_GENDERS:
         raise ValueError("성별 값이 올바르지 않습니다.")
     if calendar_type not in SUPPORTED_CALENDAR_TYPES:
-        raise ValueError("현재 출시본은 양력 입력만 지원합니다.")
+        raise ValueError("달력 값이 올바르지 않습니다.")
     year, month, day = _parse_birth_date(birth_date)
     hour, minute = _parse_birth_time(birth_time)
     return BirthInput(
@@ -811,6 +1304,35 @@ def _build_birth_input(payload: dict[str, Any]) -> BirthInput:
 
 def _stem_label(stem: Any) -> str:
     return STEM_HANJA_BY_KEY.get(str(stem), str(stem or ""))
+
+
+STEM_COMBINATION_ORDER: dict[str, int] = {
+    stem: index for index, stem in enumerate("甲乙丙丁戊己庚辛壬癸")
+}
+
+
+def _stem_combination_dictionary_key(*values: Any) -> str:
+    stems: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text in STEM_HANJA_BY_KEY:
+            stems.append(STEM_HANJA_BY_KEY[text])
+            continue
+        stems.extend(re.findall(r"[甲乙丙丁戊己庚辛壬癸]", text))
+    if len(stems) < 2:
+        return ""
+    pair = sorted(stems[:2], key=lambda stem: STEM_COMBINATION_ORDER[stem])
+    return "".join(pair)
+
+
+def _stem_combination_source(stem_key: str) -> tuple[str, str]:
+    if not stem_key:
+        return "", ""
+    file_name = "10천간배합"
+    heading = core_section_heading(stem_key, file_name_contains=file_name)
+    summary = core_section_field(stem_key, "한 줄 핵심", file_name_contains=file_name)
+    structure = core_section_field(stem_key, "작용 구조", file_name_contains=file_name)
+    return heading, " ".join(part for part in (summary, structure) if part)
 
 
 def _branch_label(branch: Any) -> str:
@@ -947,7 +1469,7 @@ def _season_factor_section(life_feature_summary: dict[str, Any]) -> dict[str, An
     useful = ", ".join(str(item) for item in season.get("useful_element_labels", []) if item)
     caution = ", ".join(str(item) for item in season.get("caution_element_labels", []) if item)
     strength = str(season.get("day_master_strength") or "")
-    lead = f"월지 {month_display}의 {season_label} 작용을 기준으로 필요한 오행은 {useful or '대운·세운에서 보강되는 오행'}입니다."
+    lead = f"월지 {month_display}의 {season_label} 작용을 기준으로 필요한 오행은 {useful or '운에서 보강되는 오행'}입니다."
     if caution:
         lead += f" 부담이 붙기 쉬운 오행은 {caution}입니다."
     else:
@@ -1096,7 +1618,7 @@ def _branch_reality_factor_sections(life_feature_summary: dict[str, Any]) -> lis
     if not isinstance(branch_context, dict):
         return []
     sections: list[dict[str, Any]] = []
-    for signal in branch_context.get("position_signals", [])[:3]:
+    for signal in branch_context.get("position_signals", [])[:4]:
         if not isinstance(signal, dict):
             continue
         position = str(signal.get("position_label") or "")
@@ -1150,20 +1672,88 @@ def _branch_reality_factor_sections(life_feature_summary: dict[str, Any]) -> lis
                 ),
             )
         )
-    for interaction in branch_context.get("interactions", [])[:2]:
-        if not isinstance(interaction, dict):
+    formal_suffix = {
+        "six_combine": "합",
+        "clash": "충",
+        "punishment": "형",
+        "harm": "해",
+        "break": "파",
+        "self_punishment": "자형",
+        "three_harmony": "삼합",
+        "three_harmony_half": "반합",
+        "three_meeting": "방합",
+    }
+    for pair in branch_context.get("pair_combinations", []):
+        if not isinstance(pair, dict):
             continue
-        relation = str(interaction.get("relation_label") or interaction.get("relation_type") or "")
-        branches = "".join(str(item) for item in interaction.get("branch_labels", []) if item)
-        positions = "·".join(str(item) for item in interaction.get("position_labels", []) if item)
-        lead = f"{positions}의 {branches} 관계는 {relation}입니다. 이 신호는 해당 궁성의 일이 움직이거나 부담이 드러나는 근거입니다."
+        branch_labels = [str(item) for item in pair.get("branch_labels", []) if item]
+        element_labels = [str(item) for item in pair.get("element_labels", []) if item]
+        position_labels = [str(item) for item in pair.get("position_labels", []) if item]
+        if len(branch_labels) != 2 or len(position_labels) != 2:
+            continue
+        branch_tokens = [
+            f"{branch}{element_labels[index] if index < len(element_labels) else ''}"
+            for index, branch in enumerate(branch_labels)
+        ]
+        relation_label = str(pair.get("relation_label") or "")
+        first_branch = branch_tokens[0]
+        second_branch = branch_tokens[1]
+        lead_parts = [
+            f"{position_labels[0]} {first_branch}{_and_particle(first_branch)} "
+            f"{position_labels[1]} {second_branch}{_subject_particle(second_branch)} "
+            f"{relation_label} 배합입니다."
+        ]
+        formal_relations = [str(item) for item in pair.get("formal_relation_types", []) if item]
+        exact_relations = [
+            f"{''.join(branch_labels)}{formal_suffix[relation]}"
+            for relation in formal_relations
+            if relation in formal_suffix
+        ]
+        if exact_relations:
+            lead_parts.append(f"동시에 {'·'.join(exact_relations)}이 성립합니다.")
+        interpretation = str(pair.get("interpretation") or "").strip()
+        if interpretation:
+            lead_parts.append(interpretation)
         sections.append(
             _factor_section(
-                layer="branch_reality",
-                source_label="합충형파해",
-                heading=f"{branches} {relation} 작용",
+                layer="branch_pair",
+                source_label="지지 배합",
+                heading=f"{position_labels[0]} {branch_tokens[0]}·{position_labels[1]} {branch_tokens[1]}",
+                lead=" ".join(lead_parts),
+                domain_labels=_domain_labels(pair.get("domain_links")),
+            )
+        )
+    return sections
+
+
+def _element_combination_factor_sections(life_feature_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    values = life_feature_summary.get("element_combination_evidence_signals")
+    if not isinstance(values, list):
+        return []
+    sections: list[dict[str, Any]] = []
+    for signal in values:
+        if not isinstance(signal, dict):
+            continue
+        ordered_stems = [str(item) for item in signal.get("ordered_stems", []) if item]
+        if len(ordered_stems) != 2:
+            ordered_stems = [str(item) for item in signal.get("stems", []) if item]
+        if len(ordered_stems) != 2:
+            continue
+        stem_key = _stem_combination_dictionary_key(*ordered_stems)
+        heading, lead = _stem_combination_source(stem_key)
+        if not heading:
+            heading = stem_key
+        if not lead:
+            lead = str(signal.get("interpretation") or "").strip()
+        if not heading or not lead:
+            continue
+        sections.append(
+            _factor_section(
+                layer="element_combination",
+                source_label="오행 배합",
+                heading=heading,
                 lead=lead,
-                domain_labels=_domain_labels(interaction.get("domain_links")),
+                domain_labels=_domain_labels(signal.get("domain_links")),
             )
         )
     return sections
@@ -1271,28 +1861,42 @@ def _combination_factor_sections(life_feature_summary: dict[str, Any], limit: in
     if not isinstance(signals, list):
         return []
     sections: list[dict[str, Any]] = []
-    for signal in signals[:limit]:
+    for signal in signals:
         if not isinstance(signal, dict):
             continue
-        stems = "".join(_stem_label(stem) for stem in signal.get("stems", []) if stem)
+        stems = [_stem_label(stem) for stem in signal.get("stems", []) if stem]
+        # 두 천간의 배합은 10천간배합 원문 카드에서 완결한다. 같은 조합을
+        # 십신 설명으로 다시 노출하면 천간 제목과 본문 이론이 어긋난다.
+        if len(stems) <= 2:
+            continue
         ten_gods = [_ten_god_label(item) for item in signal.get("ten_gods", []) if item]
-        ten_god_text = "-".join(item for item in ten_gods if item)
+        ten_god_text = "·".join(
+            dict.fromkeys(item for item in ten_gods if item and item != "일간")
+        )
+        if not ten_god_text:
+            continue
         interpretation = str(signal.get("interpretation") or "").strip()
         if interpretation:
-            lead = interpretation
+            match = re.match(
+                r"^[甲乙丙丁戊己庚辛壬癸]+\s*배합은\s*.+?의 연결로 보며,\s*(.+)$",
+                interpretation,
+            )
+            lead = f"{ten_god_text} 복합은 {match.group(1)}" if ten_god_text and match else interpretation
         elif ten_god_text:
-            lead = f"{stems} 배합과 {ten_god_text} 관계가 함께 작용합니다."
+            lead = f"{ten_god_text}의 작용이 한 구조 안에서 함께 나타납니다."
         else:
-            lead = f"{stems} 배합이 주요 신호로 잡힙니다."
+            continue
         sections.append(
             _factor_section(
                 layer="integrated_saju",
-                source_label="오행·십신 통합",
-                heading=f"{stems} 통합 판단",
+                source_label="십신 복합",
+                heading=f"{ten_god_text} 복합 작용",
                 lead=lead,
                 domain_labels=_domain_labels(signal.get("domain_links")),
             )
         )
+        if len(sections) >= limit:
+            break
     return sections
 
 
@@ -1353,7 +1957,7 @@ PRINCIPLE_ROLE_EDGE_TITLES: dict[tuple[str, str, str], str] = {
 
 PRINCIPLE_ROLE_EDGE_BODIES: dict[tuple[str, str, str], dict[str, str]] = {
     ("output", "wealth", "generates"): {
-        "money": "기술, 말, 결과물이 수입으로 바뀌는 작용입니다. 원국에서는 식상의 현실성이 숨어 있으므로, 재능 자체보다 상품화와 가격 결정이 늦게 붙는 쪽으로 판정합니다.",
+        "money": "기술, 말, 결과물이 수입으로 바뀌는 구조입니다. 원국에서는 식상의 현실성이 숨어 있으므로, 재능 자체보다 상품화와 가격 결정이 늦게 붙는 쪽으로 판정합니다.",
         "career": "직업에서는 결과물을 만들어내는 능력이 보상 기준으로 연결됩니다. 다만 결과물이 문서, 상품, 실적처럼 보이는 형태가 되어야 평가가 분명해집니다.",
         "personality": "성격에서는 생각을 오래 붙들기보다 실제 결과로 확인하려는 욕구가 있습니다. 준비만 길어지면 답답함이 커집니다.",
         "timing": "식상이 들어오는 연도에는 숨어 있던 생산 능력이 수입 문제로 드러납니다. 결과물, 계약 단가, 성과 보상이 함께 움직입니다.",
@@ -1437,14 +2041,14 @@ def _principle_scope_text(edge: dict[str, Any]) -> str:
     if scope.startswith("active") and reality in {"month_visible_edge", "rooted_edge"}:
         return "월령에서 기준이 잡히고 지지에 뿌리가 있어 실제 사건으로 이어지는 힘이 큽니다."
     if scope.startswith("active"):
-        return "원국 안에서 드러난 작용이라 재물, 직업, 관계 판단에 직접 힘을 씁니다."
+        return "원국 안에서 드러난 관계라 재물, 직업, 관계 판단에 직접 반영됩니다."
     if scope == "latent_reference":
         if "drains_source" in force_effect:
-            return "원국에 작용은 있으나 힘이 약해, 대운·세운에서 보강될 때 사건성이 커집니다."
-        return "겉으로 강하게 드러나지는 않아도 판단에서 제외할 수 없는 작용입니다."
+            return "원국에 관계는 있으나 힘이 약해, 운에서 보강될 때 사건성이 커집니다."
+        return "겉으로 강하게 드러나지는 않아도 판단에서 제외할 수 없는 관계입니다."
     if scope == "trace_reference":
-        return "현재 힘은 작지만, 대운·세운에서 같은 글자가 들어오면 표면으로 올라옵니다."
-    return "월령, 지지, 지장간의 현실성을 거쳐 판정한 작용입니다."
+        return "현재 힘은 작지만, 운에서 같은 글자가 들어오면 표면으로 올라옵니다."
+    return "월령, 지지, 지장간의 현실성을 거쳐 판정한 관계입니다."
 
 
 def _principle_edge_lead(edge: dict[str, Any]) -> str:
@@ -1457,21 +2061,21 @@ def _principle_edge_lead(edge: dict[str, Any]) -> str:
     relation_label = "생" if relation == "generates" else "극"
     scope_text = _principle_scope_text(edge)
     known_leads = {
-        "식상생재": "식상생재는 식상의 결과물이 재성으로 이어져 기술, 말, 생산물이 수입으로 전환되는 작용입니다.",
-        "재생관": "재생관은 재성이 관성에 힘을 보태 직책, 책임, 공식 기준을 세우는 작용입니다.",
-        "관인상생": "관인상생은 관성이 인성으로 이어져 책임이 문서, 자격, 신뢰로 굳어지는 작용입니다.",
-        "인성생비겁": "인성생비겁은 인성이 비겁을 생해 지식, 보호, 문서가 자기 기준을 강화하는 작용입니다.",
-        "비겁극재": "비겁극재는 비겁이 재성을 건드려 소유, 몫, 지분 문제를 일으키는 작용입니다.",
-        "재극인": "재극인은 재성이 인성을 제어해 생각, 명분, 문서보다 현실성과 회수를 앞세우는 작용입니다.",
-        "관성극비겁": "관성극비겁은 관성이 비겁을 제어해 경쟁과 자기주장을 규칙, 권한, 책임으로 정리하는 작용입니다.",
-        "식상극관": "식상극관은 식상이 관성을 제어해 정해진 책임과 규칙에 문제를 제기하는 작용입니다.",
+        "식상생재": "식상생재는 식상의 결과물이 재성으로 이어져 기술, 말, 생산물이 수입으로 전환되는 구조입니다.",
+        "재생관": "재생관은 재성과 관성이 이어져 자원, 책임, 공식 기준이 함께 움직이는 구조입니다.",
+        "관인상생": "관인상생은 관성이 인성으로 이어져 책임이 문서, 자격, 신뢰로 굳어지는 구조입니다.",
+        "인성생비겁": "인성생비겁은 인성이 비겁을 생해 지식, 보호, 문서가 자기 기준을 강화하는 구조입니다.",
+        "비겁극재": "비겁극재는 비겁이 재성을 건드려 소유, 몫, 지분 문제를 일으키는 구조입니다.",
+        "재극인": "재극인은 재성이 인성을 제어해 생각, 명분, 문서보다 현실성과 회수를 앞세우는 구조입니다.",
+        "관성극비겁": "관성극비겁은 관성이 비겁을 제어해 경쟁과 자기주장을 규칙, 권한, 책임으로 정리하는 구조입니다.",
+        "식상극관": "식상극관은 식상이 관성을 제어해 정해진 책임과 규칙에 문제를 제기하는 구조입니다.",
     }
     if title in known_leads:
         return f"{known_leads[title]} {scope_text}"
     if relation == "generates":
-        base = f"{title}{_subject_particle(title)} {source_label}의 힘이 {target_label}으로 이어지는 작용입니다."
+        base = f"{title}{_subject_particle(title)} {source_label}의 힘이 {target_label}으로 이어지는 구조입니다."
     else:
-        base = f"{title}{_subject_particle(title)} {source_label}이 {target_label}을 제어해 현실 기준을 세우는 작용입니다."
+        base = f"{title}{_subject_particle(title)} {source_label}이 {target_label}을 제어해 현실 기준을 세우는 구조입니다."
     return f"{base} {scope_text}"
 
 
@@ -1842,11 +2446,66 @@ def _cycle_regulation_factor_sections(life_feature_summary: dict[str, Any], limi
     return sections
 
 
+ELEMENT_COMBINATION_HANGUL: dict[str, str] = {
+    "木": "목",
+    "火": "화",
+    "土": "토",
+    "金": "금",
+    "水": "수",
+    "甲": "목",
+    "乙": "목",
+    "丙": "화",
+    "丁": "화",
+    "戊": "토",
+    "己": "토",
+    "庚": "금",
+    "辛": "금",
+    "壬": "수",
+    "癸": "수",
+}
+
+
+def _element_combination_dictionary_key(*values: Any) -> str:
+    for value in values:
+        token = str(value or "").strip()
+        if re.fullmatch(r"[목화토금수]{2,3}", token):
+            return token
+        if re.fullmatch(r"[木火土金水甲乙丙丁戊己庚辛壬癸]{2,3}", token):
+            converted = "".join(ELEMENT_COMBINATION_HANGUL.get(char, "") for char in token)
+            if len(converted) >= 2:
+                return converted
+    text = " ".join(str(value or "") for value in values)
+    hangul_match = re.search(r"([목화토금수]{2,3})\s*(?:오행\s*)?배합", text)
+    if hangul_match:
+        return hangul_match.group(1)
+    hanja_match = re.search(r"([木火土金水甲乙丙丁戊己庚辛壬癸]{2,3})\s*(?:오행\s*)?배합", text)
+    if hanja_match:
+        converted = "".join(ELEMENT_COMBINATION_HANGUL.get(char, "") for char in hanja_match.group(1))
+        return converted if len(converted) >= 2 else ""
+    separated_hanja = re.findall(r"[甲乙丙丁戊己庚辛壬癸]", text)
+    converted = "".join(ELEMENT_COMBINATION_HANGUL.get(char, "") for char in separated_hanja[:3])
+    return converted if len(converted) >= 2 else ""
+
+
+def _element_combination_source_text(element_key: str) -> str:
+    exact_summary = core_section_field(
+        element_key,
+        "한 줄 핵심",
+        file_name_contains="오행배합",
+    )
+    exact_structure = core_section_field(
+        element_key,
+        "작용 구조",
+        file_name_contains="오행배합",
+    )
+    return " ".join(part for part in (exact_summary, exact_structure) if part)
+
+
 def _summary_heading(text: str, layer: str, source_label: str) -> str:
     if layer == "element_combination":
-        match = re.search(r"([甲乙丙丁戊己庚辛壬癸]{2,3})\s*배합", text)
-        if match:
-            return f"{match.group(1)} 오행 배합"
+        element_key = _element_combination_dictionary_key(text)
+        if element_key:
+            return f"{element_key} 배합"
     if layer == "stem_reception":
         match = re.search(r"([甲乙丙丁戊己庚辛壬癸])일간은\s*([甲乙丙丁戊己庚辛壬癸])[을를]\s*([가-힣]+?)(?:으로|로)", text)
         if match:
@@ -1879,6 +2538,11 @@ def _summary_factor_sections(
             .replace(" 해석값은 ", " 관계는 ")
         )
         display_text = _fix_factor_particle_text(display_text)
+        if layer == "element_combination":
+            element_key = _element_combination_dictionary_key(text)
+            exact_text = _element_combination_source_text(element_key) if element_key else ""
+            if exact_text:
+                display_text = exact_text
         sections.append(
             _factor_section(
                 layer=layer,
@@ -1906,14 +2570,7 @@ def _product_factor_sections(product_payload: dict[str, Any]) -> list[dict[str, 
     sections.extend(_cycle_principle_matrix_factor_sections(life_feature_summary))
     sections.extend(_cycle_regulation_factor_sections(life_feature_summary))
     sections.extend(_combination_factor_sections(life_feature_summary))
-    sections.extend(
-        _summary_factor_sections(
-            life_feature_summary.get("element_combination_summary"),
-            layer="element_combination",
-            source_label="오행 배합",
-            limit=3,
-        )
-    )
+    sections.extend(_element_combination_factor_sections(life_feature_summary))
     sections.extend(
         _summary_factor_sections(
             life_feature_summary.get("stem_reception_summary"),
@@ -1975,7 +2632,7 @@ def _product_report_seed(product_payload: dict[str, Any]) -> dict[str, Any]:
 
 
 REPORT_TIMING_COVERAGE_SOURCE_ALIASES: dict[str, tuple[str, ...]] = {
-    "대운 구간별 중심 과제": ("decade_profile",),
+    "시기운 구간별 중심 과제": ("decade_profile",),
     "상승 연도": ("good_years",),
     "수입 강세 연도": ("income_peak",),
     "재물 강세 연도": ("money_peak",),
@@ -2012,6 +2669,59 @@ REPORT_TIMING_COVERAGE_SOURCE_ALIASES: dict[str, tuple[str, ...]] = {
     "주의 연도": ("caution_years",),
     "회복 연도": ("good_years",),
     "말년 안정 연도": ("decade_profile",),
+}
+
+TIMING_CAUTION_POSITIVE_AXIS_LABELS: dict[str, str] = {
+    "주의 연도": "주의 연도 대응력",
+    "재물 주의 연도": "금전 손실 방어력",
+    "공동자금 주의 연도": "공동자금 안정성",
+    "계약·명의 주의 연도": "계약·명의 안정성",
+    "부채·보증 주의 연도": "부채·보증 관리력",
+    "가족재산 주의 연도": "가족재산 경계력",
+    "관계 주의 연도": "관계 변동 대응력",
+    "주변 개입 주의 연도": "주변 변수 통제력",
+    "결혼 주의 연도": "혼인 변수 관리력",
+    "직업 부담 연도": "직업 부담 관리력",
+}
+
+DOMAIN_CAUTION_POSITIVE_AXIS_LABELS: dict[str, str] = {
+    "재물 주의 연도": "금전 손실 회피력",
+    "관계 주의 연도": "관계 안정성",
+    "결혼 주의 연도": "결혼 안정성",
+    "주의 연도": "주의 연도 대응력",
+}
+
+DOMAIN_TIMING_METRIC_DISPLAY_LABELS: dict[str, str] = {
+    "수입 강세 연도": "수입 창출력",
+    "재물 강세 연도": "재물 형성력",
+    "자산화 연도": "자산화 능력",
+    "채권·미수금 회수 연도": "채권·미수금 회수력",
+    "재물 주의 연도": "금전 손실 회피력",
+    "공동자금 주의 연도": "공동자금 안정성",
+    "계약·명의 주의 연도": "계약·명의 안정성",
+    "부채·보증 주의 연도": "부채·보증 관리력",
+    "가족재산 주의 연도": "가족재산 경계력",
+    "직업 상승 연도": "직업 상승력",
+    "권한 상승 연도": "권한 확보력",
+    "보상 상승 연도": "성과 보상력",
+    "직업 분야 전환 연도": "전문 분야 전환력",
+    "직업 전환 연도": "전환 대응력",
+    "소속 변화 연도": "소속 변화 대응력",
+    "직업 부담 연도": "직업 부담 관리력",
+    "직업 독립 연도": "독립 기반 형성력",
+    "연애 강세 연도": "인연 형성력",
+    "새 인연 연도": "인연 형성력",
+    "관계 진전 연도": "관계 진전력",
+    "재회·정리 연도": "관계 정리력",
+    "이별·정리 연도": "관계 정리력",
+    "관계 주의 연도": "관계 안정성",
+    "주변 개입 주의 연도": "주변 변수 통제력",
+    "혼인 결정 연도": "결혼 결정력",
+    "주거·생활 준비 연도": "주거·생활 설계력",
+    "부부 재정 연도": "부부 재정 안정성",
+    "가족·주거 변동 연도": "가족 변수 관리력",
+    "자녀·양육 책임 연도": "자녀·양육 책임",
+    "결혼 주의 연도": "결혼 안정성",
 }
 
 
@@ -2055,7 +2765,7 @@ def _timing_collection_coverage(required: str, timing_decision: dict[str, Any], 
             "status": "indirect",
             "source_type": "timing_year_list",
             "source_key": key,
-            "source_label": age_band or "대운 구간",
+            "source_label": age_band or "시기운 구간",
             "count": len(collection),
             "year": source_item.get("year"),
             "age": source_item.get("age"),
@@ -2321,6 +3031,43 @@ def _feature_value_average(
     return value
 
 
+def _detail_metric_from_features(
+    product_item: dict[str, Any] | None,
+    keys: tuple[str, ...],
+    *,
+    label: str,
+    fallback_score: int | None = None,
+    strongest: bool = True,
+) -> dict[str, Any]:
+    axes = _axis_map(product_item)
+    candidates: list[tuple[int, str, dict[str, Any]]] = []
+    for key in keys:
+        axis = axes.get(key)
+        if not axis:
+            continue
+        score = axis.get("score")
+        if isinstance(score, int):
+            candidates.append((max(0, min(100, score)), key, axis))
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=strongest)
+        score, key, axis = candidates[0]
+        metric_label = _premium_display_title(axis.get("label") or label)
+    elif isinstance(fallback_score, int):
+        score = max(0, min(100, fallback_score))
+        key = keys[0] if keys else ""
+        metric_label = _premium_display_title(label)
+    else:
+        return {}
+    level = _contract_level_from_score(score)
+    return {
+        "metric_key": key,
+        "metric_label": metric_label,
+        "score": score,
+        "level": level,
+        "value": level,
+    }
+
+
 def _bounded_metric_score(score: int | float | None, *, cap: int | None = None) -> int | None:
     if not isinstance(score, (int, float)):
         return None
@@ -2328,6 +3075,108 @@ def _bounded_metric_score(score: int | float | None, *, cap: int | None = None) 
     if isinstance(cap, int):
         value = min(value, cap)
     return value
+
+
+def _expert_confidence_rank(value: Any) -> int:
+    return {
+        "restricted": 0,
+        "low": 1,
+        "medium": 2,
+        "medium_high": 3,
+        "high": 4,
+    }.get(str(value or ""), 0)
+
+
+def _compact_unique_texts(values: list[str], *, limit: int = 10) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _composite_expert_projection(projections: list[dict[str, Any]]) -> dict[str, Any]:
+    usable = [dict(item) for item in projections if isinstance(item, dict)]
+    if not usable:
+        return {}
+    adjustment_keys = ("opportunity", "risk", "change", "probability")
+    score_adjustments: dict[str, int] = {}
+    for key in adjustment_keys:
+        values = [
+            float((item.get("score_adjustments") or {}).get(key))
+            for item in usable
+            if isinstance(item.get("score_adjustments"), dict)
+            and isinstance((item.get("score_adjustments") or {}).get(key), (int, float))
+        ]
+        if values:
+            score_adjustments[key] = round(sum(values) / len(values))
+    priorities = [float(item.get("priority")) for item in usable if isinstance(item.get("priority"), (int, float))]
+    confidence = max((str(item.get("confidence") or "") for item in usable), key=_expert_confidence_rank, default="medium")
+    basis_codes: list[str] = []
+    counter_signals: list[str] = []
+    for item in usable:
+        basis_codes.extend(str(code) for code in item.get("basis_codes") or [] if str(code).strip())
+        counter_signals.extend(str(code) for code in item.get("counter_signals") or [] if str(code).strip())
+    return {
+        "version": str(usable[0].get("version") or "expert_priority_adjudication_v1"),
+        "domain": "overall",
+        "priority": round(sum(priorities) / len(priorities)) if priorities else 62,
+        "confidence": confidence or "medium",
+        "score_adjustments": score_adjustments,
+        "basis_codes": _compact_unique_texts(basis_codes, limit=16),
+        "counter_signals": _compact_unique_texts(counter_signals, limit=12),
+    }
+
+
+def _expert_projection_map(
+    life_feature_summary: dict[str, Any],
+    product_items: list[Any],
+) -> dict[str, dict[str, Any]]:
+    projections: dict[str, dict[str, Any]] = {}
+    raw_domain_projections = life_feature_summary.get("expert_domain_projections")
+    if isinstance(raw_domain_projections, dict):
+        for domain, projection in raw_domain_projections.items():
+            if isinstance(projection, dict):
+                projections[str(domain)] = dict(projection)
+    for item in product_items:
+        if not isinstance(item, dict):
+            continue
+        domain = _domain_key(item)
+        projection = item.get("expert_projection_summary")
+        if domain and isinstance(projection, dict) and projection and domain not in projections:
+            projections[domain] = dict(projection)
+    composite = _composite_expert_projection(
+        [projection for projection in projections.values() if isinstance(projection, dict)]
+    )
+    if composite:
+        for domain in ("personality", "timing", "life", "honor", "social", "contextual"):
+            projections.setdefault(domain, dict(composite))
+    return projections
+
+
+def _attach_expert_projections_to_sections(
+    sections: list[dict[str, Any]],
+    life_feature_summary: dict[str, Any],
+    product_items: list[Any],
+) -> list[dict[str, Any]]:
+    projection_map = _expert_projection_map(life_feature_summary, product_items)
+    if not projection_map:
+        return sections
+    attached: list[dict[str, Any]] = []
+    for section in sections:
+        next_section = dict(section)
+        domain = _domain_key(next_section)
+        projection = projection_map.get(domain)
+        if isinstance(projection, dict) and projection:
+            next_section["expert_projection_summary"] = dict(projection)
+        attached.append(next_section)
+    return attached
 
 
 def _feature_score_blended(
@@ -2348,25 +3197,6 @@ def _feature_score_blended(
     if isinstance(fallback_score, int):
         return _bounded_metric_score(fallback_score, cap=cap)
     return None
-
-
-def _feature_score_strongest(
-    product_item: dict[str, Any] | None,
-    keys: tuple[str, ...],
-    *,
-    fallback_score: int | None = None,
-    cap: int | None = None,
-) -> int | None:
-    scores = [
-        score
-        for score in (_feature_score(product_item, key) for key in keys)
-        if isinstance(score, int)
-    ]
-    if not scores and isinstance(fallback_score, int):
-        scores.append(fallback_score)
-    if not scores:
-        return None
-    return _bounded_metric_score(max(scores), cap=cap)
 
 
 def _feature_score_average(
@@ -2422,6 +3252,7 @@ def _weighted_feature_score(
     product_item: dict[str, Any] | None,
     weights: tuple[tuple[str, float], ...],
     *,
+    fallback_score: int | None = None,
     cap: int | None = None,
 ) -> int | None:
     total = 0.0
@@ -2433,7 +3264,7 @@ def _weighted_feature_score(
         total += score * weight
         weight_total += weight
     if weight_total <= 0:
-        return None
+        return _bounded_metric_score(fallback_score, cap=cap) if isinstance(fallback_score, int) else None
     return _bounded_metric_score(total / weight_total, cap=cap)
 
 
@@ -2475,6 +3306,42 @@ def _balanced_feature_score(
         if weakest < 50:
             base -= round((50 - weakest) * 0.24)
     return _bounded_metric_score(base, cap=cap)
+
+
+def _sensitive_feature_score(
+    product_item: dict[str, Any] | None,
+    weights: tuple[tuple[str, float], ...],
+    *,
+    support_keys: tuple[str, ...] = (),
+    floor: int = 55,
+    penalty_weight: float = 0.34,
+    peak_keys: tuple[str, ...] = (),
+    peak_weight: float = 0.08,
+    cap: int | None = None,
+) -> int | None:
+    base = _weighted_feature_score(product_item, weights)
+    if base is None:
+        return None
+    value = float(base)
+    support_scores = [
+        score
+        for score in (_feature_score(product_item, key) for key in support_keys)
+        if isinstance(score, int)
+    ]
+    if support_scores:
+        weakest = min(support_scores)
+        if weakest < floor:
+            value -= (floor - weakest) * penalty_weight
+    peak_scores = [
+        score
+        for score in (_feature_score(product_item, key) for key in peak_keys)
+        if isinstance(score, int)
+    ]
+    if peak_scores:
+        strongest = max(peak_scores)
+        if strongest > value:
+            value += (strongest - value) * peak_weight
+    return _bounded_metric_score(value, cap=cap)
 
 
 def _score_from_axis_value(value: Any) -> int | None:
@@ -2598,12 +3465,46 @@ def _object_particle(label: str) -> str:
     return "을"
 
 
+def _direction_particle(label: str) -> str:
+    text = str(label or "").strip()
+    if not text:
+        return "으로"
+    last = text[-1]
+    code = ord(last)
+    if 0xAC00 <= code <= 0xD7A3:
+        jong = (code - 0xAC00) % 28
+        return "로" if jong == 0 or jong == 8 else "으로"
+    return "으로"
+
+
 def _fix_factor_particle_text(text: str) -> str:
     fixed = str(text or "")
     labels = sorted(set(TEN_GOD_LABEL_BY_KEY.values()), key=len, reverse=True)
     for label in labels:
         fixed = re.sub(rf"{re.escape(label)}[이가](?=\s)", f"{label}{_subject_particle(label)}", fixed)
         fixed = re.sub(rf"{re.escape(label)}[을를](?=\s)", f"{label}{_object_particle(label)}", fixed)
+        fixed = re.sub(rf"{re.escape(label)}[과와](?=\s)", f"{label}{_and_particle(label)}", fixed)
+    return fixed
+
+
+def _fix_common_particle_text(text: str) -> str:
+    fixed = _fix_factor_particle_text(text)
+    fixed = fixed.replace("전문 자산화과 성과", "전문성과 성과")
+    fixed = fixed.replace("전문 자산화와 성과", "전문성과 성과")
+    fixed = fixed.replace("전문 자산화가 곧바로", "전문성이 곧바로")
+    fixed = fixed.replace("전문 자산화가 높은", "전문성이 높은")
+    labels = (
+        "전문 자산화",
+        "사회적 도약성",
+        "고정 수입, 정산, 자산 소유",
+        "직책, 평가, 공식 책임",
+        "특수 공부, 고립된 준비, 기술 몰입",
+    )
+    for label in labels:
+        fixed = re.sub(rf"{re.escape(label)}[이가](?=\s)", f"{label}{_subject_particle(label)}", fixed)
+        fixed = re.sub(rf"{re.escape(label)}[을를](?=\s)", f"{label}{_object_particle(label)}", fixed)
+        fixed = re.sub(rf"{re.escape(label)}[과와](?=\s)", f"{label}{_and_particle(label)}", fixed)
+    fixed = fixed.replace("전문 자산화와 성과", "전문성과 성과")
     return fixed
 
 
@@ -2732,19 +3633,45 @@ def _personality_feature_axes_from_profile(profile: dict[str, Any]) -> list[dict
     }
     label_to_coordinate = {
         "판단 방식": "선택의 방향",
+        "자기 신뢰": "선택의 방향",
         "대인 태도": "관계의 거리",
-        "감정 처리": "관계의 거리",
         "압박 대응": "압박 반응",
+        "문제 해결력": "압박 반응",
         "실행 방식": "실행 속도",
-        "몰입 방향": "선택의 방향",
     }
+    profile_axis_scores = [
+        int(item["score"])
+        for item in profile.get("axes") or []
+        if isinstance(item, dict) and isinstance(item.get("score"), int)
+    ]
+
+    def card_score(label: str) -> int:
+        coordinate_label = label_to_coordinate.get(label, "")
+        if coordinate_label:
+            score = coordinate_scores.get(coordinate_label, 0)
+            if score:
+                return score
+        if label == "감정 처리":
+            relationship_score = coordinate_scores.get("관계의 거리", 68)
+            pressure_score = coordinate_scores.get("압박 반응", 68)
+            return round(relationship_score * 0.42 + pressure_score * 0.58)
+        if label == "몰입 방향" and profile_axis_scores:
+            focus_scores = profile_axis_scores[:3]
+            focus_weights = (0.52, 0.30, 0.18)
+            weight_total = sum(focus_weights[: len(focus_scores)])
+            return round(
+                sum(score * weight for score, weight in zip(focus_scores, focus_weights))
+                / weight_total
+            )
+        return 0
+
     for index, card in enumerate(profile.get("cards") or []):
         if not isinstance(card, dict):
             continue
         label = str(card.get("label") or "").strip()
         if not label:
             continue
-        score = coordinate_scores.get(label_to_coordinate.get(label, ""), 0)
+        score = card_score(label)
         if not score:
             score = 74 if str(card.get("tone") or "") == "strong" else 62 if str(card.get("tone") or "") == "watch" else 68
         key = re.sub(r"[^0-9A-Za-z가-힣]+", "_", label).strip("_") or f"personality_{index + 1}"
@@ -3419,15 +4346,20 @@ def _judgment_axis_score(
                 support_keys=("spending_control", "loss_avoidance"),
                 cap=94,
             ),
-            "cashflow_stability": lambda: _balanced_feature_score(
+            "cashflow_stability": lambda: _sensitive_feature_score(
                 product_item,
                 (
-                    ("liquidity_stability", 0.42),
+                    ("liquidity_stability", 0.34),
                     ("spending_control", 0.24),
-                    ("practical_planning", 0.22),
-                    ("loss_avoidance", 0.12),
+                    ("practical_planning", 0.18),
+                    ("loss_avoidance", 0.16),
+                    ("asset_retention", 0.08),
                 ),
-                support_keys=("spending_control", "practical_planning"),
+                support_keys=("spending_control", "practical_planning", "loss_avoidance"),
+                floor=58,
+                penalty_weight=0.42,
+                peak_keys=("liquidity_stability", "asset_retention"),
+                peak_weight=0.06,
                 cap=94,
             ),
             "investment_trading_judgment": lambda: _balanced_feature_score(
@@ -3593,8 +4525,24 @@ def _judgment_axis_score(
             ),
             "career_achievement": lambda: _feature_score(product_item, "career_achievement", fallback_score=probability),
             "recognition": lambda: _feature_score(product_item, "reputation_maintenance", fallback_score=opportunity),
-            "promotion_title_readiness": lambda: _feature_score_strongest(product_item, ("promotion_visibility", "honor_recognition", "role_authority_alignment"), fallback_score=opportunity),
-            "social_ascent": lambda: _feature_score_strongest(product_item, ("social_success_potential", "leadership_potential", "honor_recognition"), fallback_score=opportunity),
+            "promotion_title_readiness": lambda: _weighted_feature_score(product_item, (("promotion_visibility", 0.40), ("honor_recognition", 0.35), ("role_authority_alignment", 0.25)), fallback_score=opportunity),
+            "social_ascent": lambda: _sensitive_feature_score(
+                product_item,
+                (
+                    ("social_success_potential", 0.30),
+                    ("career_achievement", 0.20),
+                    ("honor_recognition", 0.18),
+                    ("promotion_visibility", 0.12),
+                    ("role_authority_alignment", 0.12),
+                    ("reputation_maintenance", 0.08),
+                ),
+                support_keys=("role_authority_alignment", "reputation_maintenance", "organization_adaptability"),
+                floor=56,
+                penalty_weight=0.30,
+                peak_keys=("social_success_potential", "honor_recognition", "promotion_visibility"),
+                peak_weight=0.10,
+                cap=96,
+            ),
             "authority_balance": lambda: _positive_control_feature_score(
                 product_item,
                 (
@@ -3607,11 +4555,11 @@ def _judgment_axis_score(
                 risk_weight=0.20,
                 cap=92,
             ),
-            "responsibility_authority_balance": lambda: _feature_score_strongest(product_item, ("role_authority_alignment", "responsibility_capacity", "boundary_management"), fallback_score=probability),
-            "compensation_negotiation": lambda: _feature_score_strongest(product_item, ("reward_claim_strength", "deal_selection", "role_authority_alignment"), fallback_score=opportunity),
+            "responsibility_authority_balance": lambda: _weighted_feature_score(product_item, (("role_authority_alignment", 0.45), ("responsibility_capacity", 0.35), ("boundary_management", 0.20)), fallback_score=probability),
+            "compensation_negotiation": lambda: _weighted_feature_score(product_item, (("reward_claim_strength", 0.45), ("deal_selection", 0.35), ("role_authority_alignment", 0.20)), fallback_score=opportunity),
             "expertise": lambda: _feature_score(product_item, "academic_expertise"),
             "organization_fit": lambda: _feature_score(product_item, "organization_adaptability"),
-            "affiliation_transition": lambda: _feature_score_strongest(product_item, ("change_adaptability", "self_direction", "organization_adaptability"), fallback_score=opportunity),
+            "affiliation_transition": lambda: _weighted_feature_score(product_item, (("change_adaptability", 0.40), ("self_direction", 0.35), ("organization_adaptability", 0.25)), fallback_score=opportunity),
             "independent_work": lambda: _weighted_feature_score(
                 product_item,
                 (
@@ -3649,8 +4597,8 @@ def _judgment_axis_score(
                 support_keys=("emotional_alignment",),
                 cap=94,
             ),
-            "partner_selection": lambda: _feature_score_strongest(product_item, ("attraction_selectivity", "spouse_match_quality", "decision_consistency"), fallback_score=probability),
-            "partner_trust_filter": lambda: _feature_score_strongest(product_item, ("boundary_management", "misunderstanding_prevention", "decision_consistency"), fallback_score=probability),
+            "partner_selection": lambda: _weighted_feature_score(product_item, (("attraction_selectivity", 0.40), ("spouse_match_quality", 0.35), ("decision_consistency", 0.25)), fallback_score=probability),
+            "partner_trust_filter": lambda: _weighted_feature_score(product_item, (("boundary_management", 0.40), ("misunderstanding_prevention", 0.35), ("decision_consistency", 0.25)), fallback_score=probability),
             "relationship_opening": lambda: _weighted_feature_score(
                 product_item,
                 (
@@ -3672,11 +4620,11 @@ def _judgment_axis_score(
                 ),
                 cap=94,
             ),
-            "relationship_tempo_control": lambda: _feature_score_strongest(product_item, ("emotional_alignment", "boundary_management", "relationship_progression"), fallback_score=probability),
+            "relationship_tempo_control": lambda: _weighted_feature_score(product_item, (("emotional_alignment", 0.40), ("boundary_management", 0.35), ("relationship_progression", 0.25)), fallback_score=probability),
             "expression": lambda: _feature_score(product_item, "communication_expression"),
-            "affection_receptivity": lambda: _feature_score_strongest(product_item, ("affection_receptivity", "emotional_alignment", "conflict_recovery"), fallback_score=probability),
-            "stability": lambda: _feature_score_strongest(product_item, ("relationship_stability", "conflict_recovery", "misunderstanding_prevention", "emotional_alignment"), fallback_score=probability),
-            "contact_distance_stability": lambda: _feature_score_strongest(product_item, ("boundary_management", "relationship_stability", "communication_expression"), fallback_score=probability),
+            "affection_receptivity": lambda: _weighted_feature_score(product_item, (("affection_receptivity", 0.40), ("emotional_alignment", 0.35), ("conflict_recovery", 0.25)), fallback_score=probability),
+            "stability": lambda: _weighted_feature_score(product_item, (("relationship_stability", 0.35), ("conflict_recovery", 0.25), ("misunderstanding_prevention", 0.20), ("emotional_alignment", 0.20)), fallback_score=probability),
+            "contact_distance_stability": lambda: _weighted_feature_score(product_item, (("boundary_management", 0.40), ("relationship_stability", 0.35), ("communication_expression", 0.25)), fallback_score=probability),
             "misunderstanding": lambda: _positive_control_feature_score(
                 product_item,
                 (
@@ -3701,7 +4649,7 @@ def _judgment_axis_score(
                 risk_weight=0.20,
                 cap=92,
             ),
-            "external_interference_control": lambda: _feature_score_strongest(product_item, ("boundary_management", "misunderstanding_prevention", "conflict_recovery"), fallback_score=probability),
+            "external_interference_control": lambda: _weighted_feature_score(product_item, (("boundary_management", 0.40), ("misunderstanding_prevention", 0.35), ("conflict_recovery", 0.25)), fallback_score=probability),
             "reunion_chance": lambda: _feature_score(product_item, "conflict_recovery"),
             "marriage_bridge": lambda: _balanced_feature_score(
                 product_item,
@@ -3718,7 +4666,23 @@ def _judgment_axis_score(
     elif domain == "marriage":
         mapping = {
             "marriage_tendency": lambda: _feature_score(product_item, "marriage_stability", fallback_score=probability),
-            "spouse_type": lambda: _feature_score_strongest(product_item, ("spouse_match_quality", "spouse_support_benefit"), fallback_score=probability),
+            "spouse_type": lambda: _sensitive_feature_score(
+                product_item,
+                (
+                    ("spouse_match_quality", 0.32),
+                    ("marriage_stability", 0.20),
+                    ("relationship_stability", 0.16),
+                    ("spouse_support_benefit", 0.12),
+                    ("household_stability", 0.10),
+                    ("conflict_recovery", 0.10),
+                ),
+                support_keys=("marriage_stability", "relationship_stability", "household_stability", "conflict_recovery"),
+                floor=56,
+                penalty_weight=0.32,
+                peak_keys=("spouse_match_quality", "spouse_support_benefit"),
+                peak_weight=0.08,
+                cap=94,
+            ),
             "marriage_timing": lambda: _balanced_feature_score(
                 product_item,
                 (
@@ -3730,9 +4694,9 @@ def _judgment_axis_score(
                 support_keys=("practical_planning", "decision_consistency"),
                 cap=94,
             ),
-            "marriage_realization": lambda: _feature_score_strongest(product_item, ("marriage_timing_readiness", "practical_planning", "decision_consistency"), fallback_score=probability),
+            "marriage_realization": lambda: _weighted_feature_score(product_item, (("marriage_timing_readiness", 0.40), ("practical_planning", 0.35), ("decision_consistency", 0.25)), fallback_score=probability),
             "life_stability": lambda: _feature_score(product_item, "practical_planning"),
-            "household_management": lambda: _feature_score_strongest(product_item, ("household_stability", "household_finance_alignment", "family_responsibility"), fallback_score=probability),
+            "household_management": lambda: _weighted_feature_score(product_item, (("household_stability", 0.40), ("household_finance_alignment", 0.35), ("family_responsibility", 0.25)), fallback_score=probability),
             "housing_life_design": lambda: _balanced_feature_score(
                 product_item,
                 (
@@ -3745,7 +4709,7 @@ def _judgment_axis_score(
                 cap=94,
             ),
             "couple_finance": lambda: _feature_score(product_item, "asset_retention"),
-            "living_cost_standard": lambda: _feature_score_strongest(product_item, ("household_finance_alignment", "spending_control", "money_attitude"), fallback_score=probability),
+            "living_cost_standard": lambda: _weighted_feature_score(product_item, (("household_finance_alignment", 0.40), ("spending_control", 0.35), ("money_attitude", 0.25)), fallback_score=probability),
             "couple_conflict": lambda: _positive_control_feature_score(
                 product_item,
                 (
@@ -3758,7 +4722,7 @@ def _judgment_axis_score(
                 risk_weight=0.20,
                 cap=92,
             ),
-            "couple_conflict_repair": lambda: _feature_score_strongest(product_item, ("conflict_recovery", "marriage_crisis_management", "communication_expression"), fallback_score=probability),
+            "couple_conflict_repair": lambda: _weighted_feature_score(product_item, (("conflict_recovery", 0.45), ("marriage_crisis_management", 0.35), ("communication_expression", 0.20)), fallback_score=probability),
             "family_boundary": lambda: _positive_control_feature_score(
                 product_item,
                 (
@@ -3771,10 +4735,10 @@ def _judgment_axis_score(
                 risk_weight=0.18,
                 cap=92,
             ),
-            "inlaw_family_boundary": lambda: _feature_score_strongest(product_item, ("inlaw_boundary_strength", "family_responsibility", "boundary_management"), fallback_score=probability),
-            "child_rearing_responsibility": lambda: _feature_score_strongest(product_item, ("family_responsibility", "household_stability", "responsibility_capacity"), fallback_score=probability),
+            "inlaw_family_boundary": lambda: _weighted_feature_score(product_item, (("inlaw_boundary_strength", 0.45), ("family_responsibility", 0.30), ("boundary_management", 0.25)), fallback_score=probability),
+            "child_rearing_responsibility": lambda: _weighted_feature_score(product_item, (("family_responsibility", 0.40), ("household_stability", 0.35), ("responsibility_capacity", 0.25)), fallback_score=probability),
             "spouse_fortune": lambda: _feature_score(product_item, "relationship_stability", fallback_score=probability),
-            "marriage_crisis_tolerance": lambda: _feature_score_strongest(product_item, ("marriage_crisis_management", "conflict_recovery", "family_responsibility"), fallback_score=probability),
+            "marriage_crisis_tolerance": lambda: _weighted_feature_score(product_item, (("marriage_crisis_management", 0.40), ("conflict_recovery", 0.35), ("family_responsibility", 0.25)), fallback_score=probability),
             "marriage_continuity": lambda: _feature_score(product_item, "decision_consistency"),
         }
     else:
@@ -3809,6 +4773,8 @@ def _judgment_axes_for_card(
         if isinstance(score, int):
             axis["score"] = score
             axis["value"] = _score_value(score)
+            axis["level"] = _contract_level_from_score(score)
+            axis["score_label"] = axis["level"]
     return axes
 
 
@@ -3900,11 +4866,74 @@ def _engine_score_payload(product_item: dict[str, Any] | None) -> dict[str, Any]
 
 
 def _domain_strength_score(domain: str, product_item: dict[str, Any] | None) -> int:
+    probability = _engine_score(product_item, "event_probability_score")
+    opportunity = _engine_score(product_item, "opportunity_score")
+    risk_score = _engine_score(product_item, "risk_score")
+
+    score_weights_by_domain = {
+        "money": (
+            ("wealth_formation", 0.18),
+            ("income_creation", 0.18),
+            ("asset_retention", 0.17),
+            ("cashflow_stability", 0.13),
+            ("contract_stability", 0.13),
+            ("shared_asset_stability", 0.10),
+            ("financial_defense", 0.11),
+        ),
+        "career": (
+            ("career_fit", 0.16),
+            ("career_achievement", 0.18),
+            ("recognition", 0.14),
+            ("authority_balance", 0.12),
+            ("responsibility_authority_balance", 0.12),
+            ("expertise", 0.12),
+            ("organization_fit", 0.08),
+            ("compensation_negotiation", 0.08),
+        ),
+        "love": (
+            ("attraction_standard", 0.10),
+            ("partner_selection", 0.14),
+            ("relationship_progress", 0.14),
+            ("expression", 0.12),
+            ("stability", 0.18),
+            ("misunderstanding", 0.12),
+            ("conflict_source", 0.10),
+            ("external_interference_control", 0.10),
+        ),
+        "marriage": (
+            ("marriage_tendency", 0.13),
+            ("marriage_realization", 0.14),
+            ("life_stability", 0.13),
+            ("household_management", 0.12),
+            ("couple_finance", 0.10),
+            ("couple_conflict_repair", 0.10),
+            ("family_boundary", 0.10),
+            ("marriage_continuity", 0.12),
+            ("spouse_fortune", 0.06),
+        ),
+    }
+    weighted_keys = score_weights_by_domain.get(domain)
+    if weighted_keys:
+        total = 0.0
+        weight_total = 0.0
+        for key, weight in weighted_keys:
+            score = _judgment_axis_score(
+                domain,
+                key,
+                product_item,
+                probability=probability,
+                opportunity=opportunity,
+                risk_score=risk_score,
+            )
+            if not isinstance(score, int) or weight <= 0:
+                continue
+            total += score * weight
+            weight_total += weight
+        if weight_total > 0:
+            return _bounded_metric_score(total / weight_total) or probability
+
     score_keys = {
-        "money": ["money_potential", "income_expansion", "asset_retention", "business_expansion"],
-        "career": ["career_achievement", "reputation_maintenance", "academic_expertise", "organization_adaptability"],
-        "love": ["relationship_stability", "interpersonal_influence", "communication_expression", "conflict_recovery"],
-        "marriage": ["marriage_stability", "practical_planning", "family_responsibility", "decision_consistency"],
+        "personality": ["decision_consistency", "boundary_management", "self_direction", "emotional_alignment"],
     }.get(domain, [])
     scores = [
         score
@@ -3912,10 +4941,8 @@ def _domain_strength_score(domain: str, product_item: dict[str, Any] | None) -> 
         if isinstance(score, int)
     ]
     if not scores:
-        return _engine_score(product_item, "event_probability_score")
-    scores.sort(reverse=True)
-    top_scores = scores[:3]
-    return round(sum(top_scores) / len(top_scores))
+        return probability
+    return round(sum(scores) / len(scores))
 
 
 def _score_label_for_card(
@@ -3966,17 +4993,17 @@ def _normalize_mobile_card(
 
 FREE_PROFILE_AXIS_DEFINITIONS: dict[str, str] = {
     "타고난 재물의 그릇": "재물을 감당하고 키울 수 있는 선천적 기반입니다.",
-    "수입 발생력": "직업 활동, 거래, 성과가 실제 금전 수입으로 이어지는 자리입니다.",
-    "자산 확정력": "수입이 소비로 흩어지지 않고 현금과 소유권으로 남는 자리입니다.",
+    "수입 발생력": "직업 활동, 거래, 성과가 실제 금전 수입으로 이어지는 경로입니다.",
+    "자산 확정력": "수입이 소비로 흩어지지 않고 현금과 소유권으로 남는 조건입니다.",
     "공동 자금 안정성": "가족, 지인, 동업자와 얽힌 자금에서 자기 몫과 명의를 지키는 기준입니다.",
     "계약·명의 안정성": "계약, 명의, 지분, 정산에서 금전 권리를 안정시키는 기준입니다.",
-    "확장 가능성": "고정 수입을 넘어 사업, 투자, 외부 거래로 재물 단위가 커지는 자리입니다.",
-    "재물이 들어오는 길": "일, 거래, 성과가 실제 수입으로 이어지는 자리입니다.",
-    "재산으로 굳어지는 힘": "들어온 돈이 소비로 흩어지지 않고 자산으로 남는 구조입니다.",
+    "확장 가능성": "고정 수입을 넘어 사업, 투자, 외부 거래로 재물 단위가 커지는 가능성입니다.",
+    "재물이 들어오는 길": "일, 거래, 성과가 실제 수입으로 이어지는 경로입니다.",
+    "재산으로 굳어지는 힘": "들어온 돈이 소비로 흩어지지 않고 자산으로 확정되는 구조입니다.",
     "재물에 얽히는 사람 문제": "가족, 지인, 동업자와 얽힌 돈에서 자기 몫과 명의를 지키는 기준입니다.",
     "돈을 지켜내는 기준": "계약, 명의, 정산, 보증에서 권리와 수령액을 지키는 기준입니다.",
     "재물 발생력": "금전 기회가 실제 수익으로 확정되는 재물 기반입니다.",
-    "재물 형성력": "돈이 붙기 시작하는 자리와 금전 기회가 현실 수입으로 커지는 기반입니다.",
+    "재물 형성력": "금전 기회가 현실 수입으로 커지기 시작하는 기반입니다.",
     "재물 규모 확장력": "일상의 수입을 넘어 거래 단위, 보유 자산, 사업 단위가 커집니다.",
     "수입 창출력": "일, 거래, 성과가 월급·매출·계약금처럼 실제 현금으로 회수됩니다.",
     "축재력": "들어온 수입을 소유권 있는 자산으로 남깁니다.",
@@ -3984,8 +5011,8 @@ FREE_PROFILE_AXIS_DEFINITIONS: dict[str, str] = {
     "자금 운용 안정성": "수입 이후 생활비, 고정비, 예비 자금까지 안정적으로 배분합니다.",
     "투자·거래 판단력": "수익 가능성, 회수 조건, 상대 신뢰도, 명의 문제를 가려냅니다.",
     "지출 통제력": "반복 지출이 재산 형성을 방해하지 않게 관리합니다.",
-    "공동 자금 운영력": "가까운 사람과 얽힌 돈에서 자기 몫과 명의를 지키는 힘이 분명해야 합니다.",
-    "공동자금 운영력": "가까운 사람과 얽힌 돈에서 자기 몫과 명의를 지키는 힘이 분명해야 합니다.",
+    "공동 자금 운영력": "가까운 사람과 얽힌 돈에서 자기 몫과 명의를 안정적으로 지켜내는 기준입니다.",
+    "공동자금 운영력": "가까운 사람과 얽힌 돈에서 자기 몫과 명의를 안정적으로 지켜내는 기준입니다.",
     "부채·보증 관리력": "대여, 보증, 채무 관계에서 책임 범위와 회수 가능성을 분명히 합니다.",
     "가족재산 경계력": "가족 재산과 자기 자산이 섞일 때 몫과 책임선을 지킵니다.",
     "계약·문서 안정성": "문서에서 권리와 수령액을 지켜냅니다.",
@@ -3998,9 +5025,9 @@ FREE_PROFILE_AXIS_DEFINITIONS: dict[str, str] = {
     "후반 축재력": "나이가 들수록 수입 방식이 안정되고 자산 단위가 커집니다.",
     "금전 기준성": "돈 앞에서 체면보다 소유권, 보상 원칙, 지출 한계를 세웁니다.",
     "재물 주의 연도": "금전 판단과 계약에서 각별한 주의가 필요한 연도입니다.",
-    "직업 성취력": "맡은 일이 결과와 이력으로 남아 직업적 위치를 높이는 자리입니다.",
+    "직업 성취력": "맡은 일이 결과와 이력으로 남아 직업적 위치를 높이는 능력입니다.",
     "직업적 성취의 그릇": "맡은 일을 성취와 이력으로 남기는 직업적 기반입니다.",
-    "평가가 따라오는 자리": "성과가 조직과 시장에서 인정으로 돌아오는 자리입니다.",
+    "평가가 따라오는 자리": "성과가 조직과 시장에서 인정으로 돌아오는 조건입니다.",
     "조직 안에서 자리 잡는 힘": "조직의 기준 안에서 역할과 영향력을 확보하는 방식입니다.",
     "권한과 책임의 균형": "맡은 책임에 걸맞은 결정권과 보상을 확보하는 기준입니다.",
     "전문성으로 남는 힘": "시간이 지날수록 쉽게 대체되지 않는 직업 기반입니다.",
@@ -4009,26 +5036,26 @@ FREE_PROFILE_AXIS_DEFINITIONS: dict[str, str] = {
     "조직 적합도": "조직의 기준 안에서 성과를 안정적으로 확보하는 자리입니다.",
     "책임 수행력": "무거운 업무와 장기 과제를 끝까지 감당해 결과로 남기는 자리입니다.",
     "전문성": "쉽게 대체되지 않는 직업 기반이 됩니다.",
-    "권한·책임 균형도": "맡은 책임에 걸맞은 결정권과 보상이 함께 붙는 자리입니다.",
+    "권한·책임 균형도": "맡은 책임에 걸맞은 결정권과 보상이 함께 따르는 구조입니다.",
     "직업 적성": "성과가 가장 잘 남는 일의 방식입니다.",
     "직업 분야": "맞는 산업과 역할의 성격입니다.",
     "성취 축적력": "맡은 일이 실적과 경력으로 남습니다.",
     "평가·명예 전환력": "성과가 평가, 직함, 평판으로 이어집니다.",
     "승진·직함 가능성": "실적이 내부 평가, 승진 후보, 공식 책임자로 올라갑니다.",
-    "사회적 도약성": "직업 성취가 지위와 영향력 확대로 이어집니다.",
+    "사회적 도약성": "직업 성취가 직책과 평판으로 이어집니다.",
     "권한 확보력": "맡은 책임에 걸맞은 결정권과 보상을 확보합니다.",
     "책임·권한 균형": "책임, 결정권, 보고 체계, 보상 기준이 맞물립니다.",
     "보상 협상력": "성과를 연봉, 수수료, 지분, 성과급으로 확정합니다.",
     "전문 자산화": "자격과 경험이 직업 경쟁력으로 쌓입니다.",
-    "조직 적응력": "조직 안에서 역할을 확보하고 오래 자리 잡습니다.",
+    "조직 적응력": "조직 안에서 역할을 확보하고 안정적으로 소속됩니다.",
     "소속 전환력": "부서, 회사, 직무가 바뀔 때 손실보다 새 기회를 만듭니다.",
     "업무 조건 감별력": "책임과 보상이 맞지 않는 자리를 미리 가려냅니다.",
     "직업 전환 연도": "이직, 승진, 독립, 역할 변화가 강해지는 연도입니다.",
-    "인연 형성력": "새로운 만남과 호감이 관계의 계기로 발전하는 자리입니다.",
+    "인연 형성력": "새로운 만남과 호감이 관계의 계기로 발전하는 가능성입니다.",
     "애정 표현성": "좋아하는 마음이 상대에게 전달되는 방식과 속도입니다.",
     "관계 지속력": "감정이 깊어진 뒤에도 관계를 오래 유지합니다.",
     "결혼 현실성": "연애가 실제 약속과 생활 논의로 넘어가는 현실성입니다.",
-    "인연이 들어오는 길": "새로운 만남과 호감이 관계의 계기로 이어지는 자리입니다.",
+    "인연이 들어오는 길": "새로운 만남과 호감이 관계의 계기로 이어지는 경로입니다.",
     "애정이 표현되는 방식": "좋아하는 마음이 말과 행동으로 드러나는 방식입니다.",
     "관계가 오래 가는 힘": "감정이 깊어진 뒤에도 관계를 오래 유지합니다.",
     "관계 경계선": "가까워진 뒤에도 서로의 거리와 책임 범위를 지키는 기준입니다.",
@@ -4051,9 +5078,9 @@ FREE_PROFILE_AXIS_DEFINITIONS: dict[str, str] = {
     "주변 개입 관리력": "친구, 가족, 과거 인연의 말이 관계 안으로 들어올 때 흔들림을 줄입니다.",
     "재회 가능성": "지나간 관계가 다시 이어질 수 있는 접점입니다.",
     "결혼 연결력": "연애가 약속과 생활 논의로 넘어가는 현실성입니다.",
-    "관계 조절력": "가까워지는 속도를 무리 없이 맞추는 자리입니다.",
-    "갈등 회복력": "오해나 다툼이 생긴 뒤 관계를 다시 세우는 자리입니다.",
-    "감정 조율력": "서로의 감정 차이를 줄이고 관계의 균형을 되찾는 자리입니다.",
+    "관계 조절력": "가까워지는 속도를 무리 없이 맞추는 능력입니다.",
+    "갈등 회복력": "오해나 다툼이 생긴 뒤 관계를 다시 세우는 능력입니다.",
+    "감정 조율력": "서로의 감정 차이를 줄이고 관계의 균형을 되찾는 능력입니다.",
     "결혼 안정성": "연애 감정이 실제 생활에서도 유지되는 안정성입니다.",
     "혼인 성향": "결혼을 감정의 결론으로 보는지, 생활과 책임의 결합으로 보는지에 대한 기준입니다.",
     "배우자상": "오래 맞는 상대의 성격, 생활 태도, 책임 감각을 정리한 기준입니다.",
@@ -4076,19 +5103,27 @@ FREE_PROFILE_AXIS_DEFINITIONS: dict[str, str] = {
     "생활 기반이 잡히는 방식": "주거, 생활비, 역할 기준이 결혼 생활의 기반으로 자리 잡는 방식입니다.",
     "가족 책임을 감당하는 힘": "양가와 원가족 문제에서 맡을 책임과 끊어낼 책임을 구분합니다.",
     "약속을 오래 지키는 힘": "결혼을 오래 유지하고 중간의 위기를 넘깁니다.",
-    "배우자 관계 안정성": "배우자와의 감정, 역할, 책임이 오래 안정되는 자리입니다.",
+    "배우자 관계 안정성": "배우자와의 감정, 역할, 책임이 오래 안정되는 조건입니다.",
     "가족 변수 관리력": "가족의 말, 돈, 책임이 부부 사이로 들어올 때 기준을 세웁니다.",
     "생활 안정성": "생활 기준이 결혼을 지탱하는 현실 기반입니다.",
-    "가족 책임감": "배우자와 가족에게 요구되는 현실 책임을 감당하는 자리입니다.",
+    "가족 책임감": "배우자와 가족에게 요구되는 현실 책임을 감당하는 태도입니다.",
     "결정 지속성": "결혼과 가정의 방향을 정한 뒤 오래 유지하는 성향입니다.",
     "생활 기반 안정성": "생활 기준 앞에서도 결혼 생활이 흔들리지 않는 안정성입니다.",
-    "대운 구간": "10년 단위로 중심 과제가 옮겨가는 생애 구간입니다.",
+    "시기운 구간": "10년 단위로 중심 과제가 옮겨가는 생애 구간입니다.",
     "세운 사건": "각 연도에 두드러지는 사건 주제입니다.",
     "상승 연도": "성과와 기회가 뚜렷하게 드러나는 연도입니다.",
+    "좋은 연도": "성과와 기회가 뚜렷하게 드러나는 연도입니다.",
     "재물 강세 연도": "수입, 계약, 자산, 사업 기회가 강해지는 연도입니다.",
     "연애 강세 연도": "새 인연, 호감, 관계 진전이 강해지는 연도입니다.",
     "인생 전환 연도": "삶의 방향이 크게 바뀌는 선택이 올라오는 연도입니다.",
     "주의 연도": "금전, 직업, 관계에서 각별한 주의가 필요한 연도입니다.",
+    "주의 연도 대응력": "부담이 커지는 연도에도 손실과 관계 문제를 줄이는 능력입니다.",
+    "금전 손실 방어력": "금전 변동이 큰 해에 손실, 미수, 지출 확대를 막아내는 능력입니다.",
+    "관계 변동 대응력": "관계가 흔들리는 해에 감정 충돌과 거리 변화를 정리하는 능력입니다.",
+    "혼인 변수 관리력": "결혼과 가정에 변수가 생기는 해에 생활 기준과 가족 책임을 조정하는 능력입니다.",
+    "주요 작용 분야": "특정 연도에 가장 강하게 드러나는 운세 영역입니다.",
+    "과거 대조 연도": "이미 지나온 해와 현재 결과를 맞춰보는 검증 기준입니다.",
+    "공동자금 대응력": "공동 비용, 동업 자금, 가족 돈이 얽히는 해에 몫과 책임을 정리하는 능력입니다.",
     "회복 연도": "손실과 정체를 정리하고 다시 기반을 잡는 연도입니다.",
     "말년 안정 연도": "후반부의 자산, 가족, 생활 기반이 안정되는 연도입니다.",
 }
@@ -4170,15 +5205,16 @@ def _free_profile_section_summary(
     watch_label = str(watch_axis.get("label") or "주의 기준")
     strong_subject = _with_particle(strong_label, "이", "가")
     watch_subject = _with_particle(watch_label, "은", "는")
+    watch_risk_subject = _with_particle(watch_label, "이", "가")
     watch_score = int(watch_axis.get("score") or 0)
     if domain == "money":
         if watch_score < 50:
-            return f"{headline}. {strong_subject} 재물운의 중심입니다. {watch_subject} 불리합니다. 가까운 사람과 돈을 함께 다루면 명의와 지분이 상대 쪽으로 기울기 쉽습니다."
-        return f"{headline}. {strong_subject} 재물운의 중심입니다. {watch_subject} 수입을 자산으로 굳히는 힘을 더합니다."
+            return f"{headline}. {strong_subject} 재물운에서 가장 먼저 보입니다. {watch_subject} 약하면 가까운 사람과 돈을 함께 다룰 때 명의와 지분이 상대 쪽으로 기울기 쉽습니다."
+        return f"{headline}. {strong_subject} 재물운에서 가장 먼저 보입니다. {watch_subject} 수입을 자산으로 굳히는 힘을 더합니다."
     if domain == "career":
         if watch_score < 50:
-            return f"{headline}. {strong_subject} 직업운의 중심입니다. {watch_subject} 불리합니다. 책임은 늘어나는데 결정권이 늦게 따라오는 자리를 조심해야 합니다."
-        return f"{headline}. {strong_subject} 직업운의 중심입니다. {watch_subject} 직함과 평가를 안정적으로 받쳐줍니다."
+            return f"{headline}. {strong_subject} 직업운에서 가장 먼저 보입니다. {watch_subject} 약하면 책임은 늘어나는데 결정권이 늦게 따라오는 자리를 조심해야 합니다."
+        return f"{headline}. {strong_subject} 직업운에서 가장 먼저 보입니다. {watch_subject} 직함과 평가를 안정적으로 받쳐줍니다."
     if domain == "love":
         if watch_score < 50:
             return f"{headline}. {strong_subject} 강한 편입니다. {watch_subject} 불리합니다. 마음이 있어도 표현이 늦으면 상대가 확신을 얻기 어렵습니다."
@@ -4289,17 +5325,570 @@ def _premium_checkpoints(section: dict[str, Any], product_item: dict[str, Any] |
     ]
 
 
-def _detail_block(title: str, body: str, bullets: list[str] | None = None, *, tone: str = "") -> dict[str, Any]:
-    return {
+def _detail_block(
+    title: str,
+    body: str,
+    bullets: list[str] | None = None,
+    *,
+    tone: str = "",
+    action: str = "",
+    metric: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "title": title,
-        "body": body,
+        "body": _polish_detail_block_body(body),
         "bullets": bullets or [],
         "tone": tone,
+        "action": action,
     }
+    if isinstance(metric, dict):
+        for key in ("metric_key", "metric_label", "score", "level", "value"):
+            if metric.get(key) not in (None, ""):
+                payload[key] = metric.get(key)
+    return payload
+
+
+def _polish_detail_block_body(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    replacements = {
+        "결혼운은 감정이 생활 계획으로 넘어갈 때 강해집니다.": "결혼운은 감정이 집, 돈, 일정의 문제로 넘어갈 때 현실화됩니다.",
+        "생활 기준이 분명해지면 결혼 이야기가 빠르게 구체화됩니다.": "생활 기준이 분명해지면 결혼은 말보다 절차로 빨리 움직입니다.",
+        "인정받고 존중받는 자리에서 더 적극적으로 움직입니다. 새 일을 시작하고 사람 앞에 나설수록 더 적극적으로 움직입니다.": "인정받고 존중받는 자리에서 적극성이 살아납니다. 새 일을 시작하거나 사람 앞에 서는 환경에서 반응이 빨라집니다.",
+        "맡은 일의 범위와 결과물이 기록될수록 경력의 값이 올라갑니다.": "담당 범위와 결과물이 분명할수록 경력의 값이 올라갑니다.",
+    }
+    return replacements.get(text, text)
+
+
+def _detail_block_action(domain: str, block: dict[str, Any]) -> str:
+    title = str(block.get("title") or "")
+    body = str(block.get("body") or "")
+    metric_label = str(block.get("metric_label") or "")
+    text = f"{title} {body} {metric_label}"
+    tone = str(block.get("tone") or "")
+    score = block.get("score")
+    is_watch = tone in {"risk", "watch", "caution"} or any(
+        marker in text
+        for marker in (
+            "손실",
+            "손상",
+            "불균형",
+            "부담",
+            "소모",
+            "늦",
+            "흔들",
+            "부딪",
+            "갈등",
+            "책임만",
+            "결정권",
+        )
+    )
+    is_strong = isinstance(score, int) and score >= 74 and not is_watch
+    if domain == "money":
+        if is_watch:
+            if any(marker in text for marker in ("투자", "변동", "보증", "채무", "대여", "확장")):
+                if "확장" in text:
+                    return "매출보다 비용이 먼저 커지는 확장은 속도를 늦춰야 합니다."
+                return "큰 수익을 노리는 거래는 원금 회수 가능성이 확인된 뒤에만 들어가야 합니다."
+            if any(marker in text for marker in ("계약", "문서", "서류", "약속", "회수", "지급")):
+                return "돈이 오가는 약속은 지급일과 회수 조건을 먼저 확정해야 합니다."
+            if any(marker in text for marker in ("공동", "가까운", "가족", "배우자", "명의", "지분")):
+                return "가족이나 지인과 돈을 묶을 때는 명의와 몫을 초기에 분리해야 합니다."
+            if any(marker in text for marker in ("보상", "대가", "몫", "나뉘", "분배")):
+                return "일이 시작되기 전에 대가와 배분 기준을 확정해야 자기 몫이 남습니다."
+            return "수입 계좌와 투자 계좌를 분리해야 돈의 흐름이 흔들리지 않습니다."
+        if any(marker in text for marker in ("수입", "수익", "매출", "보수", "성과")):
+            return "받을 금액과 지급 기준이 분명한 일에서 재물운이 강해집니다."
+        if any(marker in text for marker in ("자산", "소유권", "지분", "명의", "등기")):
+            return "현금으로 오래 두기보다 권리 관계가 분명한 자산으로 옮길수록 좋습니다."
+        if any(marker in text for marker in ("재주", "기술", "결과물", "매출")):
+            return "기술과 결과물에 단가가 붙을 때 재물운이 빠르게 살아납니다."
+        return "돈은 들어오는 순간보다 자기 몫으로 확정되는 순간이 더 중요합니다."
+    if domain == "career":
+        if is_watch:
+            if any(marker in text for marker in ("결정권", "권한", "책임")):
+                return "책임이 커지는 자리라면 결재권과 평가 권한을 함께 받아야 합니다."
+            if any(marker in text for marker in ("공", "성과", "이름", "평가")):
+                return "성과가 나기 전부터 담당자와 결과물의 이름을 분명히 해야 합니다."
+            return "역할이 자주 바뀌는 일은 경력의 값이 남기 어렵습니다."
+        if any(marker in text for marker in ("독립", "사업")):
+            return "고객층과 단가가 잡힌 뒤 독립해야 직업운의 강점이 뚜렷하게 드러납니다."
+        if any(marker in text for marker in ("사람", "거래", "소개")):
+            return "소개와 거래처가 실제 계약으로 이어지게 만드는 일이 중요합니다."
+        if any(marker in text for marker in ("운영", "관리", "조직")):
+            return "운영 기준을 잡고 사람과 자원을 움직이는 자리에서 강점이 커집니다."
+        if any(marker in text for marker in ("전문", "자격", "지식", "기술")):
+            return "전문성은 자격, 포트폴리오, 실적 자료로 보일 때 평판이 됩니다."
+        if any(marker in text for marker in ("승진", "직함", "평가", "명예")):
+            return "공식 평가와 직책으로 이어지는 일을 잡을수록 직업운이 커집니다."
+        return "성과가 자기 이름으로 남는 일에서 경력의 값이 올라갑니다."
+    if domain == "love":
+        if is_watch:
+            if any(marker in text for marker in ("표현", "연락", "거리")):
+                return "마음이 있다면 연락과 만남의 의사를 더 분명하게 보여야 합니다."
+            if any(marker in text for marker in ("감정 기복", "불안", "손상")):
+                return "감정이 크게 흔들리는 상대와는 초반부터 돈과 시간의 선을 두어야 합니다."
+            return "서운함이 반복되면 관계의 온도가 한 번에 식을 수 있습니다."
+        if any(marker in text for marker in ("공식", "약속", "결혼")):
+            return "마음이 확인되면 관계의 이름과 약속을 늦추지 않는 편이 좋습니다."
+        return "오래 볼 사람일수록 말보다 반복된 태도와 약속을 봐야 합니다."
+    if domain == "marriage":
+        if is_watch:
+            if any(marker in text for marker in ("돈", "재정", "생활비", "가족", "주거")):
+                return "결혼 전부터 생활비, 주거, 양가 책임의 선을 분명히 해야 합니다."
+            if any(marker in text for marker in ("주도권", "결정권", "부딪")):
+                return "부부가 함께 결정할 일과 각자 결정할 일을 초반에 나누어야 합니다."
+            return "결혼 생활은 역할이 한쪽으로 몰릴 때 가장 빨리 흔들립니다."
+        if any(marker in text for marker in ("안정", "생활", "주거", "가정")):
+            return "생활 기준이 맞는 상대와는 결혼을 현실 계획으로 옮기는 편이 좋습니다."
+        return "결혼은 감정보다 생활의 책임을 함께 질 수 있는지가 핵심입니다."
+    if domain == "personality":
+        if "판단" in title:
+            return "큰 선택일수록 손익보다 책임 소재를 먼저 확인할 때 판단이 정확해집니다."
+        if any(marker in title for marker in ("대인", "거리", "관계")):
+            return "처음부터 너무 가까워지기보다 상대의 태도와 약속을 확인한 뒤 거리를 좁히는 편입니다."
+        if any(marker in title for marker in ("감정", "불안", "마음")):
+            return "감정이 올라와도 사실관계를 확인한 뒤 결론을 내릴 때 손상이 적습니다."
+        if any(marker in title for marker in ("압박", "책임", "문제")):
+            return "압박이 커질수록 자기 책임과 남의 책임을 구분해야 합니다."
+        if any(marker in title for marker in ("속도", "실행", "기회")):
+            return "기회가 보일 때 빠르게 움직이되 약속의 범위는 먼저 좁혀야 합니다."
+        if any(marker in title for marker in ("관심", "몰입", "전문")):
+            return "몰입하는 분야가 분명해질수록 전문성과 취향이 곧 경쟁력이 됩니다."
+        if "판단" in text:
+            return "큰 선택일수록 손익보다 책임 소재를 먼저 확인할 때 판단이 정확해집니다."
+        if any(marker in text for marker in ("대인", "거리", "관계")):
+            return "가까운 관계일수록 허용할 일과 거절할 일을 초기에 보여주는 편이 좋습니다."
+        if any(marker in text for marker in ("감정", "불안", "마음")):
+            return "감정이 올라와도 사실관계를 확인한 뒤 결론을 내릴 때 손상이 적습니다."
+        if is_watch:
+            return "자기 기준이 강해질수록 말의 강도보다 결론의 정확성이 중요합니다."
+        if is_strong:
+            return "분명한 기준을 오래 유지할 때 성격의 장점이 가장 잘 드러납니다."
+        return "사람과 일에 같은 기준을 적용할수록 신뢰가 쌓입니다."
+    if domain == "honor":
+        if is_watch:
+            if any(marker in text for marker in ("직책", "권한", "책임", "권위")):
+                return "직책이 걸린 일은 맡은 범위와 책임 기록을 먼저 분명히 해야 합니다."
+            if any(marker in text for marker in ("평판", "인정", "명예", "소문")):
+                return "평판이 걸린 일은 말보다 자료, 기록, 공식 절차를 남겨야 합니다."
+            return "공식 평가가 걸린 일은 감정 대응보다 근거와 절차를 앞세워야 합니다."
+        if any(marker in text for marker in ("직책", "승진", "권위", "책임")):
+            return "책임을 맡을 때 권한과 이름이 함께 남는 자리를 잡아야 합니다."
+        if any(marker in text for marker in ("평판", "인정", "신뢰", "명예")):
+            return "성과를 조용히 끝내기보다 공식 기록과 평판으로 남기는 편이 좋습니다."
+        return "명예운은 맡은 책임이 공적 신뢰로 이어질 때 가장 분명해집니다."
+    if domain == "social":
+        if is_watch:
+            if any(marker in text for marker in ("부탁", "책임", "선", "경계")):
+                return "가까운 부탁도 가능한 범위를 초반에 정해야 관계가 오래 갑니다."
+            if any(marker in text for marker in ("갈등", "경쟁", "피해", "손실")):
+                return "불편한 관계는 오래 끌기보다 초기에 거리와 역할을 분명히 해야 합니다."
+            return "대인관계에서는 호의가 책임으로 바뀌는 지점을 조심해야 합니다."
+        if any(marker in text for marker in ("조력", "덕", "도움", "신뢰")):
+            return "오래 본 사람과의 신뢰가 소개, 협력, 실제 도움으로 이어집니다."
+        if any(marker in text for marker in ("거리", "관계", "유지")):
+            return "관계는 넓히는 것보다 오래 갈 사람을 가려 남기는 편이 좋습니다."
+        return "대인관계는 말보다 반복된 태도와 책임 있는 약속에서 힘이 생깁니다."
+    return ""
+
+
+INTERNAL_DETAIL_LAYER_TERMS = {
+    "product_metric_source",
+    "engine_basis_code",
+    "core_keyword_dictionary",
+    "multi_source_metric",
+    "broad_source_metric",
+}
+
+INTERNAL_DETAIL_LAYER_PUBLIC_LABELS = {
+    "product_metric_source": "지표 기준",
+    "engine_basis_code": "명리 근거",
+    "core_keyword_dictionary": "핵심어",
+    "multi_source_metric": "복수 근거",
+    "broad_source_metric": "확장 근거",
+}
+
+
+def _detail_block_text_has_internal_terms(text: str) -> bool:
+    return any(term in str(text or "") for term in INTERNAL_DETAIL_LAYER_TERMS)
+
+
+def _clean_internal_public_markers(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value
+        for before, after in INTERNAL_DETAIL_LAYER_PUBLIC_LABELS.items():
+            text = text.replace(before, after)
+        return text
+    if isinstance(value, list):
+        cleaned_items: list[Any] = []
+        seen_texts: set[str] = set()
+        for item in value:
+            cleaned_item = _clean_internal_public_markers(item)
+            if isinstance(cleaned_item, str):
+                key = cleaned_item.strip()
+                if not key or key in seen_texts:
+                    continue
+                seen_texts.add(key)
+            cleaned_items.append(cleaned_item)
+        return cleaned_items
+    if isinstance(value, tuple):
+        return tuple(_clean_internal_public_markers(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _clean_internal_public_markers(item) for key, item in value.items()}
+    return value
+
+
+def _detail_block_basis_has_duplicate_keywords(text: str) -> bool:
+    body = str(text or "")
+    if "핵심어" not in body or ":" not in body:
+        return False
+    tail = body.split(":", 1)[1]
+    normalized_terms = [
+        re.sub(r"\W+", "", piece, flags=re.UNICODE)
+        for piece in re.split(r"[,/|;]\s*|\n+", tail)
+        if str(piece or "").strip()
+    ]
+    normalized_terms = [term for term in normalized_terms if term]
+    return len(normalized_terms) != len(set(normalized_terms))
+
+
+def _detail_block_customer_signal_text(components: dict[str, Any]) -> str:
+    if not isinstance(components, dict):
+        return ""
+    candidates: list[str] = []
+    for key in (
+        "gyeokguk_action_titles",
+        "principle_tags",
+        "cycle_tags",
+        "basis_keywords",
+        "source_labels",
+    ):
+        value = components.get(key)
+        if isinstance(value, list):
+            candidates.extend(str(item).strip() for item in value if str(item or "").strip())
+        elif value:
+            candidates.append(str(value).strip())
+    cleaned: list[str] = []
+    for item in candidates:
+        if not item or item in INTERNAL_DETAIL_LAYER_TERMS or _detail_block_text_has_internal_terms(item):
+            continue
+        item = item.replace("product_metric_source", "").replace("engine_basis_code", "").replace("core_keyword_dictionary", "")
+        item = " ".join(item.split())
+        if not item:
+            continue
+        if item not in cleaned:
+            cleaned.append(item)
+        if len(cleaned) >= 3:
+            break
+    return ", ".join(cleaned)
+
+
+def _detail_block_keyword_basis(*values: Any, limit: int = 7, prefix: str = "핵심어") -> str:
+    terms: list[str] = []
+    seen_terms: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                visit(item)
+            return
+        text = str(value or "").strip()
+        if not text or _detail_block_text_has_internal_terms(text):
+            return
+        for piece in re.split(r"[,/|;]\s*|\n+", text):
+            term = " ".join(str(piece or "").strip().split())
+            if not term or _detail_block_text_has_internal_terms(term):
+                continue
+            normalized = re.sub(r"[\s·ㆍ,./|:;_\-–—()[\]{}]+", "", term)
+            if normalized and normalized not in seen_terms:
+                terms.append(term)
+                seen_terms.add(normalized)
+            if len(terms) >= limit:
+                return
+
+    for value in values:
+        visit(value)
+        if len(terms) >= limit:
+            break
+    if not terms:
+        return ""
+    return f"{prefix}: {', '.join(terms[:limit])}"
+
+
+def _dedupe_keyword_basis_text(text: Any) -> str:
+    body = str(text or "").strip()
+    if "핵심어" not in body or ":" not in body:
+        return body
+
+    def dedupe_keyword_tail(match: re.Match[str]) -> str:
+        prefix = match.group(1)
+        tail = match.group(2)
+        terms: list[str] = []
+        seen_terms: set[str] = set()
+        for piece in re.split(r"[,|;]\s*|\n+", tail):
+            term = " ".join(str(piece or "").strip().split())
+            if not term:
+                continue
+            normalized = re.sub(r"\W+", "", term, flags=re.UNICODE)
+            if normalized and normalized not in seen_terms:
+                terms.append(term)
+                seen_terms.add(normalized)
+        if not terms:
+            return match.group(0)
+        return f"{prefix}{', '.join(terms)}"
+
+    return re.sub(r"(핵심어\s*:\s*)([^/]+)", dedupe_keyword_tail, body)
+
+
+def _detail_block_unscored_basis_summary(domain: str, metric_label: str, block: dict[str, Any]) -> str:
+    title = str(block.get("title") or metric_label or "").strip()
+    body = str(block.get("body") or "").strip()
+    text = f"{title} {body}"
+    if "격국·월령" in text:
+        return _detail_block_keyword_basis(title, "월령, 격국, 십신 작용, 조후, 지지 관계, 생극")
+    if "추가 내용" in title:
+        domain_keywords = {
+            "money": "재성, 식상, 비겁, 재극인, 재생관, 계약, 회수",
+            "career": "관성, 인성, 식상, 직책, 전문성, 평가, 지속성",
+            "love": "배우자성, 일지, 합충, 표현, 거리감, 인연 지속성",
+            "marriage": "배우자궁, 관성, 재성, 생활 안정, 가족 관계, 장기 유지",
+        }
+        keyword_text = domain_keywords.get(domain)
+        if keyword_text:
+            return _detail_block_keyword_basis(title, keyword_text)
+    if domain == "honor":
+        if any(marker in text for marker in ("직책", "권위", "책임")):
+            return _detail_block_keyword_basis(title, "직책, 권위, 책임, 공적 신뢰, 명예 관리")
+        if any(marker in text for marker in ("평판", "인정", "명예")):
+            return _detail_block_keyword_basis(title, "평판, 인정, 명예, 기록, 공적 평가")
+        return _detail_block_keyword_basis(title, "사회적 인정, 공적 책임, 평판, 명분, 신뢰")
+    if domain == "social":
+        if any(marker in text for marker in ("부탁", "책임", "선", "경계")):
+            return _detail_block_keyword_basis(title, "부탁, 책임 경계, 거리 조절, 관계 손실")
+        if any(marker in text for marker in ("조력", "덕", "도움", "신뢰")):
+            return _detail_block_keyword_basis(title, "조력, 지인 덕, 신뢰 형성, 협력")
+        return _detail_block_keyword_basis(title, "거리 조절, 신뢰, 협력, 말의 영향력")
+    if domain == "timing":
+        return _detail_block_keyword_basis(title, "좋은 시기, 조심할 시기, 대운, 세운")
+    if domain == "personality":
+        return _detail_block_keyword_basis(title, "판단 기준, 감정 조절, 실행 방식, 관계 거리")
+    return ""
+
+
+def _detail_block_basis_summary(domain: str, block: dict[str, Any]) -> str:
+    raw_metric_label = str(block.get("metric_label") or block.get("title") or "").strip()
+    metric_label = _premium_display_title(raw_metric_label)
+    if raw_metric_label == "계약·문서 안정성":
+        metric_label = raw_metric_label
+    metric_label = metric_label.replace("공동자금", "공동 자금").replace("가족재산", "가족 재산")
+    score = block.get("score")
+    level = str(block.get("level") or block.get("value") or "").strip()
+    if not metric_label:
+        return ""
+    if not isinstance(score, int):
+        evidence = _replace_premium_display_terms(_web_topic_evidence_text(block.get("evidence")))
+        if _detail_block_text_has_internal_terms(evidence):
+            evidence = ""
+        if evidence.strip():
+            return evidence.strip()
+        unscored_basis = _detail_block_unscored_basis_summary(domain, metric_label, block)
+        if unscored_basis:
+            return unscored_basis
+        return evidence.strip()
+
+    is_watch = score < 55 or str(block.get("tone") or "") in {"risk", "watch", "caution"}
+    is_strong = score >= 74 and not is_watch
+    level_text = level or _contract_level_from_score(score)
+
+    if domain == "money":
+        if is_watch:
+            focus = "금전 거래에서는 권리, 회수, 보유 조건을 먼저 따져야 합니다."
+        elif is_strong:
+            focus = "수익이 실제 자산으로 남는 조건이 비교적 분명합니다."
+        else:
+            focus = "수입 이후의 보유 조건에 따라 결과가 달라집니다."
+    elif domain == "career":
+        if is_watch:
+            focus = "성과가 이름, 권한, 평가로 남는 과정이 불안정합니다."
+        elif is_strong:
+            focus = "성과가 직책, 평판, 전문성으로 이어지는 구조가 뚜렷합니다."
+        else:
+            focus = "역할과 평가 기준이 정리될수록 결과가 분명해집니다."
+    elif domain == "love":
+        if is_watch:
+            focus = "마음보다 표현, 거리, 신뢰 문제가 먼저 흔들립니다."
+        elif is_strong:
+            focus = "호감이 약속과 지속성으로 이어지는 구조가 뚜렷합니다."
+        else:
+            focus = "상대와의 속도와 표현 방식에 따라 관계의 온도가 달라집니다."
+    elif domain == "marriage":
+        if is_watch:
+            focus = "감정보다 생활비, 주거, 가족 책임에서 부담이 생깁니다."
+        elif is_strong:
+            focus = "관계가 생활 안정과 장기 약속으로 이어지는 구조가 뚜렷합니다."
+        else:
+            focus = "생활 기준과 책임 분담이 맞을수록 결혼운이 안정됩니다."
+    elif domain == "personality":
+        if is_watch:
+            focus = "기준이 흔들릴 때 말과 행동의 균형을 잃기 쉽습니다."
+        elif is_strong:
+            focus = "성격의 장점이 판단, 관계, 실행에서 분명하게 드러납니다."
+        else:
+            focus = "상황에 따라 장점과 부담이 함께 나타납니다."
+    else:
+        if is_watch:
+            focus = "문제가 생길 때 먼저 확인해야 합니다."
+        elif is_strong:
+            focus = "이 영역에서 강점으로 작용합니다."
+        else:
+            focus = "전체 판단을 보조합니다."
+    layer_summary = _detail_block_engine_layer_summary(
+        domain,
+        block,
+        metric_label,
+        is_watch=is_watch,
+        is_strong=is_strong,
+    )
+    if layer_summary:
+        return layer_summary
+
+    domain_keywords = {
+        "money": "권리, 회수, 보유 조건, 수익, 손실, 자산화",
+        "career": "성과, 권한, 평가, 직책, 전문성, 지속성",
+        "love": "호감, 표현, 거리, 신뢰, 지속성, 회복력",
+        "marriage": "생활 안정, 책임 분담, 재정 합의, 가족 관계, 장기 유지",
+        "personality": "판단 기준, 감정 조절, 실행 방식, 관계 거리, 책임 감각",
+        "honor": "인정, 평판, 직책, 책임, 명예 관리",
+        "social": "신뢰, 거리 조절, 협력, 부탁의 경계, 관계 손실",
+        "timing": "좋은 시기, 조심할 시기, 대운, 세운",
+    }
+    return _detail_block_keyword_basis(metric_label, domain_keywords.get(domain, "강점, 부담, 보완"), limit=7)
+
+
+def _detail_block_engine_layer_summary(
+    domain: str,
+    block: dict[str, Any],
+    metric_label: str,
+    *,
+    is_watch: bool,
+    is_strong: bool,
+) -> str:
+    components = block.get("judgment_components")
+    if not isinstance(components, dict):
+        return ""
+    layers = [
+        str(item).strip()
+        for item in list(components.get("layer_coverage") or [])
+        if str(item).strip()
+    ][:3]
+    raw_layers = [
+        str(item).strip()
+        for item in list(components.get("raw_layer_coverage") or [])
+        if str(item).strip()
+    ][:5]
+    action_titles = [
+        str(item).strip()
+        for item in list(components.get("gyeokguk_action_titles") or [])
+        if str(item).strip()
+    ][:2]
+    principle_tags = [
+        str(item).strip()
+        for item in list(components.get("principle_tags") or [])
+        if str(item).strip()
+    ][:2]
+    cycle_tags = [
+        str(item).strip()
+        for item in list(components.get("cycle_tags") or [])
+        if str(item).strip()
+    ][:2]
+    pressure = components.get("pressure") if isinstance(components.get("pressure"), dict) else {}
+    has_pressure = bool((pressure or {}).get("has_pressure")) or bool(components.get("counter_signal_count"))
+
+    if not layers and not raw_layers and not action_titles and not principle_tags and not cycle_tags:
+        return ""
+
+    layer_text = _detail_block_customer_signal_text(components)
+    signal_names = list(dict.fromkeys([*action_titles, *principle_tags, *cycle_tags]))[:3]
+    signal_text = ", ".join(signal_names)
+
+    basis_parts: list[str] = []
+    if signal_text:
+        basis_parts.append(f"작용: {signal_text}")
+    keyword_line = _detail_block_keyword_basis(layer_text, limit=6)
+    if keyword_line:
+        basis_parts.append(keyword_line)
+    if has_pressure and not is_watch:
+        basis_parts.append("보조 신호: 반대 작용")
+    if basis_parts:
+        return " / ".join(basis_parts)
+
+    domain_keywords = {
+        "money": "권리, 회수, 보유 조건, 수익, 손실",
+        "career": "성과, 권한, 평가, 직책, 전문성",
+        "love": "호감, 표현, 거리, 신뢰, 지속성",
+        "marriage": "생활 안정, 책임 분담, 재정 합의, 장기 유지",
+        "personality": "판단 기준, 감정 조절, 실행 방식, 관계 거리",
+        "honor": "인정, 평판, 직책, 책임, 명예 관리",
+        "social": "신뢰, 거리 조절, 협력, 부탁의 경계",
+        "timing": "좋은 시기, 조심할 시기, 대운, 세운",
+    }
+    return _detail_block_keyword_basis(domain_keywords.get(domain, "강점, 부담, 보완"))
+
+
+def _enrich_detail_block_actions(domain: str, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        next_block = dict(block)
+        if not str(next_block.get("action") or "").strip():
+            action = _detail_block_action(domain, next_block)
+            if action:
+                next_block["action"] = action
+        existing_basis = str(next_block.get("basis_summary") or "").strip()
+        basis_summary = _detail_block_basis_summary(domain, next_block)
+        if basis_summary and (
+            not existing_basis
+            or _detail_block_basis_summary_should_upgrade(existing_basis, next_block)
+        ):
+            next_block["basis_summary"] = basis_summary
+        if next_block.get("basis_summary"):
+            next_block["basis_summary"] = _dedupe_keyword_basis_text(next_block.get("basis_summary"))
+        enriched.append(next_block)
+    return enriched
+
+
+def _detail_block_basis_summary_should_upgrade(text: str, block: dict[str, Any]) -> bool:
+    if _detail_block_text_has_internal_terms(text):
+        return True
+    if _detail_block_basis_has_duplicate_keywords(text):
+        return True
+    weak_markers = (
+        "좋게 나타납니다",
+        "강하게 나타납니다",
+        "중간 수준입니다",
+        "주의가 필요합니다",
+        "가장 먼저 경계해야 합니다",
+        "상황에 따라 장점과 부담이 함께 나타납니다",
+        "수익이 실제 자산으로 남는 조건이 비교적 분명합니다",
+        "성과가 직책, 평판, 전문성으로 이어지는 구조가 뚜렷합니다",
+        "신호가 부담으로 작용합니다",
+        "신호가 강하게 모입니다",
+        "신호가 같이 걸려 있습니다",
+        "장점과 부담을 함께 보아야 합니다",
+        "조건에 따라 결과가 달라집니다",
+    )
+    if any(marker in text for marker in weak_markers):
+        return True
+    if not isinstance(block.get("judgment_components"), dict):
+        return False
+    return False
 
 
 def _web_topic_evidence_text(text: Any) -> str:
-    return str(text or "").replace("분석 기준:", "근거 항목:")
+    return str(text or "").replace("분석 기준:", "근거:")
 
 
 PREMIUM_DISPLAY_TITLE_ALIASES: dict[str, str] = {
@@ -4317,8 +5906,16 @@ PREMIUM_DISPLAY_TITLE_ALIASES: dict[str, str] = {
     "공동 자금 관리력": "공동자금 운영력",
     "공동 자금 안정성": "공동자금 운영력",
     "돈을 지켜내는 기준": "계약·명의 안정성",
+    "재정 방어력": "재정 안정성",
+    "가족재산 경계력": "가족재산 관리력",
     "계약·문서 안정성": "계약·명의 안정성",
     "계약 안정성": "계약·명의 안정성",
+    "재물 주의 연도": "금전 변동기",
+    "공동자금 주의 연도": "공동자금 변동기",
+    "계약·명의 주의 연도": "계약·명의 변동기",
+    "부채·보증 주의 연도": "부채·보증 변동기",
+    "가족재산 주의 연도": "가족재산 변동기",
+    "직업 분야": "직무 적합성",
     "직업적 성취의 그릇": "성취 축적력",
     "직업 성취력": "성취 축적력",
     "성과 구현력": "성취 축적력",
@@ -4338,17 +5935,25 @@ PREMIUM_DISPLAY_TITLE_ALIASES: dict[str, str] = {
     "애정이 표현되는 방식": "애정 표현성",
     "애정 표현력": "애정 표현성",
     "관계가 오래 가는 힘": "관계 지속력",
+    "관계가 오래 남는 힘": "관계 지속력",
     "관계 안정성": "관계 지속력",
     "관계 지속력": "관계 지속력",
+    "관계 주의 연도": "관계 변동기",
+    "주변 개입 주의 연도": "주변 변수 변동기",
     "결혼으로 이어지는 현실성": "결혼 연결력",
+    "결혼 현실화력": "결혼 연결력",
     "결혼 현실화": "결혼 연결력",
     "결혼 현실성": "결혼 연결력",
     "함께 살아가는 기준": "생활 안정",
     "생활 기준": "생활 안정",
     "생활 조율력": "생활 안정",
     "생활 안정성": "생활 안정",
-    "결혼이 안정되는 힘": "혼인 성향",
-    "결혼 안정성": "혼인 성향",
+    "결혼이 안정되는 힘": "혼인 안정성",
+    "결혼 안정성": "혼인 안정성",
+    "혼인 성향": "혼인 안정성",
+    "결혼 주의 연도": "혼인 변동기",
+    "배우자상": "배우자 적합성",
+    "배우자 복": "배우자운 안정성",
     "생활 기반이 잡히는 방식": "생활 안정",
     "생활 기반 안정성": "생활 안정",
     "가족 책임감": "가족 책임 경계력",
@@ -4368,14 +5973,14 @@ PREMIUM_DISPLAY_TITLE_ALIASES: dict[str, str] = {
     "사회적 인정이 붙는 자리": "공적 인정 기반",
     "평가가 직함으로 이어지는 자리": "직책 상승력",
     "권한이 붙을수록 커지는 평판": "권한 기반 평판",
-    "평판 유지력": "평판이 오래 남는 힘",
-    "평판 지속력": "평판이 오래 남는 힘",
-    "공식 책임": "공식 책임을 맡는 힘",
-    "공식 역할 수용력": "공식 책임을 맡는 힘",
+    "평판 유지력": "평판 지속력",
+    "평판 지속력": "평판 지속력",
+    "공식 책임": "공식 책임 수행력",
+    "공식 역할 수용력": "공식 책임 수행력",
     "명예 관리": "명예를 지켜내는 기준",
     "명예 관리력": "명예를 지켜내는 기준",
-    "사람을 얻는 방식": "사람을 얻는 힘",
-    "인맥 형성력": "사람을 얻는 힘",
+    "사람을 얻는 방식": "인맥 형성력",
+    "인맥 형성력": "인맥 형성력",
     "도움이 되는 사람": "도움으로 이어지는 인연",
     "조력자 인연": "도움으로 이어지는 인연",
     "부탁과 책임": "부탁과 책임의 경계",
@@ -4385,7 +5990,12 @@ PREMIUM_DISPLAY_TITLE_ALIASES: dict[str, str] = {
 
 def _premium_display_title(value: Any) -> str:
     text = str(value or "").strip()
-    return PREMIUM_DISPLAY_TITLE_ALIASES.get(text, text)
+    for _ in range(3):
+        next_text = PREMIUM_DISPLAY_TITLE_ALIASES.get(text, text)
+        if next_text == text:
+            return text
+        text = next_text
+    return text
 
 
 def _replace_premium_display_terms(text: Any) -> str:
@@ -4396,6 +6006,176 @@ def _replace_premium_display_terms(text: Any) -> str:
         if source in value and target not in value:
             value = value.replace(source, target)
     return value
+
+
+PUBLIC_METRIC_MEANINGS: dict[str, dict[str, str]] = {
+    "personality": {
+        "판단 기준": "중요한 선택 앞에서 자기 결론을 믿고 세우는 기준입니다.",
+        "관심 몰입도": "한 가지 주제에 깊게 들어가 성과가 날 때까지 붙잡는 집중성입니다.",
+        "압박 대응력": "문제가 생겼을 때 흐트러지지 않고 순서와 책임을 다시 정리하는 대응 기준입니다.",
+        "감정 반응성": "불편한 상황에서 감정이 올라오는 속도와 그것을 조절하는 방식을 나타냅니다.",
+        "대인 조율감": "상대의 입장을 읽으면서도 자기 기준을 잃지 않는 관계 감각입니다.",
+        "대인 거리감": "사람을 가까이 두는 방식과 사적인 선을 지키는 기준입니다.",
+        "실행 속도": "판단이 실제 행동과 결과로 옮겨지는 속도입니다.",
+        "기준 조율력": "상황이 바뀌어도 자기 입장과 현실 조건을 함께 맞추는 능력입니다.",
+    },
+    "money": {
+        "재물 형성력": "수입이 일시적인 현금으로 끝나지 않고 재산의 바탕으로 남는 흐름입니다.",
+        "재물 규모 확장력": "개인 수입을 넘어 거래 규모와 자산 단위를 키울 수 있는 가능성입니다.",
+        "수입 창출력": "일, 거래, 성과가 실제 입금과 반복 수입으로 연결되는 흐름입니다.",
+        "재주 수익화": "기술, 말, 콘텐츠, 서비스가 가격을 갖고 수입으로 바뀌는 가능성입니다.",
+        "성과 보상력": "해낸 일이 자기 몫의 보수, 성과급, 계약 조건으로 회수되는 흐름입니다.",
+        "자산화 능력": "들어온 돈을 소비가 아니라 명의와 보유 자산으로 옮기는 능력입니다.",
+        "자금 운용 안정성": "생활비, 투자금, 예비 자금이 무리 없이 나뉘어 유지되는 구조입니다.",
+        "금전 기준성": "정, 체면, 분위기보다 자기 몫과 권리를 먼저 세우는 기준입니다.",
+        "공동자금 운영력": "가까운 사람과 돈이 얽힐 때 명의, 지분, 책임 범위를 지키는 능력입니다.",
+        "계약·명의 안정성": "받을 돈과 권리를 문서, 명의, 지분으로 분명히 고정하는 기준입니다.",
+        "계약·문서 안정성": "말로 정한 약속을 문서와 권리 관계로 확정하는 능력입니다.",
+        "투자·거래 판단력": "겉수익보다 회수 가능성, 권리 구조, 상대의 책임을 먼저 읽는 감각입니다.",
+        "채권·미수금 회수력": "늦어진 돈과 받아야 할 보상을 흐지부지 넘기지 않고 회수하는 능력입니다.",
+        "부채·보증 관리력": "대여, 보증, 채무 인수에서 남의 책임이 넘어오지 않게 막는 기준입니다.",
+        "가족재산 관리력": "가족 자금과 자기 재산이 섞일 때 권리와 부담을 분리하는 능력입니다.",
+        "가족재산 경계력": "가족 명의, 지원, 공동 부담 속에서도 자기 몫을 분명히 지키는 기준입니다.",
+        "사업 확장성": "고객, 단가, 거래처가 늘어날 때 사업 단위로 키울 수 있는 가능성입니다.",
+        "재정 안정성": "손실이나 변수에도 핵심 자산과 현금 기반을 지키는 안정성입니다.",
+        "재정 방어력": "예상 밖의 지출과 손실이 생겨도 생활 기반을 지켜내는 능력입니다.",
+        "후반 축재력": "나이가 들수록 재산이 생활 기반과 보유 자산으로 굳어지는 흐름입니다.",
+        "재물 강세 연도": "수입, 자산, 계약 결과가 한 해의 사건으로 선명하게 드러나는 시기입니다.",
+        "금전 변동기": "명의, 보증, 공동자금에서 자기 몫을 특히 분명히 해야 하는 시기입니다.",
+    },
+    "career": {
+        "직업 적성": "실력이 가장 빨리 인정받고 경력의 값이 올라가는 업무 성격입니다.",
+        "직무 적합성": "업무 방식과 타고난 강점이 실제 역할에서 맞아떨어지는 흐름입니다.",
+        "직업 분야": "직업명보다 업무 방식, 책임 구조, 결과물의 성격을 가르는 기준입니다.",
+        "성취 축적력": "한 번의 성과가 이력, 실적, 다음 역할의 근거로 남는 흐름입니다.",
+        "평가·명예 전환력": "실적이 평판, 추천, 직함, 공식 평가로 바뀌는 흐름입니다.",
+        "승진·직함 가능성": "책임자 역할과 공식 직함으로 올라설 가능성입니다.",
+        "사회적 도약성": "개인 성과가 더 큰 지위와 영향력으로 확대되는 가능성입니다.",
+        "권한 확보력": "맡은 일에 필요한 결정권, 보고 체계, 보상 기준을 확보하는 능력입니다.",
+        "책임·권한 균형": "책임과 결정권이 함께 주어질 때 경력 손상을 막고 성취를 남기는 구조입니다.",
+        "보상 협상력": "성과를 연봉, 성과급, 수수료, 계약 조건으로 바꾸는 능력입니다.",
+        "전문 자산화": "경험과 지식이 대체하기 어려운 전문성으로 굳어지는 흐름입니다.",
+        "조직 적응력": "조직의 규칙과 평가 체계 안에서 자기 위치를 안정적으로 확보하는 능력입니다.",
+        "소속 전환력": "회사, 부서, 직무가 바뀌어도 새 역할을 다시 잡는 능력입니다.",
+        "전환 대응력": "소속이나 역할이 바뀌는 시기에 새 기준을 빠르게 세우는 능력입니다.",
+        "독립 가능성": "자기 이름, 고객 기반, 별도 수입원으로 일할 가능성입니다.",
+        "업무 조건 감별력": "성과가 남는 일과 소모만 큰 일을 구분하는 감각입니다.",
+        "직업 전환 연도": "이직, 승진, 역할 변경이 실제 선택으로 올라오는 시기입니다.",
+    },
+    "love": {
+        "끌림의 기준": "처음 마음이 움직이는 지점과 오래 끌리는 상대의 조건입니다.",
+        "상대 선택력": "오래 갈 사람과 손상될 관계를 초기에 가려내는 감각입니다.",
+        "상대 신뢰 감별력": "상대의 말보다 반복된 태도, 약속, 책임감을 읽는 능력입니다.",
+        "인연 형성력": "스쳐 가는 호감이 실제 만남과 관계로 이어지는 가능성입니다.",
+        "관계 진전력": "호감이 만남, 약속, 공개된 관계로 넘어가는 확정성입니다.",
+        "관계 주도권": "관계의 속도와 거리를 스스로 조정하는 능력입니다.",
+        "관계 속도 조절력": "감정의 속도와 실제 만남의 속도를 맞추는 능력입니다.",
+        "애정 표현성": "마음이 상대에게 오해 없이 전달되는 방식입니다.",
+        "정서 수용력": "상대의 불안과 서운함을 관계 안에서 받아내는 폭입니다.",
+        "관계 지속력": "깊어진 관계를 쉽게 끊지 않고 오래 유지하는 성향입니다.",
+        "연락·거리 안정성": "연락, 사생활, 만남의 간격이 안정적으로 맞는 구조입니다.",
+        "오해 조정력": "말하지 않고 넘긴 감정을 늦기 전에 다시 맞추는 능력입니다.",
+        "갈등 관리력": "자존심과 생활 기준이 부딪힐 때 관계를 깨뜨리지 않는 능력입니다.",
+        "주변 개입 관리력": "가족, 친구, 과거 인연의 말이 관계를 흔들지 않게 막는 기준입니다.",
+        "재회 가능성": "끝난 인연이 다시 연락과 만남으로 이어질 여지입니다.",
+        "결혼 연결력": "연애가 주거, 생활비, 가족 협의까지 이어질 현실성입니다.",
+    },
+    "marriage": {
+        "혼인 안정성": "결혼이 감정의 결론을 넘어 생활의 약속으로 유지되는 바탕입니다.",
+        "혼인 성향": "결혼을 사랑의 결론보다 생활의 책임으로 받아들이는 방식입니다.",
+        "배우자 적합성": "오래 맞는 배우자의 성격, 생활 태도, 책임 감각을 보여주는 기준입니다.",
+        "배우자운 안정성": "배우자로 인한 안정과 함께 감당할 책임의 균형입니다.",
+        "배우자상": "오래 맞는 상대의 성격과 생활 태도가 드러나는 기준입니다.",
+        "결혼 적기": "혼인 논의가 약속과 절차로 굳어지기 쉬운 시기입니다.",
+        "결혼 연결력": "결혼 의사가 집, 일정, 가족 협의, 공식 절차로 넘어가는 현실성입니다.",
+        "생활 안정": "주거, 생활비, 역할 기준이 결혼 생활을 지탱하는 바탕입니다.",
+        "주거·생활 설계력": "집과 생활 구조를 현실적으로 짜고 유지하는 능력입니다.",
+        "가정 운영력": "가정 안의 일정, 비용, 책임을 안정적으로 정리하는 능력입니다.",
+        "부부 재정": "공동 생활비와 개인 자산의 선이 부부 안정에 미치는 구조입니다.",
+        "생활비 기준성": "고정비와 저축 기준이 부부 사이에서 분명히 잡히는 기준입니다.",
+        "부부 갈등 조정력": "서운함과 현실 문제를 오래 끌지 않고 다시 맞추는 능력입니다.",
+        "부부 갈등 회복성": "상한 감정 뒤에도 생활 기준을 다시 세우는 능력입니다.",
+        "가족 책임 경계력": "양가와 원가족 문제에서 부부의 책임선을 지켜내는 기준입니다.",
+        "배우자 가족 경계": "배우자 가족 문제가 부부 생활 안으로 과하게 들어오지 않게 하는 기준입니다.",
+        "자녀·양육 책임": "자녀, 돌봄, 교육비가 결혼 생활의 실제 과제로 들어오는 흐름입니다.",
+        "혼인 위기 대응력": "돈, 가족, 주거 문제가 겹칠 때 결혼을 다시 세우는 능력입니다.",
+        "결혼 지속력": "한 번 정한 결혼의 약속을 오래 유지하려는 성향입니다.",
+    },
+    "timing": {
+        "상승 연도": "성과와 기회가 비교적 선명하게 드러나는 시기입니다.",
+        "주의 연도": "손실과 갈등을 줄이기 위해 큰 결정을 서두르지 말아야 하는 시기입니다.",
+        "과거 대조 연도": "지나온 흐름 중 사주의 특징이 강하게 드러났던 시기입니다.",
+        "주요 작용 분야": "해당 시기에 가장 먼저 움직이는 생활 영역입니다.",
+        "직업 상승 연도": "평가, 직책, 제안이 강하게 올라오는 시기입니다.",
+        "금전 손실 방어력": "금전 변동 속에서도 핵심 자산과 권리를 지키는 기준입니다.",
+        "관계 변동 대응력": "관계의 변화가 생길 때 오해와 단절을 줄이는 능력입니다.",
+        "혼인 변수 관리력": "결혼과 가족 문제에서 주거, 비용, 책임 변수를 정리하는 능력입니다.",
+    },
+    "life": {
+        "초년에 형성되는 바탕": "초년에 만들어지는 성향, 습관, 생활 기반입니다.",
+        "중년에 굳어지는 성취": "중년 이후 경력과 재산이 형태를 갖추는 흐름입니다.",
+        "말년에 남는 안정": "말년에 유지되는 생활 기반과 관계의 안정감입니다.",
+        "운이 바뀌는 전환기": "직업, 관계, 생활 방식이 다른 국면으로 넘어가는 구간입니다.",
+    },
+    "honor": {
+        "공적 인정 기반": "실력과 역할이 사회적 신뢰로 인정받는 바탕입니다.",
+        "공식 책임 수행력": "공적인 책임을 맡아 끝까지 수행하는 능력입니다.",
+        "직책 상승력": "평가가 실제 직함과 책임 있는 역할로 이어지는 가능성입니다.",
+        "권한 기반 평판": "권한과 책임이 함께 주어질수록 평판이 커지는 흐름입니다.",
+        "평판 지속력": "한 번 얻은 신뢰와 이름값이 오래 이어지는 흐름입니다.",
+        "명예를 지켜내는 기준": "평판을 흔드는 일을 피하고 신뢰를 유지하는 기준입니다.",
+    },
+    "social": {
+        "인맥 형성력": "새로운 사람과 연결되고 관계망을 넓히는 능력입니다.",
+        "도움으로 이어지는 인연": "사람과의 연결이 실제 도움이나 기회로 이어지는 흐름입니다.",
+        "관계 지속력": "인연을 가볍게 흘려보내지 않고 오래 유지하는 능력입니다.",
+        "부탁과 책임의 경계": "타인의 부탁을 어디까지 받아들일지 정하는 기준입니다.",
+    },
+}
+
+
+def _public_metric_meaning(domain: str, label: Any) -> str:
+    title = _canonical_public_metric_label(label)
+    domain_key = str(domain or "").strip()
+    for key in (domain_key, "_common"):
+        entries = PUBLIC_METRIC_MEANINGS.get(key) or {}
+        text = str(entries.get(title) or entries.get(str(label or "").strip()) or "").strip()
+        if text:
+            return _replace_premium_display_terms(text)
+    fallback = PREMIUM_REQUIRED_JUDGMENT_MEANINGS.get(domain_key, {}).get(title, "")
+    if fallback:
+        return _replace_premium_display_terms(fallback)
+    return ""
+
+
+def _ensure_public_metric_meaning(metric: dict[str, Any], domain: str) -> dict[str, Any]:
+    if not isinstance(metric, dict):
+        return metric
+    label = metric.get("label") or metric.get("title")
+    meaning = _public_metric_meaning(domain, label)
+    if not meaning:
+        return metric
+    enriched = dict(metric)
+    if not str(enriched.get("meaning") or "").strip():
+        enriched["meaning"] = meaning
+    if not str(enriched.get("summary") or "").strip():
+        enriched["summary"] = meaning
+    return enriched
+
+
+def _domain_default_action_sentence(domain: str) -> str:
+    actions = {
+        "personality": "결정이 커질수록 감정 반응보다 책임 소재와 남는 결과를 먼저 정리해야 합니다.",
+        "money": "수입이 커질수록 명의, 지분, 지급일, 회수 조건을 먼저 확정해야 합니다.",
+        "career": "책임이 커질수록 결재권, 평가 기준, 보상 범위를 함께 확보해야 합니다.",
+        "love": "마음이 있다면 상대가 확인할 수 있는 말과 행동을 늦추지 않는 편이 좋습니다.",
+        "marriage": "결혼 전부터 생활비, 자산 명의, 가족 지출의 선을 분명히 해야 합니다.",
+        "timing": "좋은 해에는 성과를 확정하고, 주의 해에는 계약과 책임 범위를 좁혀야 합니다.",
+        "life": "전환기에는 새 선택을 넓히기보다 직업 변동, 거처 이동, 가족 책임을 따로 정리해야 합니다.",
+        "honor": "직함보다 책임 기록과 공식 권한이 분명한 역할을 우선해야 합니다.",
+        "social": "관계가 가까워질수록 부탁과 책임의 범위를 초반에 정해야 합니다.",
+    }
+    return actions.get(str(domain or ""), "선택이 커질수록 책임 범위와 남는 결과를 먼저 정리해야 합니다.")
 
 
 def _web_topic_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4451,6 +6231,6431 @@ def _topic_tone_from_score(score: int) -> str:
     if score < 50:
         return "watch"
     return "neutral"
+
+
+def _contract_level_from_score(score: int | None) -> str:
+    if not isinstance(score, int):
+        return ""
+    if score >= 80:
+        return "매우 좋음"
+    if score >= 65:
+        return "좋음"
+    if score >= 45:
+        return "보통"
+    if score >= 30:
+        return "주의"
+    return "위험"
+
+
+def _metric_score_from_public_item(item: dict[str, Any]) -> int | None:
+    score = item.get("score")
+    if isinstance(score, bool):
+        return None
+    if isinstance(score, int):
+        return max(0, min(100, score))
+    if isinstance(score, float):
+        return max(0, min(100, round(score)))
+    return _score_from_axis_value(item.get("value") or item.get("level") or item.get("tone"))
+
+
+def _public_metric_key(label: Any, index: int, source: str) -> str:
+    text = re.sub(r"[^0-9A-Za-z가-힣]+", "_", str(label or "").strip()).strip("_")
+    return text or f"{source}_{index + 1}"
+
+
+def _positive_axis_public_metric(
+    *,
+    domain: str,
+    label: str,
+    score: int,
+    body: str,
+) -> tuple[str, int, str]:
+    """Preserve engine intensity except for the dedicated timing vocabulary."""
+    if domain != "timing" and label in DOMAIN_TIMING_METRIC_DISPLAY_LABELS:
+        return DOMAIN_TIMING_METRIC_DISPLAY_LABELS[label], score, body
+    if domain == "timing" and label in TIMING_CAUTION_POSITIVE_AXIS_LABELS:
+        normalized_score = _timing_positive_axis_score(score)
+        return TIMING_CAUTION_POSITIVE_AXIS_LABELS[label], normalized_score, body
+    return label, score, body
+
+
+def _is_public_timing_axis_for_non_timing_domain(domain: str, label: Any) -> bool:
+    """Keep year-event axes out of ordinary domain metric cards.
+
+    Money, career, love, and marriage sections may carry year-event judgment
+    axes for later timing screens. Those axes are useful internally, but they
+    make the public metric cards feel inconsistent when mixed with ability or
+    tendency axes.
+    """
+    if domain == "timing":
+        return False
+    text = _premium_display_title(str(label or "").strip())
+    if not text:
+        return False
+    return text in DOMAIN_TIMING_METRIC_DISPLAY_LABELS or text.endswith("연도")
+
+
+def _timing_positive_axis_score(score: int) -> int:
+    return _bounded_metric_score(126 - score) or score
+
+
+def _public_contract_metric(
+    item: dict[str, Any],
+    *,
+    index: int,
+    source: str,
+    domain: str = "",
+) -> dict[str, Any] | None:
+    raw_label = str(
+        item.get("label")
+        or item.get("title")
+        or item.get("display_label")
+        or item.get("source_title")
+        or "",
+    ).strip()
+    score = _metric_score_from_public_item(item)
+    if not raw_label or score is None:
+        return None
+    label = _premium_display_title(raw_label)
+    body = str(
+        item.get("body")
+        or item.get("caption")
+        or item.get("result")
+        or item.get("definition")
+        or item.get("focus")
+        or item.get("meaning")
+        or "",
+    ).strip()
+    label, score, body = _positive_axis_public_metric(
+        domain=domain,
+        label=label,
+        score=score,
+        body=body,
+    )
+    if not body:
+        body = _public_metric_meaning(domain, label)
+    polarity = str(item.get("polarity") or "positive").strip().lower()
+    if polarity not in {"positive", "risk"}:
+        polarity = "positive"
+    source_score = score
+    quality_score = _public_metric_quality_score({**item, "score": source_score})
+    if not isinstance(quality_score, int):
+        quality_score = 100 - source_score if polarity == "risk" else source_score
+    display_label, display_meaning = (
+        PRODUCT_RISK_DISPLAY_MAP.get(label, (label, body))
+        if domain in PRODUCT_DOMAIN_METRIC_SPECS and polarity == "risk"
+        else (label, body)
+    )
+    if domain in PRODUCT_DOMAIN_METRIC_SPECS:
+        display_label, display_meaning = PRODUCT_METRIC_DISPLAY_MAP.get(
+            label,
+            (display_label, display_meaning),
+        )
+    if display_meaning:
+        body = display_meaning
+    risk_intensity_score = 100 - quality_score if polarity == "risk" else None
+    incoming_display_axis = str(item.get("display_axis") or "").strip()
+    incoming_direction = str(item.get("score_direction") or "").strip().lower()
+    display_axis = (
+        incoming_display_axis
+        if incoming_display_axis
+        and incoming_direction in {"higher_is_better", "higher_is_good", "quality"}
+        else "높을수록 안정적으로 작용함"
+    )
+    level = _contract_level_from_score(quality_score)
+    metric_source = str(item.get("source") or source).strip() or source
+    metric = {
+        "key": f"{source}_{_public_metric_key(display_label, index, source)}",
+        "label": display_label,
+        "source_label": label if display_label != label else str(item.get("source_label") or ""),
+        "score": quality_score,
+        "display_score": quality_score,
+        "quality_score": quality_score,
+        "polarity": polarity,
+        "display_axis": display_axis,
+        "score_direction": "higher_is_better",
+        "level": level,
+        "value": level,
+        "summary": body,
+        "meaning": body,
+        "source": metric_source,
+    }
+    if polarity == "risk":
+        metric["risk_intensity_score"] = risk_intensity_score
+        metric["source_raw_score"] = source_score
+    for component_key in (
+        "score_components",
+        "judgment_components",
+        "gyeokguk_action_sources",
+        "cycle_tags",
+        "principle_tags",
+    ):
+        component_value = item.get(component_key)
+        if component_value in (None, "", []):
+            continue
+        if isinstance(component_value, dict):
+            metric[component_key] = dict(component_value)
+        elif isinstance(component_value, list):
+            metric[component_key] = list(component_value)
+        else:
+            metric[component_key] = component_value
+    for key in (
+        "base_score",
+        "base_level",
+        "contextual_score_delta",
+        "contextual_variation_label",
+        "contextual_variation_state",
+        "contextual_variation_domain_state",
+        "contextual_variation_profile_state",
+        "contextual_variation_source",
+    ):
+        if item.get(key) not in (None, ""):
+            metric[key] = item.get(key)
+    return _ensure_public_metric_meaning(metric, domain)
+
+
+def _compact_domain_decision_action(action: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in (
+        "title",
+        "source",
+        "presence_score",
+        "salience",
+        "context_judgment_state",
+        "month_fit_state",
+    ):
+        value = action.get(key)
+        if value not in (None, "", []):
+            compact[key] = value
+    projection = str(action.get("domain_projection") or "").strip()
+    if projection:
+        compact["domain_projection"] = projection[:220]
+    return compact
+
+
+def _compact_domain_decision_evidence(item: dict[str, Any]) -> dict[str, Any]:
+    cycle_sources = [
+        str(source.get("classical_name") or source.get("signal_id") or "").strip()
+        for source in list(item.get("cycle_sources") or [])
+        if isinstance(source, dict) and str(source.get("classical_name") or source.get("signal_id") or "").strip()
+    ][:4]
+    principle_edges = [
+        str(edge.get("classical_name") or edge.get("relation") or "").strip()
+        for edge in list(item.get("principle_edges") or [])
+        if isinstance(edge, dict) and str(edge.get("classical_name") or edge.get("relation") or "").strip()
+    ][:4]
+    gyeokguk_actions = [
+        action
+        for action in (
+            _compact_domain_decision_action(action)
+            for action in list(item.get("gyeokguk_action_sources") or [])[:4]
+            if isinstance(action, dict)
+        )
+        if action
+    ]
+    return {
+        "engine_metric_key": str(item.get("key") or "").strip(),
+        "engine_metric_label": str(item.get("label") or "").strip(),
+        "engine_metric_score": item.get("score") if isinstance(item.get("score"), int) else None,
+        "layer_coverage": list(item.get("layer_coverage") or [])[:8],
+        "raw_layer_coverage": list(item.get("raw_layer_coverage") or [])[:10],
+        "basis_signal_count": len(list(item.get("basis_codes") or [])),
+        "counter_signal_count": len(list(item.get("counter_signals") or [])),
+        "pressure": {
+            "score": item.get("pressure_score"),
+            "level": str(item.get("pressure_level") or "").strip(),
+            "reasons": list(item.get("pressure_reasons") or [])[:4],
+            "has_pressure": bool(item.get("has_pressure")),
+        },
+        "cycle_tags": cycle_sources,
+        "principle_tags": principle_edges,
+        "gyeokguk_action_titles": [
+            str(action.get("title") or "").strip()
+            for action in gyeokguk_actions
+            if str(action.get("title") or "").strip()
+        ],
+    }
+
+
+def _domain_decision_items_for_section(section: dict[str, Any]) -> list[dict[str, Any]]:
+    domain_facets = section.get("domain_decision_facets")
+    if not isinstance(domain_facets, dict):
+        return []
+    primary_domain = _domain_key(section)
+    domains = [primary_domain]
+    derived_source_domains = {
+        "honor": ("career",),
+        "social": ("love", "marriage", "personality"),
+        "life": ("personality", "money", "career", "marriage"),
+    }
+    domains.extend(derived_source_domains.get(primary_domain, ()))
+    if primary_domain == "love" and "결혼" in str(section.get("heading") or ""):
+        domains.append("marriage")
+    items: list[dict[str, Any]] = []
+    for domain in dict.fromkeys(domains):
+        for item in list(domain_facets.get(domain) or []):
+            if isinstance(item, dict):
+                items.append(item)
+    return items
+
+
+DOMAIN_DECISION_METRIC_ALIASES: dict[str, tuple[str, ...]] = {
+    "판단 기준": ("판단 방식", "결정 기준", "자기 기준"),
+    "대인 조율감": ("관계 거리", "대인 태도", "관계 조절"),
+    "대인 거리감": ("관계 거리", "대인 태도", "관계 조절"),
+    "감정 반응성": ("표현 성향", "감정 처리", "감정 반응"),
+    "감정 반응": ("표현 성향", "감정 처리", "감정 반응성"),
+    "압박 대응력": ("압박 대응", "압박 반응"),
+    "행동 속도": ("지속 방식", "실행 방식", "실행 속도"),
+    "실행 속도": ("지속 방식", "실행 방식", "행동 속도"),
+    "관심 몰입도": ("관심 방향", "몰입 방향"),
+    "관심 방향성": ("관심 방향", "몰입 방향"),
+    "전문 자산화": ("전문성 자산화", "전문성 축적"),
+    "전환 대응력": ("소속 전환력", "업무 조건 감별력", "직업 전환 안정성", "직업 전환 연도"),
+    "결혼 적기": ("결혼 현실화력", "결혼 연결력", "혼인 결정 연도"),
+    "금전 변동기": ("재물 주의 연도", "투자·거래 판단력", "재정 방어력"),
+    "공적 인정 기반": ("평가·명예 전환력", "사회적 도약성", "승진·직함 가능성"),
+    "공식 책임 수행력": ("권한 확보력", "책임·권한 균형", "승진·직함 가능성"),
+    "평판 지속력": ("평가·명예 전환력", "사회적 도약성", "성취 축적력"),
+    "명예를 지켜내는 기준": ("업무 조건 감별력", "책임·권한 균형", "보상 협상력"),
+    "인맥 형성력": ("인연 형성력", "관계 지속력", "대인 조율감"),
+    "도움으로 이어지는 인연": ("주변 개입 관리력", "갈등 회복력", "관계 지속력"),
+    "부탁과 책임의 경계": ("주변 개입 관리력", "가족 책임 경계력", "대인 조율감"),
+    "초년에 형성되는 바탕": ("판단 기준", "관심 몰입도", "직업 적성"),
+    "중년에 굳어지는 성취": ("성취 축적력", "전문성 자산화", "평가·명예 전환력"),
+    "말년에 남는 안정": ("후반 축재력", "생활 안정", "결혼 지속력"),
+    "운이 바뀌는 전환기": ("소속 전환력", "직업 전환 연도", "인생 전환 연도"),
+}
+
+
+def _domain_decision_metric_match_keys(label: Any) -> set[str]:
+    text = _premium_display_title(str(label or "").strip())
+    keys = {_compact_match_key(text)}
+    for alias in DOMAIN_DECISION_METRIC_ALIASES.get(text, ()):
+        keys.add(_compact_match_key(alias))
+    return {key for key in keys if key}
+
+
+def _timing_metric_event_match(metric: dict[str, Any], section: dict[str, Any]) -> dict[str, Any] | None:
+    label = str(metric.get("label") or metric.get("source_label") or metric.get("source_title") or "").strip()
+    label_key = _compact_match_key(label)
+    if not label_key:
+        return None
+    events = [event for event in section.get("timing_events") or [] if isinstance(event, dict)]
+    timing_map = section.get("timing_map") if isinstance(section.get("timing_map"), dict) else {}
+    good_highlights = [event for event in timing_map.get("goodHighlights") or [] if isinstance(event, dict)]
+    caution_highlights = [event for event in timing_map.get("cautionHighlights") or [] if isinstance(event, dict)]
+    past_events = [event for event in timing_map.get("pastCheck") or [] if isinstance(event, dict)]
+
+    def text_of(event: dict[str, Any]) -> str:
+        return " ".join(
+            str(value)
+            for value in (
+                event.get("title"),
+                event.get("keywords"),
+                event.get("focusLine"),
+                event.get("decisionLine"),
+                event.get("productLine"),
+                event.get("domain"),
+                event.get("domainLabel"),
+                " ".join(str(keyword) for keyword in event.get("keywordItems") or [] if keyword),
+                " ".join(str(keyword) for keyword in event.get("structureKeywords") or [] if keyword),
+            )
+            if value
+        )
+
+    def choose(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+        usable = [event for event in candidates if isinstance(event, dict)]
+        if not usable:
+            return None
+        return sorted(
+            usable,
+            key=lambda event: (-float(event.get("score") or 0), int(event.get("year") or 9999)),
+        )[0]
+
+    if label_key in {_compact_match_key("상승 연도"), _compact_match_key("좋은 연도")}:
+        return choose(good_highlights or [event for event in events if str(event.get("kind") or "") == "good"])
+    if label_key in {_compact_match_key("주의 연도"), _compact_match_key("주의 연도 대응력")}:
+        return choose(caution_highlights or [event for event in events if str(event.get("kind") or "") == "caution"])
+    if label_key in {_compact_match_key("과거 대조 연도"), _compact_match_key("지나온 연도")}:
+        return choose(past_events or [event for event in events if bool(event.get("isPast"))])
+    if label_key in {_compact_match_key("주요 작용 분야"), _compact_match_key("두드러지는 영역")}:
+        return choose(good_highlights + caution_highlights or events)
+    if "직업" in label and "상승" in label:
+        return choose([event for event in events if str(event.get("domain") or "") == "career" and str(event.get("kind") or "") == "good"])
+    if any(token in label for token in ("금전", "재물", "자금", "계약", "문서", "명의", "부채", "보증", "가족재산", "공동자금")):
+        needles = [token for token in ("공동", "자금", "계약", "명의", "부채", "보증", "가족", "재산", "재물", "금전") if token in label]
+        candidates = [
+            event
+            for event in events
+            if str(event.get("domain") or "") == "money"
+            or any(needle in text_of(event) for needle in needles)
+        ]
+        if "대응" in label or "방어" in label or "안정" in label:
+            caution_candidates = [event for event in candidates if str(event.get("kind") or "") == "caution"]
+            return choose(caution_candidates or candidates)
+        return choose(candidates)
+    if any(token in label for token in ("관계", "인연", "연애")):
+        return choose([event for event in events if str(event.get("domain") or "") == "love"])
+    if any(token in label for token in ("혼인", "결혼", "주거", "가정")):
+        return choose([event for event in events if str(event.get("domain") or "") == "marriage"])
+    return None
+
+
+def _timing_metric_event_components(metric: dict[str, Any], section: dict[str, Any]) -> dict[str, Any]:
+    event = _timing_metric_event_match(metric, section)
+    if not event:
+        return {}
+    structure_keywords = [str(keyword) for keyword in event.get("structureKeywords") or [] if keyword][:6]
+    event_score = event.get("score")
+    components = {
+        "metric_score": metric.get("score") if isinstance(metric.get("score"), int) else None,
+        "event_score": round(float(event_score), 2) if isinstance(event_score, (int, float)) else None,
+        "year": event.get("year"),
+        "age": event.get("age"),
+        "kind": str(event.get("kind") or "").strip(),
+        "domain": str(event.get("domain") or "").strip(),
+        "domain_label": str(event.get("domainLabel") or "").strip(),
+        "daeun_pillar": str(event.get("daeunPillar") or "").strip(),
+        "saeun_pillar": str(event.get("yearPillar") or "").strip(),
+        "daeun_stem_ten_god": str(event.get("daeunStemTenGodLabel") or "").strip(),
+        "daeun_branch_ten_god": str(event.get("daeunBranchTenGodLabel") or "").strip(),
+        "year_stem_ten_god": str(event.get("yearStemTenGodLabel") or "").strip(),
+        "year_branch_ten_god": str(event.get("yearBranchTenGodLabel") or "").strip(),
+        "structure_signal_count": len(structure_keywords),
+    }
+    return {key: value for key, value in components.items() if value not in (None, "", [])}
+
+
+def _timing_metric_judgment_components(metric: dict[str, Any], section: dict[str, Any]) -> dict[str, Any]:
+    event = _timing_metric_event_match(metric, section)
+    if not event:
+        return {}
+    structure_keywords = [str(keyword) for keyword in event.get("structureKeywords") or [] if keyword][:6]
+    return {
+        "engine_metric_key": str(metric.get("key") or "").strip(),
+        "engine_metric_label": str(metric.get("label") or "").strip(),
+        "engine_metric_score": metric.get("score") if isinstance(metric.get("score"), int) else None,
+        "layer_coverage": [
+            value
+            for value in (
+                str(event.get("daeunPillar") or "").strip(),
+                str(event.get("yearPillar") or "").strip(),
+                str(event.get("daeunStemTenGodLabel") or "").strip(),
+                str(event.get("yearStemTenGodLabel") or "").strip(),
+            )
+            if value
+        ],
+        "raw_layer_coverage": [
+            str(event.get("sourcePath") or "").strip(),
+            *structure_keywords,
+        ][:10],
+        "basis_signal_count": len(structure_keywords),
+        "counter_signal_count": 1 if str(event.get("kind") or "") == "caution" else 0,
+        "pressure": {
+            "score": None,
+            "level": "주의" if str(event.get("kind") or "") == "caution" else "",
+            "reasons": structure_keywords[:4],
+            "has_pressure": str(event.get("kind") or "") == "caution",
+        },
+        "cycle_tags": structure_keywords,
+        "principle_tags": [
+            str(event.get("activationLabel") or "").strip(),
+            str(event.get("domainLabel") or "").strip(),
+        ],
+        "gyeokguk_action_titles": [
+            value
+            for value in (
+                str(event.get("title") or "").strip(),
+                str(event.get("focusLine") or "").strip(),
+            )
+            if value
+        ][:4],
+    }
+
+
+def _enrich_timing_metrics_with_event_components(
+    metrics: list[dict[str, Any]],
+    section: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not metrics:
+        return metrics
+    enriched: list[dict[str, Any]] = []
+    for metric in metrics:
+        if not isinstance(metric, dict):
+            continue
+        next_metric = dict(metric)
+        score_components = _timing_metric_event_components(next_metric, section)
+        judgment_components = _timing_metric_judgment_components(next_metric, section)
+        if score_components:
+            next_metric["score_components"] = score_components
+        if judgment_components:
+            next_metric["judgment_components"] = judgment_components
+            next_metric["cycle_tags"] = list(judgment_components.get("cycle_tags") or [])
+            next_metric["principle_tags"] = list(judgment_components.get("principle_tags") or [])
+        enriched.append(next_metric)
+    return enriched
+
+
+def _enrich_metrics_with_domain_decision_components(
+    metrics: list[dict[str, Any]],
+    section: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if _domain_key(section) == "timing":
+        return _enrich_timing_metrics_with_event_components(metrics, section)
+    decision_items = _domain_decision_items_for_section(section)
+    if not metrics or not decision_items:
+        return metrics
+    by_label: dict[str, dict[str, Any]] = {}
+    for item in decision_items:
+        label = str(item.get("label") or "").strip()
+        if not label:
+            continue
+        keys = _domain_decision_metric_match_keys(label)
+        for key in keys:
+            if key and key not in by_label:
+                by_label[key] = item
+
+    enriched: list[dict[str, Any]] = []
+    for metric in metrics:
+        if not isinstance(metric, dict):
+            continue
+        next_metric = dict(metric)
+        keys = set()
+        for label in (
+            next_metric.get("label"),
+            next_metric.get("source_title"),
+            next_metric.get("metric_label"),
+        ):
+            keys.update(_domain_decision_metric_match_keys(label))
+        matched = next((by_label[key] for key in keys if key in by_label), None)
+        if matched:
+            if isinstance(matched.get("score_components"), dict):
+                next_metric["score_components"] = dict(matched.get("score_components") or {})
+            next_metric["judgment_components"] = _compact_domain_decision_evidence(matched)
+            next_metric["gyeokguk_action_sources"] = [
+                action
+                for action in (
+                    _compact_domain_decision_action(action)
+                    for action in list(matched.get("gyeokguk_action_sources") or [])[:4]
+                    if isinstance(action, dict)
+                )
+                if action
+            ]
+            next_metric["cycle_tags"] = list(next_metric["judgment_components"].get("cycle_tags") or [])
+            next_metric["principle_tags"] = list(next_metric["judgment_components"].get("principle_tags") or [])
+        enriched.append(next_metric)
+    return enriched
+
+
+def _public_contract_metrics_from_section(section: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[tuple[str, list[Any]]] = []
+    domain = _domain_key(section)
+    derived_domain = domain in {"life", "honor", "social"}
+    if derived_domain:
+        candidates.append(("topic", list(section.get("topic_items") or [])))
+    candidates.append(("judgment", list(section.get("judgment_axes") or [])))
+    candidates.append(("feature", list(section.get("feature_axes") or [])))
+    profile = section.get("visual_profile") if isinstance(section.get("visual_profile"), dict) else {}
+    candidates.append(("visual", list(profile.get("items") or [])))
+    if not derived_domain:
+        candidates.append(("topic", list(section.get("topic_items") or [])))
+    category_contract = section.get("category_contract") if isinstance(section.get("category_contract"), dict) else {}
+    candidates.append(("reading", list(category_contract.get("reading_units") or [])))
+
+    metrics: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source, values in candidates:
+        for index, raw in enumerate(values):
+            if not isinstance(raw, dict):
+                continue
+            raw_label = str(
+                raw.get("label")
+                or raw.get("title")
+                or raw.get("display_label")
+                or raw.get("source_title")
+                or "",
+            ).strip()
+            if _is_public_timing_axis_for_non_timing_domain(domain, raw_label):
+                continue
+            metric = _public_contract_metric(raw, index=index, source=source, domain=domain)
+            if not metric:
+                continue
+            if _is_public_timing_axis_for_non_timing_domain(domain, metric.get("label")):
+                continue
+            canonical_label = _canonical_public_metric_label(metric.get("label"))
+            seen_key = _compact_match_key(canonical_label)
+            if seen_key and seen_key in seen:
+                continue
+            if seen_key:
+                seen.add(seen_key)
+            if canonical_label and canonical_label != str(metric.get("label") or "").strip():
+                metric = {
+                    **metric,
+                    "source_label": str(metric.get("label") or "").strip(),
+                    "label": canonical_label,
+                }
+            metrics.append(_ensure_public_metric_meaning(metric, domain))
+    return _enrich_metrics_with_domain_decision_components(metrics, section)
+
+
+def _downside_preserving_quality_total(
+    scores: list[int],
+    *,
+    lower_bound: int = 0,
+    upper_bound: int = 100,
+) -> int | None:
+    """Summarize higher-is-better scores without hiding a weak quarter.
+
+    A plain mean lets several strong cards erase a material weakness. The
+    public total therefore keeps 75 percent of the whole profile and 25
+    percent of its lowest quarter. Uniform profiles remain unchanged, while a
+    real downside remains visible in the total.
+    """
+    clean_scores = [int(score) for score in scores if isinstance(score, int)]
+    if not clean_scores:
+        return None
+    overall_mean = sum(clean_scores) / len(clean_scores)
+    lower_count = max(1, (len(clean_scores) + 3) // 4)
+    lower_scores = sorted(clean_scores)[:lower_count]
+    lower_mean = sum(lower_scores) / len(lower_scores)
+    # When the profile itself is already below 55, its weak quarter is more
+    # consequential than the same quarter inside an otherwise strong profile.
+    # Increase the downside share only for that low-profile range; strong and
+    # uniform profiles retain the original 75/25 contract.
+    downside_weight = 0.25
+    if len(clean_scores) >= 4:
+        downside_weight = min(0.35, 0.25 + max(0.0, 55.0 - overall_mean) * 0.006)
+    total = overall_mean * (1.0 - downside_weight) + lower_mean * downside_weight
+    return int(max(lower_bound, min(upper_bound, round(total))))
+
+
+def _integrated_product_section_score(
+    metric_profile_score: int | None,
+    structural_score: int | None,
+) -> int | None:
+    """Combine the detailed metric profile with the engine's broad judgment.
+
+    The metric profile preserves the visible strengths and weaknesses, while
+    the structural score carries the wider gyeokguk, month-command, ten-god,
+    element, climate and relation judgment already calculated by the engine.
+    Both values belong to the original judgment layer. Browser presentation
+    adjustments must never be passed into this function.
+    """
+    metric_score = _bounded_metric_score(metric_profile_score)
+    engine_score = _bounded_metric_score(structural_score)
+    if metric_score is None:
+        return engine_score
+    if engine_score is None:
+        return metric_score
+    return int(
+        max(
+            0,
+            min(
+                100,
+                round(metric_score * 0.60 + engine_score * 0.40),
+            ),
+        )
+    )
+
+
+def _representative_score_from_public_metrics(
+    section: dict[str, Any],
+    metrics: list[dict[str, Any]],
+) -> int | None:
+    def product_total_score(items: list[dict[str, Any]]) -> int | None:
+        oriented_scores = [
+            quality_score
+            for item in items
+            if isinstance(item, dict)
+            and isinstance((quality_score := _public_metric_quality_score(item)), int)
+        ]
+        if not oriented_scores:
+            return None
+        return _downside_preserving_quality_total(oriented_scores)
+
+    def metric_based_score(scores: list[int]) -> int | None:
+        if not scores:
+            return None
+        top_scores = sorted(scores, reverse=True)[:3]
+        low_scores = sorted(scores)[:2]
+        if low_scores and low_scores[0] < 45:
+            return max(0, min(100, round((sum(top_scores) / len(top_scores)) * 0.72 + low_scores[0] * 0.28)))
+        return max(0, min(100, round(sum(top_scores) / len(top_scores))))
+
+    direct = section.get("strength_score")
+    if isinstance(direct, bool):
+        direct = None
+    scores = [
+        int(item["score"])
+        for item in metrics
+        if isinstance(item.get("score"), int)
+    ]
+    product_metric_set = (
+        _domain_key(section) in PRODUCT_DOMAIN_METRIC_SPECS
+        and bool(scores)
+        and all(str(item.get("source") or "") == "product_metric" for item in metrics if isinstance(item, dict))
+    )
+    if product_metric_set:
+        # Every public product card already uses the same quality direction.
+        # Keep the visible profile intact while ensuring that a weak lower
+        # quarter is not erased by several strong cards.
+        return product_total_score(metrics)
+    if _domain_key(section) == "timing":
+        timing_score = _timing_representative_section_score(section, metrics)
+        if isinstance(timing_score, int):
+            return timing_score
+    metric_score = metric_based_score(scores)
+    if isinstance(direct, float):
+        direct = round(direct)
+    if isinstance(direct, int):
+        direct_score = max(0, min(100, direct))
+        if metric_score is None:
+            return direct_score
+        # The public total should not contradict the visible metric cards.
+        # Keep the engine's direct section score, but let low visible axes pull
+        # down an otherwise inflated total.
+        combined = max(0, min(100, round(direct_score * 0.35 + metric_score * 0.65)))
+        low_score = min(scores) if scores else None
+        if isinstance(low_score, int) and low_score < 35:
+            combined = min(combined, 84)
+        elif isinstance(low_score, int) and low_score < 45:
+            combined = min(combined, 89)
+        return combined
+    return metric_score
+
+
+def _representative_derived_domain_metrics(
+    metrics: list[dict[str, Any]],
+    *,
+    domain: str,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    scored = [
+        metric
+        for metric in metrics
+        if isinstance(metric, dict)
+        and isinstance(metric.get("score"), int)
+        and str(metric.get("label") or "").strip()
+    ]
+    if not scored:
+        return []
+    topic_scored = [metric for metric in scored if str(metric.get("source") or "") == "topic"]
+    pool = topic_scored or scored
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(metric: dict[str, Any]) -> None:
+        if len(selected) >= limit:
+            return
+        key = _compact_match_key(metric.get("label") or metric.get("key"))
+        if not key or key in seen:
+            return
+        seen.add(key)
+        selected.append(metric)
+
+    strongest = max(pool, key=lambda item: int(item.get("score") or 0))
+    strongest = _diagnostic_strong_metric(domain, pool, strongest)
+    weakest = min(pool, key=lambda item: int(item.get("score") or 100))
+    add(strongest)
+    add(weakest)
+
+    remaining = [metric for metric in pool if metric not in selected]
+    remaining_by_high = sorted(remaining, key=lambda item: int(item.get("score") or 0), reverse=True)
+    remaining_by_low = sorted(remaining, key=lambda item: int(item.get("score") or 100))
+    for metric in remaining_by_high[:2] + remaining_by_low[:2]:
+        add(metric)
+    for metric in scored:
+        add(metric)
+    return selected[:limit]
+
+
+def _representative_public_metrics(
+    metrics: list[dict[str, Any]],
+    limit: int = 6,
+    *,
+    domain: str = "",
+) -> list[dict[str, Any]]:
+    if not metrics:
+        return []
+    if domain in {"life", "honor", "social"}:
+        derived = _representative_derived_domain_metrics(metrics, domain=domain, limit=limit)
+        if derived:
+            return derived
+    if domain != "timing":
+        metrics = [
+            metric
+            for metric in metrics
+            if not _is_public_timing_axis_for_non_timing_domain(domain, metric.get("label"))
+        ]
+        if not metrics:
+            return []
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(metric: dict[str, Any]) -> None:
+        if len(selected) >= limit:
+            return
+        key = _compact_match_key(metric.get("label") or metric.get("key"))
+        if not key or key in seen:
+            return
+        seen.add(key)
+        selected.append(metric)
+
+    scored_metrics = [
+        metric
+        for metric in metrics
+        if isinstance(metric.get("score"), int)
+    ]
+    if scored_metrics:
+        strongest = max(scored_metrics, key=lambda item: int(item.get("score") or 0))
+        strongest = _diagnostic_strong_metric(domain, scored_metrics, strongest)
+        weakest = min(scored_metrics, key=lambda item: int(item.get("score") or 100))
+        add(strongest)
+        add(weakest)
+    caution_metrics = sorted(
+        (
+            metric
+            for metric in scored_metrics
+            if int(metric["score"]) < 55
+        ),
+        key=lambda item: int(item.get("score") or 0),
+    )
+    for metric in caution_metrics[:2]:
+        add(metric)
+    strong_metrics = sorted(
+        (
+            metric
+            for metric in scored_metrics
+            if int(metric["score"]) >= 85
+        ),
+        key=lambda item: int(item.get("score") or 0),
+        reverse=True,
+    )
+    for metric in strong_metrics[:2]:
+        add(metric)
+    balanced_contrasts = sorted(
+        scored_metrics,
+        key=lambda item: abs(int(item.get("score") or 50) - 50),
+        reverse=True,
+    )
+    for metric in balanced_contrasts[:2]:
+        add(metric)
+    for metric in metrics[:2]:
+        add(metric)
+    for metric in metrics:
+        add(metric)
+    return selected[:limit]
+
+
+def _representative_timing_public_metrics(metrics: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]]:
+    if not metrics:
+        return []
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    preferred = [
+        "주요 작용 분야",
+        "과거 대조 연도",
+        "좋은 시기",
+        "조심할 시기",
+        "상승 연도",
+        "주의 연도 대응력",
+        "직업 상승 연도",
+        "금전 손실 방어력",
+        "관계 변동 대응력",
+        "혼인 변수 관리력",
+    ]
+
+    def add(metric: dict[str, Any]) -> None:
+        if len(selected) >= limit:
+            return
+        label = str(metric.get("label") or "").strip()
+        key = _compact_match_key(label or metric.get("key"))
+        if not key or key in seen:
+            return
+        seen.add(key)
+        selected.append(metric)
+
+    by_label = {
+        _compact_match_key(metric.get("label")): metric
+        for metric in metrics
+        if isinstance(metric, dict) and _compact_match_key(metric.get("label"))
+    }
+    for label in preferred:
+        metric = by_label.get(_compact_match_key(label))
+        if metric:
+            add(metric)
+    remaining = sorted(
+        (metric for metric in metrics if isinstance(metric.get("score"), int)),
+        key=lambda item: (
+            abs(65 - int(item.get("score") or 0)),
+            int(item.get("score") or 0),
+        ),
+        reverse=True,
+    )
+    for metric in remaining:
+        add(metric)
+    return selected[:limit]
+
+
+def _timing_visible_metric_score(metrics: list[dict[str, Any]], *labels: str) -> int | None:
+    wanted = {_compact_match_key(label) for label in labels if label}
+    for metric in metrics:
+        if not isinstance(metric, dict):
+            continue
+        label = str(metric.get("label") or metric.get("title") or "").strip()
+        if _compact_match_key(label) in wanted and isinstance(metric.get("score"), int):
+            return int(metric["score"])
+    return None
+
+
+def _timing_top_event_score(events: Any) -> float | None:
+    scores = [
+        float(event.get("score"))
+        for event in list(events or [])
+        if isinstance(event, dict) and isinstance(event.get("score"), (int, float))
+    ]
+    return max(scores) if scores else None
+
+
+def _timing_representative_section_score(
+    section: dict[str, Any],
+    metrics: list[dict[str, Any]],
+) -> int | None:
+    """Score timing from the visible quality axes, qualified by year separation.
+
+    The user-facing bars already express good-period clarity, caution-period
+    control, domain clarity and past-event agreement in the same quality
+    direction.  Those visible scores therefore form the baseline.  The raw gap
+    between good and caution events may qualify that baseline, but must not
+    replace it or produce a total far above every visible bar.
+    """
+    timing_map = section.get("timing_map") if isinstance(section.get("timing_map"), dict) else {}
+    good_score = _timing_visible_metric_score(metrics, "좋은 시기", "상승 연도", "좋은 연도")
+    caution_control = _timing_visible_metric_score(metrics, "조심할 시기", "주의 연도 대응력", "주의 연도")
+    domain_clarity = _timing_visible_metric_score(metrics, "주요 작용 분야", "두드러지는 영역")
+    past_check = _timing_visible_metric_score(metrics, "과거 대조 연도", "지나온 연도")
+
+    good_raw = _timing_top_event_score(timing_map.get("goodHighlights"))
+    caution_raw = _timing_top_event_score(timing_map.get("cautionHighlights"))
+    separation_score: int | None = None
+    if good_raw is not None and caution_raw is not None:
+        raw_gap = good_raw - caution_raw
+        separation_score = int(round(max(30, min(96, 32 + raw_gap * 1.45))))
+
+    values = [
+        (good_score, 0.32),
+        (caution_control, 0.32),
+        (domain_clarity, 0.22),
+        (past_check, 0.14),
+    ]
+    weighted = [
+        (score, weight)
+        for score, weight in values
+        if isinstance(score, int)
+    ]
+    if not weighted:
+        return separation_score
+    weight_sum = sum(weight for _score, weight in weighted)
+    visible_baseline = sum(score * weight for score, weight in weighted) / weight_sum
+    separation_delta = (
+        (separation_score - 50.0) * 0.12
+        if isinstance(separation_score, int)
+        else 0.0
+    )
+    score = round(visible_baseline + separation_delta)
+    return max(28, min(98, int(score)))
+
+
+def _diagnostic_strong_metric(
+    domain: str,
+    scored: list[dict[str, Any]],
+    strongest: dict[str, Any],
+) -> dict[str, Any]:
+    if not scored or not strongest:
+        return strongest
+    current_score = strongest.get("score")
+    if not isinstance(current_score, int):
+        return strongest
+    priority_by_domain: dict[str, dict[str, int]] = {
+        "honor": {
+            "공식 책임 수행력": 6,
+            "명예를 지켜내는 기준": 5,
+            "평판 지속력": 4,
+            "공적 인정 기반": 1,
+        },
+        "career": {
+            "승진·직함 가능성": 7,
+            "전문 자산화": 6,
+            "평가·명예 전환력": 5,
+            "권한 확보력": 5,
+            "책임·권한 균형": 5,
+            "성취 축적력": 2,
+            "직업 적성": 1,
+        },
+        "marriage": {
+            "부부 재정": 7,
+            "가정 운영력": 6,
+            "배우자 가족 경계": 6,
+            "결혼 지속력": 5,
+            "부부 갈등 회복성": 5,
+            "혼인 안정성": 4,
+            "생활 안정": 4,
+            "결혼 연결력": 2,
+        },
+        "life": {
+            "운이 바뀌는 전환기": 6,
+            "말년에 남는 안정": 5,
+            "중년에 굳어지는 성취": 3,
+            "초년에 형성되는 바탕": 3,
+        },
+    }
+    priority = priority_by_domain.get(domain)
+    if not priority:
+        return strongest
+    threshold = {
+        "honor": 7,
+        "career": 5,
+        "marriage": 6,
+        "life": 5,
+    }.get(domain, 5)
+    candidates: list[tuple[float, int, int, dict[str, Any]]] = []
+    for order, metric in enumerate(scored):
+        score = metric.get("score")
+        if not isinstance(score, int) or score < current_score - threshold:
+            continue
+        label = _premium_display_title(str(metric.get("label") or "").strip())
+        rank = priority.get(label)
+        if not isinstance(rank, int):
+            continue
+        candidates.append((score + rank * 1.25, rank, -order, metric))
+    if not candidates:
+        return strongest
+    return max(candidates, key=lambda item: (item[0], item[1], item[2]))[3]
+
+
+def _section_verdict_from_public_metrics(
+    section: dict[str, Any],
+    metrics: list[dict[str, Any]],
+    score: int | None,
+) -> dict[str, Any]:
+    domain = _domain_key(section)
+    raw_scored = [
+        metric
+        for metric in metrics
+        if isinstance(metric, dict) and isinstance(metric.get("score"), int) and str(metric.get("label") or "").strip()
+    ]
+    scored = [
+        metric
+        for metric in raw_scored
+        if domain == "timing" or "연도" not in str(metric.get("label") or "")
+    ] or raw_scored
+    if domain == "marriage":
+        structural_scored = [
+            metric
+            for metric in scored
+            if str(metric.get("label") or "").strip() != "결혼 시기성"
+        ]
+        if structural_scored:
+            scored = structural_scored
+    if domain in {"life", "honor", "social"}:
+        topic_scored = [
+            metric
+            for metric in scored
+            if str(metric.get("source") or "") == "topic"
+        ]
+        if topic_scored:
+            scored = topic_scored
+    if not scored and not isinstance(score, int):
+        return {}
+    total_score = score if isinstance(score, int) else int(scored[0]["score"])
+    total_level = _contract_level_from_score(total_score)
+    if domain in PRODUCT_DOMAIN_METRIC_SPECS:
+        strongest = max(
+            scored,
+            key=lambda item: _public_metric_quality_score(item) if isinstance(_public_metric_quality_score(item), int) else -1,
+        ) if scored else {}
+        weakest = min(
+            scored,
+            key=lambda item: _public_metric_quality_score(item) if isinstance(_public_metric_quality_score(item), int) else 101,
+        ) if scored else {}
+    else:
+        strongest = max(scored, key=lambda item: int(item.get("score") or 0)) if scored else {}
+        strongest = _diagnostic_strong_metric(domain, scored, strongest)
+        weakest = min(scored, key=lambda item: int(item.get("score") or 100)) if scored else {}
+    if domain in PRODUCT_DOMAIN_METRIC_SPECS:
+        strong_label = str(strongest.get("label") or "강한 항목").strip()
+        watch_label = str(weakest.get("label") or "주의 지표").strip()
+    else:
+        strong_label = _premium_display_title(str(strongest.get("label") or "강한 항목").strip())
+        watch_label = _premium_display_title(str(weakest.get("label") or "주의 지표").strip())
+    if domain == "timing":
+        timing_map = section.get("timing_map") if isinstance(section.get("timing_map"), dict) else {}
+        good_event = next(
+            (event for event in timing_map.get("goodHighlights") or [] if isinstance(event, dict)),
+            {},
+        )
+        caution_event = next(
+            (event for event in timing_map.get("cautionHighlights") or [] if isinstance(event, dict)),
+            {},
+        )
+        good_event_label = _timing_event_verdict_label(good_event, "")
+        caution_event_label = _timing_event_verdict_label(caution_event, "")
+        if good_event_label:
+            strong_label = good_event_label
+        if caution_event_label:
+            watch_label = caution_event_label
+    strong_score = int(strongest.get("score") or total_score)
+    watch_score = int(weakest.get("score") or total_score)
+    strong_quality_score = (
+        _public_metric_quality_score(strongest)
+        if domain in PRODUCT_DOMAIN_METRIC_SPECS and strongest
+        else strong_score
+    )
+    watch_quality_score = (
+        _public_metric_quality_score(weakest)
+        if domain in PRODUCT_DOMAIN_METRIC_SPECS and weakest
+        else watch_score
+    )
+    if not isinstance(strong_quality_score, int):
+        strong_quality_score = strong_score
+    if not isinstance(watch_quality_score, int):
+        watch_quality_score = watch_score
+    watch_caption = "주의 지표"
+    strong_caption = "강점" if total_score >= 55 else "핵심 항목"
+    if domain in PRODUCT_DOMAIN_METRIC_SPECS:
+        watch_caption = "주의 지표"
+    if domain == "timing":
+        strong_caption = "좋은 시기"
+        watch_caption = "조심할 시기"
+
+    domain_labels = {
+        "personality": "성격",
+        "money": "재물운",
+        "career": "직업운",
+        "love": "연애운",
+        "marriage": "결혼운",
+        "timing": "시기운",
+        "life": "인생 구간",
+        "honor": "명예운",
+        "social": "대인관계운",
+    }
+    domain_label = domain_labels.get(domain, str(section.get("title") or "운세"))
+    strong_subject = _with_particle(strong_label, "이", "가")
+    watch_subject = _with_particle(watch_label, "은", "는")
+    watch_risk_subject = _with_particle(watch_label, "이", "가")
+    is_low_section = total_score < 55
+    is_watch_risk = watch_quality_score < 55
+    is_watch_support = watch_quality_score >= 70
+
+    def watch_line(*, risk: str, check: str, support: str) -> str:
+        if is_watch_risk:
+            return risk
+        if is_watch_support:
+            return support
+        return check
+
+    def interpretation() -> str:
+        if domain in PRODUCT_DOMAIN_METRIC_SPECS:
+            return f"{domain_label}에서는 {strong_subject} 가장 좋게 나타나고, {watch_subject} 상대적으로 보완이 필요합니다."
+        if domain == "money":
+            if is_low_section:
+                return f"재물운에서는 {strong_subject} 먼저 보입니다. {watch_risk_subject} 약하면 들어온 돈을 자기 몫으로 확정하는 과정에서 손실이 생깁니다."
+            return watch_line(
+                risk=f"재물운은 {strong_subject} 가장 강합니다. 다만 {watch_risk_subject} 약해 수익이 권리와 자산으로 굳기 전에 손실이 생기기 쉽습니다.",
+                check=f"재물운은 {strong_subject} 가장 강합니다. {watch_subject} 실제 보유액을 결정합니다.",
+                support=f"재물운은 {strong_subject} 가장 강합니다. {watch_subject} 재물의 규모와 안정성을 함께 키웁니다.",
+            )
+        if domain == "career":
+            if is_low_section:
+                return f"직업운은 {strong_subject} 먼저 보입니다. {watch_risk_subject} 약하면 성과가 본인 이름과 권한으로 남기 전에 흔들립니다."
+            return watch_line(
+                risk=f"직업운은 {strong_subject} 가장 강합니다. 다만 {watch_risk_subject} 약하면 성과가 본인 이름과 권한으로 남기 전에 흔들립니다.",
+                check=f"직업운은 {strong_subject} 가장 강합니다. {watch_subject} 성과가 이력과 보상으로 남는 기준입니다.",
+                support=f"직업운은 {strong_subject} 가장 강합니다. {watch_subject} 경력 안정과 보상 상승으로 이어지는 강점입니다.",
+            )
+        if domain == "love":
+            if is_low_section:
+                return f"연애운은 {strong_subject} 먼저 드러납니다. {watch_risk_subject} 약하면 호감 이후 관계가 안정되는 과정에서 부담으로 올라옵니다."
+            return watch_line(
+                risk=f"연애운은 {strong_subject} 강점입니다. 다만 {watch_risk_subject} 약하면 마음이 깊어진 뒤 상대가 불안을 느끼기 쉽습니다.",
+                check=f"연애운은 {strong_subject} 강점입니다. {watch_subject} 관계가 깊어진 뒤 안정감을 결정합니다.",
+                support=f"연애운은 {strong_subject} 강점입니다. {watch_subject} 관계를 오래 이어가는 힘으로 작용합니다.",
+            )
+        if domain == "marriage":
+            if is_low_section:
+                return f"결혼운은 {strong_subject} 먼저 드러납니다. {watch_subject} 생활 기준과 책임 분담에서 부담으로 올라옵니다."
+            return watch_line(
+                risk=f"결혼운은 {strong_subject} 가장 뚜렷합니다. 다만 {watch_risk_subject} 약하면 결혼 뒤 생활 만족도가 흔들립니다.",
+                check=f"결혼운은 {strong_subject} 가장 뚜렷합니다. {watch_subject} 결혼 뒤 생활 만족도를 결정합니다.",
+                support=f"결혼운은 {strong_subject} 가장 뚜렷합니다. {watch_subject} 결혼 생활을 안정시키는 힘으로 작용합니다.",
+            )
+        if domain == "personality":
+            if is_low_section:
+                return f"성격은 {strong_subject} 먼저 드러납니다. {watch_subject} 문제 상황에서 반복되는 반응입니다."
+            return watch_line(
+                risk=f"성격은 {strong_subject} 가장 뚜렷합니다. {watch_subject} 문제 상황에서 반복되는 반응입니다.",
+                check=f"성격은 {strong_subject} 가장 뚜렷합니다. {watch_subject} 대인관계와 선택 과정에서 반복되는 모습입니다.",
+                support=f"성격은 {strong_subject} 가장 뚜렷합니다. {watch_subject} 선택과 관계에서 장점으로 함께 작용합니다.",
+            )
+        if domain == "timing":
+            return f"시기운상 {strong_label}에는 운이 강하게 붙습니다. {watch_label}에는 새 선택보다 책임과 계약 범위를 정리해야 합니다."
+        if domain == "honor":
+            if is_low_section:
+                return f"명예운은 {strong_subject} 먼저 보입니다. {watch_risk_subject} 약하면 공식 평가와 평판이 흔들립니다."
+            return f"명예운은 {strong_subject} 가장 강하게 드러납니다. {watch_subject} 평판이 커질수록 먼저 정리해야 할 부분입니다."
+        if domain == "social":
+            if is_low_section:
+                return f"대인관계운은 {strong_subject} 먼저 드러납니다. {watch_subject} 가까운 관계에서 부담으로 바뀝니다."
+            return f"대인관계운은 {strong_subject} 장점입니다. {watch_subject} 관계가 오래가려면 먼저 정리해야 할 부분입니다."
+        return f"{domain_label}은 {strong_subject} 가장 뚜렷합니다. {watch_subject} 결과를 안정시키기 위해 따로 정리해야 할 부분입니다."
+
+    def action() -> str:
+        joined = f"{strong_label} {watch_label}"
+        watch_joined = f"{watch_label}"
+        strong_joined = f"{strong_label}"
+
+        def has(text: str, *markers: str) -> bool:
+            return any(marker in text for marker in markers)
+
+        if domain == "money":
+            if has(watch_joined, "계약", "명의", "정산", "문서"):
+                return "수익이 보이는 순간 계약, 명의, 지분을 먼저 확정해야 재물이 본인 몫으로 남습니다."
+            if has(watch_joined, "공동", "가족", "배우자", "지분"):
+                return "가까운 사람과 돈이 섞일수록 호의보다 명의와 몫을 먼저 세워야 합니다."
+            if has(watch_joined, "부채", "보증", "재정", "방어", "손실"):
+                return "보증, 대여, 선지출은 금액보다 회수 가능성을 먼저 확인해야 합니다."
+            if has(watch_joined, "수입", "창출", "보상", "성과"):
+                return "수입 통로는 넓히기보다 단가와 지급일이 분명한 쪽으로 좁혀야 합니다."
+            if has(watch_joined, "사업", "확장"):
+                return "사업 확장은 매출보다 고정비와 회수 기간을 먼저 잡아야 합니다."
+            if has(watch_joined, "자산", "축재", "형성", "후반"):
+                return "들어온 돈은 소비 여력으로 보지 말고 소유권이 남는 자산으로 옮겨야 합니다."
+            if has(strong_joined, "수입", "창출", "보상", "성과"):
+                return "보수 기준과 지급일이 분명한 일에서 재물운이 가장 빠르게 드러납니다."
+            if has(strong_joined, "후반", "축재", "자산"):
+                return "후반 재물은 명의, 지분, 장기 보유 기준을 먼저 잡아야 안정됩니다."
+            return "재물은 현금으로 흘려두기보다 명의, 지분, 장기 보유 자산으로 옮길 때 크게 남습니다."
+        if domain == "career":
+            if has(watch_joined, "권한", "책임", "업무 조건"):
+                return "책임이 커질수록 결재권, 담당 범위, 평가 기준을 함께 확보해야 합니다."
+            if has(watch_joined, "보상", "협상", "평가", "명예"):
+                return "성과가 나기 전부터 보상 기준과 평가권자를 분명히 해야 합니다."
+            if has(watch_joined, "조직", "적응", "독립"):
+                return "조직 안에서는 역할 경계를 세우고, 독립은 고객층과 단가가 잡힌 뒤가 좋습니다."
+            if has(strong_joined, "승진", "직함", "평가", "명예"):
+                return "공식 평가와 직책으로 이어지는 업무를 맡을수록 직업운이 강해집니다."
+            if has(strong_joined, "성취", "축적", "전문"):
+                return "결과물이 이력과 포트폴리오로 남는 일을 잡아야 합니다."
+            return "직업운은 성과가 자기 이름과 이력으로 남는 역할에서 강합니다."
+        if domain == "love":
+            if has(watch_joined, "표현", "연락", "애정"):
+                return "마음이 있다면 상대가 확인할 수 있는 말과 행동을 늦추지 않는 편이 좋습니다."
+            if has(watch_joined, "지속", "안정", "신뢰", "감별"):
+                return "끌림보다 약속을 지키는 태도를 먼저 봐야 관계가 오래갑니다."
+            if has(watch_joined, "결혼", "연결"):
+                return "좋아하는 마음이 커져도 관계의 이름을 서둘러 정하지 않는 편이 좋습니다."
+            if has(strong_joined, "수용", "신뢰"):
+                return "상대의 속마음을 읽는 능력이 강하니, 표현만 늦추지 않으면 관계가 안정됩니다."
+            return "연애는 마음의 깊이보다 상대가 확신을 받을 수 있는 표현에서 안정됩니다."
+        if domain == "marriage":
+            if has(watch_joined, "재정", "돈", "생활비", "자산"):
+                return "결혼 전부터 생활비, 자산 명의, 가족 지출의 선을 분명히 해야 합니다."
+            if has(watch_joined, "배우자", "가족", "책임"):
+                return "배우자와 양가의 책임 범위를 초반에 정해야 결혼 생활이 안정됩니다."
+            if has(watch_joined, "생활", "주거", "안정"):
+                return "주거와 생활 기준이 맞지 않으면 애정이 깊어도 결혼 피로가 커집니다."
+            if has(strong_joined, "연결", "혼인", "안정"):
+                return "결혼은 늦추기보다 생활 계획이 잡히는 순간 현실화하는 편이 좋습니다."
+            return "결혼은 주거, 돈, 가족 책임의 기준이 맞아야 안정됩니다."
+        if domain == "personality":
+            if has(watch_joined, "감정", "반응", "불안"):
+                return "감정이 올라오는 순간 바로 결론을 내리면 손상이 커질 수 있습니다."
+            if has(watch_joined, "대인", "거리", "조율"):
+                return "사람을 가까이 둘수록 호의와 책임의 선을 먼저 보여야 합니다."
+            if has(watch_joined, "실행", "속도"):
+                return "빠르게 움직일수록 약속의 범위와 멈출 기준을 먼저 정해야 합니다."
+            if has(watch_joined, "압박", "책임"):
+                return "압박이 커질수록 자기 책임과 남의 책임을 분리해야 합니다."
+            if has(strong_joined, "판단", "기준", "몰입"):
+                return "기준이 분명한 분야를 오래 붙잡을 때 성격의 장점이 크게 드러납니다."
+            return "큰 선택에서는 감정보다 책임 소재와 남는 결과를 먼저 잡는 편이 맞습니다."
+        if domain == "timing":
+            return f"{strong_label}에는 성과를 확정하는 선택이 유리합니다. {watch_label}에는 새 계약과 책임 범위를 먼저 좁혀야 합니다."
+        if domain == "life":
+            if has(watch_joined, "전환기", "운이 바뀌"):
+                return "전환기에는 새 일을 넓히기보다 직업 변동, 거처 이동, 가족 책임을 따로 정리해야 합니다."
+            if has(watch_joined, "말년", "안정"):
+                return "후반으로 갈수록 새 부담을 늘리기보다 자산, 주거, 가족 책임을 안정적으로 남겨야 합니다."
+            if has(strong_joined, "초년"):
+                return "초년에 형성된 선택 기준을 버리지 말고, 전공과 첫 직업에서 확인한 적성을 계속 살려야 합니다."
+            if has(strong_joined, "중년"):
+                return "중년 이후에는 직업 성취가 자산과 생활 기반으로 남도록 보상과 소유 구조를 분명히 해야 합니다."
+            return _domain_default_action_sentence(domain)
+        if domain == "honor":
+            if has(watch_joined, "공식 책임", "책임 수행"):
+                return "책임을 맡을 때는 결재권과 책임 소재를 함께 확보해야 평판이 손상되지 않습니다."
+            if has(watch_joined, "평판", "명예"):
+                return "이름이 드러나는 일일수록 말보다 기록, 일정, 정산 기준을 남겨야 합니다."
+            if has(strong_joined, "공식 책임"):
+                return "책임자 역할을 맡을 때는 권한과 결과 기록을 함께 남겨야 명예가 커집니다."
+            if has(strong_joined, "평판"):
+                return "한 번 얻은 신뢰를 오래 쓰려면 마무리, 약속, 기록을 흔들림 없이 지켜야 합니다."
+            return "명예운은 직함보다 실제 권한과 책임 기록이 남을 때 강해집니다."
+        if domain == "social":
+            if has(watch_joined, "지속", "오래"):
+                return "관계를 오래 두려면 연락보다 약속을 지키는 태도와 책임의 선이 먼저 분명해야 합니다."
+            if has(watch_joined, "인맥", "인연"):
+                return "인맥이 넓어질수록 친분보다 실제로 함께할 수 있는 역할을 먼저 봐야 합니다."
+            return "관계가 가까워질수록 호의가 책임으로 바뀌지 않게 선을 지켜야 합니다."
+        return _domain_default_action_sentence(domain)
+
+    def basis() -> str:
+        variation = section.get("domain_variation") or section.get("contextual_variation")
+        if not isinstance(variation, dict):
+            return ""
+        raw_body = _clean_customer_copy_text(str(variation.get("body") or "")).strip()
+        if not raw_body:
+            return ""
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。])\s+", raw_body)
+            if sentence.strip()
+        ]
+        domain_terms = {
+            "personality": ("성격", "판단", "책임감"),
+            "money": ("재물", "수입", "소유권", "회수"),
+            "career": ("직업", "역할", "평가", "권한"),
+            "love": ("연애", "표현", "신뢰", "관계"),
+            "marriage": ("결혼", "생활", "가족", "재정"),
+            "honor": ("명예", "평판", "직함", "인정"),
+            "social": ("관계", "신뢰", "거리", "책임"),
+        }.get(domain, (domain_label,))
+        selected = ""
+        for sentence in reversed(sentences):
+            if any(term and term in sentence for term in domain_terms):
+                selected = sentence
+                break
+        if not selected and sentences:
+            selected = sentences[-1]
+        selected = selected.rstrip(".")
+        for prefix in (
+            "성격에서는 ",
+            "재물에서는 ",
+            "직업에서는 ",
+            "연애에서는 ",
+            "결혼에서는 ",
+            "명예에서는 ",
+            "대인관계에서는 ",
+        ):
+            if selected.startswith(prefix):
+                selected = selected[len(prefix):]
+                break
+        selected = selected.replace("먼저 중요해집니다", "먼저 중요합니다")
+        selected = selected.replace("먼저 핵심입니다", "우선합니다")
+        selected = selected.replace("먼저 움직입니다", "앞섭니다")
+        if not selected:
+            return ""
+        value = _regular_pattern_label(
+            variation.get("primary_pattern")
+            or variation.get("primary_pattern_label")
+            or variation.get("value")
+        )
+        if not value:
+            value = _screen_text(variation.get("value"), "")
+        season = _screen_text(variation.get("season_display") or variation.get("season_label"), "")
+        if not season:
+            season_match = re.search(r"([가-힣]+)\s+월령", raw_body)
+            if season_match:
+                season = season_match.group(1)
+        materiality = variation.get("elemental_materiality") if isinstance(variation.get("elemental_materiality"), dict) else {}
+        materiality_label = _screen_text(variation.get("materiality_label"), "")
+        if materiality:
+            pair = _screen_text(materiality.get("element_pair_label"))
+            relation_type = str(materiality.get("relation_type") or "")
+            state = str(materiality.get("state") or "")
+            if relation_type == "same_element_density" and pair:
+                materiality_label = f"{pair} 기운 반복"
+            elif relation_type == "element_control" and pair:
+                materiality_label = f"{pair} 상극"
+            elif "cashflow" in relation_type and pair:
+                materiality_label = f"{pair} 조절 배합"
+            elif "reputation" in relation_type and pair:
+                materiality_label = f"{pair} 기반 배합"
+            elif pair:
+                materiality_label = f"{pair} 배합"
+            if not materiality_label and state in {"unstable", "mixed"}:
+                materiality_label = _screen_text(materiality.get("interpretation"), "")
+        prefix_parts: list[str] = []
+        if value:
+            prefix_parts.append(value)
+        if season:
+            prefix_parts.append(f"{season} 월령")
+        if materiality_label:
+            prefix_parts.append(materiality_label)
+        if prefix_parts:
+            prefix = "·".join(prefix_parts)
+        else:
+            prefix = "격국·월령"
+        materiality_clause = ""
+        if materiality_label:
+            if "상극" in materiality_label:
+                materiality_clause = "충돌과 제어가 함께 있는 배합이므로 "
+            elif "기운 반복" in materiality_label:
+                materiality_clause = "한쪽 기운이 겹쳐 강하게 드러나는 배합이므로 "
+            elif "조절" in materiality_label:
+                materiality_clause = "속도와 방향을 정밀하게 조절해야 하는 배합이므로 "
+            elif "기반" in materiality_label:
+                materiality_clause = "성과가 기반으로 굳어지는 배합이므로 "
+            else:
+                materiality_clause = "오행 배합이 뚜렷하므로 "
+        domain_basis_sentences = {
+            "personality": "성격은 감정 반응보다 기준을 세우고 책임을 처리하는 방식에서 두드러집니다.",
+            "money": "재물은 수입 규모보다 소유권, 회수 가능성, 정산 기준이 더 크게 작용합니다.",
+            "career": "직업운은 실력만큼 평가 기준과 권한 배치에서 강약이 결정됩니다.",
+            "love": "연애는 첫 호감보다 표현의 일관성, 약속의 기준, 신뢰 확인에서 안정 여부가 갈립니다.",
+            "marriage": "결혼은 애정의 깊이보다 생활 기준과 재정 합의에서 안정 여부가 결정됩니다.",
+            "honor": "명예운은 평판보다 공식 권한과 책임 기록에서 힘을 얻습니다.",
+            "social": "대인관계는 호감보다 거리 조절과 책임 경계에서 오래갑니다.",
+            "timing": "시기운은 원국의 장점이 발동되는 해와 부담이 드러나는 해를 나누어 잡습니다.",
+        }
+        selected_result = domain_basis_sentences.get(domain)
+        if not selected_result:
+            selected_result = selected if selected.endswith("다") else f"{selected}."
+        result = _clean_customer_copy_text(f"{prefix}이 핵심 기준입니다. {materiality_clause}{selected_result}")
+        result = result.replace("먼저 핵심입니다", "우선됩니다")
+        result = result.replace("먼저 중요합니다", "우선됩니다")
+        return result
+
+    return {
+        "score": total_score,
+        "level": total_level,
+        "score_label": total_level,
+        "strong_caption": strong_caption,
+        "strong_label": strong_label,
+        "strong_score": strong_score,
+        "strong_level": _contract_level_from_score(strong_quality_score),
+        "watch_caption": watch_caption,
+        "watch_label": watch_label,
+        "watch_score": watch_score,
+        "watch_level": _contract_level_from_score(watch_quality_score),
+        "interpretation_title": "해석",
+        "interpretation": _fix_common_particle_text(interpretation()),
+        "action_title": "관리할 점",
+        "action": _fix_common_particle_text(action()),
+        "basis_title": "판단 근거",
+        "basis": _fix_common_particle_text(basis()),
+    }
+
+
+DETAIL_METRIC_TITLE_ALIASES: dict[str, str] = {
+    "대인 거리감": "대인 조율감",
+    "감정 반응": "감정 반응성",
+    "압박 대응": "압박 대응력",
+    "행동 속도": "실행 속도",
+    "관심 몰입": "관심 몰입도",
+    "두드러지는 영역": "주요 작용 분야",
+    "지나온 연도": "과거 대조 연도",
+    "공동자금 변동기": "공동자금 대응력",
+    "계약·명의 변동기": "계약·명의 안정성",
+    "계약·명의 안정성": "계약·문서 안정성",
+    "계약·명의 안전성": "계약·문서 안정성",
+    "부채·보증 변동기": "부채·보증 관리력",
+    "가족재산 변동기": "가족재산 경계력",
+    "수익 발생 지점": "수입 창출력",
+    "자산화 방식": "자산화 능력",
+    "자산 축적": "자산화 능력",
+    "자산 축적력": "자산화 능력",
+    "투자 변동성 손실": "투자·거래 판단력",
+    "말로 정한 약속의 손실": "계약·문서 안정성",
+    "가까운 사람과 돈을 섞는 손실": "공동자금 운영력",
+    "공동 투자에서 생기는 몫 문제": "공동자금 운영력",
+    "부채와 보증의 부담": "부채·보증 관리력",
+    "가족 재산이 섞이는 문제": "가족재산 경계력",
+    "권리와 정산이 예민한 자리": "계약·명의 안정성",
+    "성과가 자기 이름으로 남는 자리": "성취 축적력",
+    "평가받는 방식": "평가·명예 전환력",
+    "전문성으로 인정받는 직업운": "전문 자산화",
+    "운영을 장악하는 직업 성취": "조직 적응력",
+    "공을 빼앗기는 조직 자리": "권한 확보력",
+    "책임과 결정권의 불균형": "권한 확보력",
+    "기준 없는 조직에서의 소모": "조직 적응력",
+    "성과가 이름으로 남는 직업운": "성취 축적력",
+    "사랑을 시작하는 방식": "인연 형성력",
+    "애정 표현 방식": "애정 표현성",
+    "관계가 흔들리는 지점": "관계 지속력",
+    "표현이 늦어지는 연애": "애정 표현성",
+    "지나간 서운함이 돌아오는 시기": "갈등 회복력",
+    "주변 말이 끼어드는 관계": "주변 개입 관리력",
+    "결혼이 안정되는 방식": "혼인 성향",
+    "생활 기준": "생활 안정",
+    "충돌이 생기는 자리": "가족 책임 경계력",
+    "결혼 판단이 늦어지는 자리": "결혼 연결력",
+    "생활비와 주거 기준의 충돌": "생활 안정",
+    "가족 책임이 결혼으로 들어오는 구조": "가족 책임 경계력",
+}
+
+
+def _canonical_public_metric_label(label: Any) -> str:
+    text = _premium_display_title(str(label or "").strip())
+    return DETAIL_METRIC_TITLE_ALIASES.get(text, text)
+
+
+def _dedupe_public_metrics_by_label(metrics: list[dict[str, Any]], *, limit: int | None = None) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for metric in list(metrics or []):
+        if not isinstance(metric, dict):
+            continue
+        canonical = _canonical_public_metric_label(metric.get("label") or metric.get("title"))
+        key = _compact_match_key(canonical)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        next_metric = dict(metric)
+        if canonical and canonical != str(next_metric.get("label") or "").strip():
+            next_metric["source_label"] = str(next_metric.get("label") or "").strip()
+            next_metric["label"] = canonical
+        deduped.append(next_metric)
+        if isinstance(limit, int) and len(deduped) >= limit:
+            break
+    return deduped
+
+
+PRODUCT_DOMAIN_METRIC_SPECS: dict[
+    str,
+    tuple[tuple[str, tuple[tuple[str, float], ...], str], ...],
+] = {
+    "money": (
+        ("재물 형성력", (("wealth_formation", 1.0),), "positive"),
+        ("수입 창출력", (("income_generation", 1.0),), "positive"),
+        ("자산화 성향", (("asset_consolidation", 1.0),), "positive"),
+        ("현금 운용력", (("cashflow_stability", 1.0),), "positive"),
+        ("계약 안정성", (("contract_title_stability", 1.0),), "positive"),
+        ("공동재 관리", (("shared_money_control", 1.0),), "positive"),
+        ("손실 회피력", (("financial_loss_defense", 1.0),), "positive"),
+        ("투자 판단력", (("investment_trading_judgment", 1.0),), "positive"),
+        ("보상 회수력", (("performance_reward", 1.0),), "positive"),
+        ("후반 축재성", (("late_life_wealth_growth", 1.0),), "positive"),
+    ),
+    "career": (
+        ("직업 성취도", (("achievement_accumulation", 1.0),), "positive"),
+        ("조직 적응성", (("organization_fit", 1.0),), "positive"),
+        ("직책 상승성", (("promotion_title_readiness", 1.0),), "positive"),
+        ("전문성 축적", (("professional_depth", 1.0),), "positive"),
+        ("실무 처리력", (("practical_execution", 1.0),), "positive"),
+        ("기획 판단력", (("planning_judgment", 1.0),), "positive"),
+        ("권한 확보력", (("authority_scope", 1.0),), "positive"),
+        ("평가 관리력", (("evaluation_management", 1.0),), "positive"),
+        ("독립 업무성", (("independent_work", 1.0),), "positive"),
+        ("직업 지속성", (("career_continuity", 1.0),), "positive"),
+    ),
+    "personality": (
+        ("자기 기준", (("self_direction", 1.0),), "positive"),
+        ("감정 조절", (("emotional_alignment", 1.0),), "positive"),
+        ("실행 속도", (("action_pace", 1.0),), "positive"),
+        ("신중성", (("decision_consistency", 1.0),), "positive"),
+        ("몰입 성향", (("focus_depth", 1.0),), "positive"),
+        ("관계 거리 조절력", (("boundary_management", 1.0),), "positive"),
+        ("문제 해결력", (("crisis_recovery", 1.0),), "positive"),
+        ("변화 수용성", (("change_adaptability", 1.0),), "positive"),
+        ("표현 방식", (("communication_expression", 1.0),), "positive"),
+        ("책임 감각", (("responsibility_capacity", 1.0),), "positive"),
+        ("인정 욕구", (("honor_recognition", 1.0),), "positive"),
+        ("위험 감지", (("loss_avoidance", 1.0),), "positive"),
+    ),
+    "love": (
+        ("이성 대상 호감도", (("opposite_sex_appeal", 1.0),), "positive"),
+        ("애정 표현", (("affection_expression", 1.0),), "positive"),
+        ("관계 지속성", (("relationship_stability", 1.0),), "positive"),
+        ("감정 안정성", (("romantic_emotional_stability", 1.0),), "positive"),
+        ("선택 신중성", (("partner_selection", 1.0),), "positive"),
+        ("갈등 회복력", (("conflict_recovery", 1.0),), "positive"),
+        ("상대 의존도", (("partner_dependency_control", 1.0),), "risk"),
+        ("관계 주도성", (("relationship_agency", 1.0),), "positive"),
+        ("인연 지속성", (("bond_continuity", 1.0),), "positive"),
+        ("이별 위험도", (("breakup_resilience", 1.0),), "risk"),
+    ),
+    "marriage": (
+        ("결혼 안정성", (("marriage_overall_stability", 1.0),), "positive"),
+        ("배우자 인연", (("spouse_match", 1.0),), "positive"),
+        ("생활 조율성", (("household_coordination", 1.0),), "positive"),
+        ("가정 책임감", (("family_responsibility", 1.0),), "positive"),
+        ("재정 합의성", (("marital_financial_agreement", 1.0),), "positive"),
+        ("가족 관계성", (("family_relationship_stability", 1.0),), "positive"),
+        ("장기 유지성", (("long_term_marriage", 1.0),), "positive"),
+        ("배우자 충돌도", (("spouse_conflict_control", 1.0),), "risk"),
+        ("결혼 시기성", (("marriage_decision", 1.0),), "positive"),
+        ("결혼 후 안정도", (("post_marriage_stability", 1.0),), "positive"),
+    ),
+    "honor": (
+        ("사회적 인정", (("honor_social_recognition", 1.0),), "positive"),
+        ("평판 형성", (("honor_reputation_formation", 1.0),), "positive"),
+        ("직함 상승성", (("honor_title_rise", 1.0),), "positive"),
+        ("공적 신뢰도", (("honor_public_trust", 1.0),), "positive"),
+        ("책임 수용도", (("honor_responsibility_acceptance", 1.0),), "positive"),
+        ("조직 내 존재감", (("honor_organizational_presence", 1.0),), "positive"),
+        ("권위 확보력", (("honor_authority_establishment", 1.0),), "positive"),
+        ("명분 관리", (("honor_legitimacy_management", 1.0),), "positive"),
+    ),
+    "social": (
+        ("친화성", (("social_affinity", 1.0),), "positive"),
+        ("신뢰 형성", (("social_trust_formation", 1.0),), "positive"),
+        ("관계 유지성", (("social_relationship_continuity", 1.0),), "positive"),
+        ("거리 조절", (("social_distance_control", 1.0),), "positive"),
+        ("협력성", (("social_cooperation", 1.0),), "positive"),
+        ("경쟁 노출도", (("social_competition_control", 1.0),), "risk"),
+        ("말의 영향력", (("social_speech_influence", 1.0),), "positive"),
+        ("갈등 회피력", (("social_conflict_avoidance", 1.0),), "positive"),
+        ("지인 덕", (("social_benefactor_support", 1.0),), "positive"),
+        ("지인 피해/손실", (("social_acquaintance_loss_defense", 1.0),), "risk"),
+    ),
+}
+
+
+# Every current product risk concept is derived from a protective capacity such
+# as stability, recovery, boundaries, or loss avoidance. Its engine score is
+# already a customer-facing quality score. This set is reserved for a future
+# facet that directly emits risk intensity and therefore needs one inversion.
+PRODUCT_METRIC_DIRECT_RISK_LABELS: frozenset[tuple[str, str]] = frozenset()
+
+
+# Product risk concepts are calculated from protective engine facets. Expose
+# those facets as positive customer axes so every visible score has one meaning:
+# a higher score is a better result. The original label remains in source_label
+# for description lookup and diagnostics.
+PRODUCT_RISK_DISPLAY_MAP: dict[str, tuple[str, str]] = {
+    "상대 의존도": (
+        "관계 자립성",
+        "연애 관계에서도 상대의 감정과 선택에 지나치게 기대지 않고 자기 기준을 유지하는 정도를 나타냅니다.",
+    ),
+    "이별 위험도": (
+        "이별 리스크 관리력",
+        "거리감, 반복되는 갈등, 신뢰 저하가 관계 단절로 번지는 흐름을 줄이는 정도를 나타냅니다.",
+    ),
+    "배우자 충돌도": (
+        "배우자 갈등 조정력",
+        "배우자와의 의견 차이와 감정 충돌을 결혼 생활 안에서 조정하는 정도를 나타냅니다.",
+    ),
+    "경쟁 노출도": (
+        "경쟁 대응력",
+        "평가 경쟁과 성과 비교가 강해질 때 자기 역할과 성과를 지켜내는 정도를 나타냅니다.",
+    ),
+    "지인 피해/손실": (
+        "지인 손실 방어력",
+        "지인의 부탁, 보증, 금전 거래, 공동 책임으로 생길 수 있는 손해를 막는 정도를 나타냅니다.",
+    ),
+}
+
+
+# Keep the calculation vocabulary stable while exposing customer-facing names
+# and definitions that state the measured capacity without analytical shorthand.
+PRODUCT_METRIC_DISPLAY_MAP: dict[str, tuple[str, str]] = {
+    "자산화 성향": (
+        "자산 전환력",
+        "자산 전환력은 들어온 돈을 소비로 흩뜨리지 않고 예금, 지분, 부동산, 장기 자산처럼 소유권이 남는 형태로 전환하는 성향입니다.",
+    ),
+    "독립 업무성": (
+        "독립 업무 수행력",
+        "독립 업무 수행력은 조직의 지시와 지원이 부족한 상황에서도 고객, 결과물, 일정, 보수 체계를 스스로 조직하는 정도입니다.",
+    ),
+    "자기 기준": (
+        "자기 확신",
+        "자기 확신은 자신의 판단 근거를 믿고 결정의 방향을 유지하는 정도입니다. 단순히 주장이 강한 것이 아니라, 주변의 반응과 자신의 판단이 다를 때 기준을 분명히 정하는 정도를 의미합니다.",
+    ),
+    "실행 속도": (
+        "실행 속도",
+        "실행 속도는 판단을 실제 행동으로 옮기고 결과를 확인하기까지 걸리는 속도를 나타냅니다. 생각이 빠른 것보다, 결론을 내린 뒤 얼마나 신속하게 움직이는지를 다룹니다.",
+    ),
+    "신중성": (
+        "판단 신중성",
+        "판단 신중성은 행동하기 전에 정보와 결과, 위험 요소, 타인에게 미칠 영향을 검토하는 정도입니다.",
+    ),
+    "몰입 성향": (
+        "집중 지속력",
+        "집중 지속력은 한 가지 주제나 과제를 깊이 파고들고, 일정한 성과가 나올 때까지 관심과 에너지를 유지하는 정도입니다. 순간적인 열정보다 몰입이 얼마나 오래 지속되는지를 나타냅니다.",
+    ),
+    "관계 거리 조절력": (
+        "관계 거리 조절력",
+        "관계 거리 조절력은 상대와의 친밀도, 연락의 빈도, 책임의 범위를 관계의 단계에 맞게 조정하는 능력입니다. 가까워지는 힘뿐 아니라 필요할 때 적절한 경계를 세우는 성향도 포함합니다.",
+    ),
+    "표현 방식": (
+        "의사 표현력",
+        "의사 표현력은 생각과 감정을 말, 글, 표정, 행동으로 분명하게 전달하는 정도입니다. 표현의 양보다 자신의 의도가 상대에게 정확하게 전달되는지를 나타냅니다.",
+    ),
+    "인정 욕구": (
+        "사회적 인정 가능성",
+        "사회적 인정 가능성은 자신의 능력과 성과를 외부에서 알아볼 수 있는 형태로 정리하고 드러내는 성향과 관련이 있습니다. 성과가 평가, 직함, 신뢰로 연결될 조건이 갖춰져 있는지를 나타냅니다.",
+    ),
+    "위험 감지": (
+        "위험 대응력",
+        "위험 대응력은 손실, 갈등, 실수로 이어질 징후를 미리 알아차리고 대비하는 성향을 나타냅니다. 문제가 발생한 뒤 상황을 수습하고 정상적인 흐름을 회복하는 능력까지 포함합니다.",
+    ),
+    "관계 주도성": (
+        "관계 주도력",
+        "관계 주도력은 상대의 반응에 끌려가기보다 관계의 속도와 방향, 자신이 감당할 책임의 범위를 스스로 선택하는 정도입니다.",
+    ),
+    "결혼 시기성": (
+        "결혼 준비성",
+        "결혼 준비성은 연인과의 관계를 결혼이라는 현실적 과제로 발전시키기 위한 노력 정도를 의미합니다. 생활 습관이나 재정, 기타 가족 문제 등 결혼을 위한 현실적 준비라고 할 수 있겠군요.",
+    ),
+    "책임 수용도": (
+        "책임 의식",
+        "책임 의식은 조직이나 사회에서 맡은 역할의 범위와 결과를 인식하고, 필요한 결정을 끝까지 수행하는 정도입니다.",
+    ),
+    "조직 내 존재감": (
+        "조직 영향력",
+        "조직 영향력은 자신의 판단, 설명, 성과가 조직 구성원의 결정과 업무 방향에 반영되는 정도입니다. 단순히 눈에 띄는 것보다 실제 결정에 미치는 영향을 나타냅니다.",
+    ),
+    "친화성": (
+        "인맥 관계 형성력",
+        "인맥 관계 형성력은 새로운 사람과 자연스럽게 접점을 만들고 대화를 시작하며, 다음 만남으로 관계를 이어가는 정도입니다.",
+    ),
+    "거리 조절": (
+        "관계 거리 조절력",
+        "관계 거리 조절력은 상대와의 친밀도, 연락의 빈도, 책임의 범위를 관계의 단계에 맞게 조정하는 능력입니다. 가까워지는 힘뿐 아니라 필요할 때 적절한 경계를 세우는 성향도 포함합니다.",
+    ),
+    "말의 영향력": (
+        "말의 설득력",
+        "말의 설득력은 자신의 생각과 근거를 상대가 이해할 수 있는 순서로 전달하고, 판단이나 행동의 변화를 이끌어내는 정도입니다.",
+    ),
+    "갈등 회피력": (
+        "갈등 조정력",
+        "갈등 조정력은 의견 차이나 감정 충돌이 커지기 전에 쟁점을 분리하고, 서로 받아들일 수 있는 기준을 찾는 정도입니다.",
+    ),
+}
+
+
+ANNUAL_REPORT_YEARS: tuple[dict[str, str], ...] = (
+    {"domain": "year_2026", "title": "올해운", "year": "2026", "ganji": "병오년", "icon": "26"},
+    {"domain": "year_2027", "title": "내년운", "year": "2027", "ganji": "정미년", "icon": "27"},
+)
+
+
+ANNUAL_METRIC_GROUPS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "overall",
+        "title": "종합 흐름 지표",
+        "anchor": "overall",
+        "items": (
+            ("연간 상승도", "올해 전반적으로 상황이 개선되고 발전하는 흐름이 얼마나 강한지를 나타냅니다.", "positive"),
+            ("기회 유입", "새로운 일, 사람, 제안, 선택지가 들어오는 정도를 나타냅니다.", "positive"),
+            ("성과 실현도", "노력이나 계획이 실제 결과로 연결될 가능성을 나타냅니다.", "positive"),
+            ("변화 강도", "직업, 관계, 거주, 생활 방식 등에서 변화가 발생하는 정도를 나타냅니다.", "risk"),
+            ("안정 유지력", "예상하지 못한 변수가 생겨도 기존 생활과 성과를 안정적으로 유지하는 힘을 나타냅니다.", "positive"),
+            ("회복 탄력성", "지연, 실패, 갈등 이후 다시 정상 흐름을 회복하는 정도를 나타냅니다.", "positive"),
+            ("외부 지원 정도", "주변 사람이나 조직, 환경으로부터 도움을 받을 가능성을 나타냅니다.", "positive"),
+            ("주의 필요도", "실수, 충돌, 손실, 과로 등으로 인해 평소보다 관리가 필요한 정도를 나타냅니다.", "risk"),
+            ("체감 만족도", "객관적인 성과와 별개로 올해를 만족스럽게 느낄 가능성을 나타냅니다.", "positive"),
+            ("연말 잔존 성과", "올해 얻은 결과가 일시적인 경험에 그치지 않고 연말 이후에도 남는 정도를 나타냅니다.", "positive"),
+        ),
+    },
+    {
+        "key": "career",
+        "title": "직업·업무 지표",
+        "anchor": "career",
+        "items": (
+            ("직업 성과 상승도", "올해 업무 결과와 직업적 성취가 이전보다 향상될 가능성을 나타냅니다.", "positive"),
+            ("평가 상승도", "상사, 조직, 고객, 동료로부터 긍정적인 평가를 받을 가능성을 나타냅니다.", "positive"),
+            ("승진·직책 상승도", "직책, 직급, 책임 범위가 높아질 가능성을 나타냅니다.", "positive"),
+            ("역할 확장", "새로운 업무나 프로젝트, 책임 영역을 맡게 되는 정도를 나타냅니다.", "positive"),
+            ("권한 확대", "의사결정권과 업무 자율성이 커질 가능성을 나타냅니다.", "positive"),
+            ("전문성 강화", "올해의 경험이 경력, 기술, 자격, 포트폴리오로 축적되는 정도를 나타냅니다.", "positive"),
+            ("이직 기회", "새로운 직장이나 직무로 이동할 수 있는 기회가 발생하는 정도를 나타냅니다.", "positive"),
+            ("직업 변동", "부서 이동, 직무 변경, 조직 개편 등 업무 환경의 변화 가능성을 나타냅니다.", "risk"),
+            ("독립 업무 기회", "프리랜서, 창업, 개인 프로젝트 등 독립적인 업무 기회가 증가하는 정도를 나타냅니다.", "positive"),
+            ("조직 지원", "상사, 동료, 조직으로부터 실질적인 도움과 자원을 받을 가능성을 나타냅니다.", "positive"),
+            ("경쟁 노출", "평가 경쟁, 자리 경쟁, 성과 비교가 강해지는 정도를 나타냅니다.", "risk"),
+            ("업무 갈등", "상사, 동료, 고객 또는 이해관계자와 충돌할 가능성을 나타냅니다.", "risk"),
+            ("업무 부담", "책임, 업무량, 일정 압박이 증가하는 정도를 나타냅니다.", "risk"),
+            ("문서·계약 주의 정도", "보고서, 계약, 일정, 행정 절차에서 실수나 누락을 주의해야 하는 정도를 나타냅니다.", "risk"),
+            ("직업 지속 안정성", "현재 직업과 역할을 안정적으로 유지할 가능성을 나타냅니다.", "positive"),
+            ("성과 보상도", "성과급, 연봉 인상, 인센티브, 정산 등 노력에 대한 보상을 실제로 받는 정도를 나타냅니다.", "positive"),
+        ),
+    },
+    {
+        "key": "money",
+        "title": "재물 지표",
+        "anchor": "money",
+        "items": (
+            ("수입 상승도", "급여, 사업 소득 등 주된 수입이 증가할 가능성을 나타냅니다.", "positive"),
+            ("추가 수입 기회", "부수입, 성과급, 외주, 투자 수익 등 추가적인 수입 기회가 발생하는 정도를 나타냅니다.", "positive"),
+            ("현금흐름 안정성", "수입과 지출의 균형이 안정적으로 유지되는 정도를 나타냅니다.", "positive"),
+            ("목돈 형성", "저축, 정산, 매각, 보상 등을 통해 일정 규모의 자금을 만들 가능성을 나타냅니다.", "positive"),
+            ("자산 증가", "올해의 수입이 소비로 끝나지 않고 예금, 투자, 부동산 등 자산으로 남는 정도를 나타냅니다.", "positive"),
+            ("지출 압박", "생활비, 가족 비용, 의료·교육·이사 등 불가피한 지출이 증가하는 정도를 나타냅니다.", "risk"),
+            ("예상 밖 지출", "미리 계획하지 않은 비용이 발생할 가능성을 나타냅니다.", "risk"),
+            ("소비 통제력", "충동적이거나 불필요한 지출을 조절할 수 있는 정도를 나타냅니다.", "positive"),
+            ("투자 기회", "자산을 늘릴 수 있는 투자 또는 거래 기회가 나타나는 정도를 나타냅니다.", "positive"),
+            ("투자 판단 안정성", "과도한 기대나 불안에 흔들리지 않고 투자 판단을 유지하는 정도를 나타냅니다.", "positive"),
+            ("계약 성사", "금전과 관련된 계약, 매매, 협상, 정산이 성립될 가능성을 나타냅니다.", "positive"),
+            ("계약 안정성", "체결된 계약이 분쟁이나 변경 없이 안정적으로 유지될 가능성을 나타냅니다.", "positive"),
+            ("손실 노출", "잘못된 투자, 계약 문제, 과도한 지출 등으로 손실이 발생할 가능성을 나타냅니다.", "risk"),
+            ("공동 재정 안정성", "배우자, 가족, 동업자 등과 함께 관리하는 자금이 안정적으로 운영되는 정도를 나타냅니다.", "positive"),
+        ),
+    },
+    {
+        "key": "social",
+        "title": "대인관계 지표",
+        "anchor": "social",
+        "items": (
+            ("신규 인연 유입", "올해 새로운 사람을 만나고 관계를 형성할 기회가 늘어나는 정도를 나타냅니다.", "positive"),
+            ("관계 확장", "인간관계의 범위와 활동 영역이 넓어지는 정도를 나타냅니다.", "positive"),
+            ("신뢰 상승도", "기존 관계에서 신뢰와 유대가 강화되는 정도를 나타냅니다.", "positive"),
+            ("협력 성사", "공동 프로젝트, 업무 협력, 소개, 추천 등이 실제 결과로 이어지는 정도를 나타냅니다.", "positive"),
+            ("귀인 지원", "결정적인 순간에 도움이나 기회를 제공하는 사람을 만날 가능성을 나타냅니다.", "positive"),
+            ("지인 도움", "기존 지인이나 주변 관계를 통해 실질적인 지원을 받는 정도를 나타냅니다.", "positive"),
+            ("관계 유지 안정성", "중요한 관계가 큰 흔들림 없이 지속될 가능성을 나타냅니다.", "positive"),
+            ("관계 회복", "멀어졌거나 갈등이 있었던 사람과 관계를 회복할 가능성을 나타냅니다.", "positive"),
+            ("갈등 노출", "의견 차이와 경쟁, 감정 충돌이 발생할 가능성을 나타냅니다.", "risk"),
+            ("구설·오해 노출", "말이나 행동이 잘못 전달되어 오해나 평판 문제가 생길 가능성을 나타냅니다.", "risk"),
+            ("관계 피로도", "인간관계를 유지하는 과정에서 감정적·시간적 부담이 커지는 정도를 나타냅니다.", "risk"),
+            ("관계 정리", "오래된 관계나 불필요한 인연을 자연스럽게 정리하게 되는 정도를 나타냅니다.", "risk"),
+            ("지인 손실 위험성", "지인의 부탁, 보증, 금전 거래, 공동 책임으로 손해를 볼 가능성을 나타냅니다.", "risk"),
+            ("소개·연결운", "사람을 통해 새로운 일, 정보, 관계가 연결되는 정도를 나타냅니다.", "positive"),
+        ),
+    },
+    {
+        "key": "love",
+        "title": "연애 지표",
+        "anchor": "love",
+        "items": (
+            ("연애 활성도", "올해 연애와 감정 관계가 삶에서 차지하는 비중이 커지는 정도를 나타냅니다.", "positive"),
+            ("호감 유입도", "타인으로부터 관심과 호감을 받을 가능성을 나타냅니다.", "positive"),
+            ("감정 교류 정도", "상대와 감정과 생각을 주고받는 흐름이 활발해지는 정도를 나타냅니다.", "positive"),
+            ("관계 진전도", "관계가 친밀해지거나 다음 단계로 발전할 가능성을 나타냅니다.", "positive"),
+            ("연애 안정성", "감정 기복이나 외부 변수로 인해 관계가 흔들리지 않고 유지되는 정도를 나타냅니다.", "positive"),
+            ("갈등 회복성", "다툼이나 오해가 생긴 뒤 관계를 회복할 수 있는 정도를 나타냅니다.", "positive"),
+            ("관계 주도권 변화", "연애 관계에서 결정권과 감정적 영향력이 달라지는 정도를 나타냅니다.", "risk"),
+            ("이별 위험성", "거리감, 반복되는 갈등, 신뢰 저하로 인해 관계가 약해질 가능성을 나타냅니다.", "risk"),
+            ("새로운 연애 기회", "새로운 연애 상대를 만날 가능성을 나타냅니다.", "positive"),
+            ("소개 인연", "지인, 직장, 모임 등을 통해 연애 인연이 연결될 가능성을 나타냅니다.", "positive"),
+            ("관계 시작 가능성", "호감이나 만남이 실제 연애 관계로 이어질 가능성을 나타냅니다.", "positive"),
+            ("선택 적합도", "순간적인 감정보다 자신에게 적합한 상대를 선택할 가능성을 나타냅니다.", "positive"),
+            ("애정 심화 정도", "기존 관계에서 신뢰와 애착이 깊어지는 정도를 나타냅니다.", "positive"),
+            ("미래 합의", "결혼, 동거, 장기 계획 등에 대한 합의가 이루어지는 정도를 나타냅니다.", "positive"),
+            ("거리 발생", "물리적 거리나 감정적 거리감이 생길 가능성을 나타냅니다.", "risk"),
+            ("외부 변수 영향", "직장, 가족, 금전 문제 등이 연애 관계에 영향을 미치는 정도를 나타냅니다.", "risk"),
+        ),
+    },
+    {
+        "key": "marriage",
+        "title": "결혼·가정 지표",
+        "anchor": "marriage",
+        "items": (
+            ("결혼 인연 유입", "장기적인 관계로 발전할 가능성이 있는 인연을 만나는 정도를 나타냅니다.", "positive"),
+            ("결혼 구체화", "연애 관계가 약혼, 상견례, 혼인 준비 등 현실적인 단계로 진전되는 정도를 나타냅니다.", "positive"),
+            ("결혼 결정", "결혼 여부와 시기에 대한 판단이 명확해지는 정도를 나타냅니다.", "positive"),
+            ("가족 합의", "양가 가족과의 협의가 원활하게 이루어질 가능성을 나타냅니다.", "positive"),
+            ("결혼 준비 안정성", "주거, 재정, 일정 등 결혼 준비 과정이 안정적으로 진행되는 정도를 나타냅니다.", "positive"),
+            ("결혼 지연 요인", "금전, 가족, 직업, 관계 문제로 결혼 계획이 늦어질 가능성을 나타냅니다.", "risk"),
+            ("부부 관계 안정도", "배우자와의 관계가 신뢰와 협력을 바탕으로 안정적으로 유지되는 정도를 나타냅니다.", "positive"),
+            ("생활 조율", "생활 습관, 시간 사용, 역할 분담을 원활하게 맞출 수 있는 정도를 나타냅니다.", "positive"),
+            ("재정 합의", "지출, 저축, 투자 등 가정 경제에 대한 합의가 이루어지는 정도를 나타냅니다.", "positive"),
+            ("가정 책임 분담", "가사, 육아, 가족 돌봄의 책임이 균형 있게 분담되는 정도를 나타냅니다.", "positive"),
+            ("배우자 지원", "배우자가 정서적·실질적인 도움을 제공하는 정도를 나타냅니다.", "positive"),
+            ("배우자 갈등", "반복되는 의견 차이나 감정 충돌이 나타날 가능성을 나타냅니다.", "risk"),
+            ("가족 개입", "양가 가족의 의견이나 사정이 부부 관계에 영향을 미치는 정도를 나타냅니다.", "risk"),
+            ("가정 환경 안정", "주거, 재정, 가족 관계 등 가정생활 전반이 안정적으로 유지되는 정도를 나타냅니다.", "positive"),
+        ),
+    },
+    {
+        "key": "honor",
+        "title": "명예·평판 지표",
+        "anchor": "honor",
+        "items": (
+            ("사회적 인정 상승도", "올해 능력과 성과를 외부로부터 인정받는 정도를 나타냅니다.", "positive"),
+            ("평판 상승도", "주변과 사회적 관계에서 긍정적인 평가가 형성되는 정도를 나타냅니다.", "positive"),
+            ("공적 신뢰 상승도", "공식적인 역할이나 책임을 맡을 만큼 신뢰를 얻게 되는 정도를 나타냅니다.", "positive"),
+            ("직함 상승도", "직책, 직급, 자격, 타이틀이 높아질 가능성을 나타냅니다.", "positive"),
+            ("대외 노출도", "발표, 홍보, 미디어, SNS, 대표 역할 등을 통해 외부에 알려지는 정도를 나타냅니다.", "positive"),
+            ("영향력 확대", "의견과 결정이 주변 사람이나 조직에 미치는 영향이 커지는 정도를 나타냅니다.", "positive"),
+            ("책임 증가", "사회적 역할과 권한이 커지는 만큼 책임도 함께 증가하는 정도를 나타냅니다.", "risk"),
+            ("명분 확보", "자신의 결정과 행동이 조직이나 사회에서 정당성을 얻는 정도를 나타냅니다.", "positive"),
+            ("구설 위험도", "말, 행동, 공개 활동으로 인해 부정적인 평가를 받을 가능성을 나타냅니다.", "risk"),
+            ("평판 회복도", "과거의 오해나 낮아진 평가를 회복할 가능성을 나타냅니다.", "positive"),
+        ),
+    },
+    {
+        "key": "condition",
+        "title": "생활·컨디션 지표",
+        "anchor": "personality",
+        "items": (
+            ("생활 활력", "일상과 활동을 유지할 수 있는 에너지 수준을 나타냅니다.", "positive"),
+            ("스트레스 부담", "업무, 관계, 금전 문제로 심리적 부담이 커지는 정도를 나타냅니다.", "risk"),
+            ("피로 누적도", "충분히 쉬어도 피로가 지속되거나 생활 부담이 쌓이는 정도를 나타냅니다.", "risk"),
+            ("생활 안정성", "수면, 식사, 업무와 휴식의 흐름이 규칙적으로 유지되는 정도를 나타냅니다.", "positive"),
+            ("회복 관리", "피로와 스트레스를 적절한 휴식과 관리로 회복할 수 있는 정도를 나타냅니다.", "positive"),
+            ("과로 노출 위험", "책임과 일정이 몰려 휴식이 부족해질 가능성을 나타냅니다.", "risk"),
+            ("부주의 사고 위험", "피로와 집중력 저하로 실수나 경미한 사고를 주의해야 하는 정도를 나타냅니다.", "risk"),
+            ("이동 피로도", "출장, 여행, 이사, 통근 변화 등 이동으로 인한 부담이 커지는 정도를 나타냅니다.", "risk"),
+            ("생활환경 변화 가능성", "거주지나 생활 방식이 바뀔 가능성을 나타냅니다.", "risk"),
+            ("자기관리 지속도", "운동, 휴식, 학습, 생활 습관을 꾸준히 유지할 가능성을 나타냅니다.", "positive"),
+        ),
+    },
+)
+
+
+# Each annual overview score is a conclusion over a small, declared set of
+# outcome and defense indicators. Averaging every detailed item made large
+# groups converge toward the middle simply because they contained more cards.
+# These labels keep the headline score auditable while the full item set stays
+# visible below it.
+ANNUAL_GROUP_TOTAL_INDICATORS: dict[str, tuple[str, ...]] = {
+    "overall": (
+        "연간 상승도", "성과 실현도", "안정 유지력", "주의 필요도", "연말 잔존 성과",
+    ),
+    "career": (
+        "직업 성과 상승도", "평가 상승도", "승진·직책 상승도", "권한 확대",
+        "직업 지속 안정성", "성과 보상도",
+    ),
+    "money": (
+        "수입 상승도", "현금흐름 안정성", "목돈 형성", "자산 증가", "손실 노출",
+        "공동 재정 안정성",
+    ),
+    "social": (
+        "신뢰 상승도", "협력 성사", "귀인 지원", "관계 유지 안정성", "갈등 노출",
+        "지인 손실 위험성",
+    ),
+    "love": (
+        "호감 유입도", "관계 진전도", "연애 안정성", "갈등 회복성", "이별 위험성",
+        "미래 합의",
+    ),
+    "marriage": (
+        "결혼 구체화", "결혼 결정", "결혼 준비 안정성", "부부 관계 안정도", "재정 합의",
+        "가정 환경 안정",
+    ),
+    "honor": (
+        "사회적 인정 상승도", "평판 상승도", "공적 신뢰 상승도", "직함 상승도", "명분 확보",
+        "구설 위험도",
+    ),
+    "condition": (
+        "생활 활력", "스트레스 부담", "피로 누적도", "생활 안정성", "과로 노출 위험",
+        "자기관리 지속도",
+    ),
+}
+
+
+ANNUAL_RISK_DISPLAY_MAP: dict[str, tuple[str, str]] = {
+    "변화 강도": (
+        "변화 관리력",
+        "직업, 관계, 거주, 생활 방식의 변화가 생겨도 흐름을 무리 없이 조정하는 정도를 나타냅니다.",
+    ),
+    "주의 필요도": (
+        "리스크 관리력",
+        "실수, 충돌, 손실, 과로 등 관리가 필요한 변수를 미리 줄이는 정도를 나타냅니다.",
+    ),
+    "직업 변동": (
+        "직업 안정성",
+        "부서 이동, 직무 변경, 조직 개편 속에서도 직업적 기반을 안정적으로 유지하는 정도를 나타냅니다.",
+    ),
+    "경쟁 노출": (
+        "경쟁 대응력",
+        "평가 경쟁, 자리 경쟁, 성과 비교가 강해질 때 자기 성과를 지켜내는 정도를 나타냅니다.",
+    ),
+    "업무 갈등": (
+        "업무 갈등 조정력",
+        "상사, 동료, 고객 또는 이해관계자와의 충돌을 조정하고 손실로 번지지 않게 하는 정도를 나타냅니다.",
+    ),
+    "업무 부담": (
+        "업무 감당력",
+        "책임, 업무량, 일정 압박이 커져도 직업적 흐름을 유지하는 정도를 나타냅니다.",
+    ),
+    "문서·계약 주의 정도": (
+        "문서·계약 안정성",
+        "보고서, 계약, 일정, 행정 절차에서 실수나 누락을 줄이고 안정적으로 처리하는 정도를 나타냅니다.",
+    ),
+    "지출 압박": (
+        "지출 관리력",
+        "생활비, 가족 비용, 의료·교육·이사 등 불가피한 지출을 감당하고 조정하는 정도를 나타냅니다.",
+    ),
+    "예상 밖 지출": (
+        "돌발 지출 대응력",
+        "미리 계획하지 않은 비용이 생겨도 재정 흐름을 무리 없이 조정하는 정도를 나타냅니다.",
+    ),
+    "손실 노출": (
+        "손실 회피력",
+        "잘못된 투자, 계약 문제, 과도한 지출로 생길 수 있는 손실을 피하는 정도를 나타냅니다.",
+    ),
+    "갈등 노출": (
+        "대인 갈등 조정력",
+        "의견 차이와 경쟁, 감정 충돌이 생겨도 관계를 크게 흔들지 않는 정도를 나타냅니다.",
+    ),
+    "구설·오해 노출": (
+        "구설 관리력",
+        "말이나 행동이 잘못 전달되어 오해나 평판 문제로 번지는 일을 줄이는 정도를 나타냅니다.",
+    ),
+    "관계 피로도": (
+        "관계 피로 관리력",
+        "인간관계를 유지하는 과정에서 생기는 감정적·시간적 부담을 조절하는 정도를 나타냅니다.",
+    ),
+    "관계 정리": (
+        "관계 선별력",
+        "오래된 관계나 불필요한 인연을 무리 없이 정리하고 중요한 관계를 남기는 정도를 나타냅니다.",
+    ),
+    "지인 손실 위험성": (
+        "지인 손실 방어력",
+        "지인의 부탁, 보증, 금전 거래, 공동 책임으로 생길 수 있는 손해를 막는 정도를 나타냅니다.",
+    ),
+    "관계 주도권 변화": (
+        "관계 주도권 안정성",
+        "연애 관계에서 결정권과 감정적 영향력이 흔들릴 때 관계의 균형을 지키는 정도를 나타냅니다.",
+    ),
+    "이별 위험성": (
+        "이별 리스크 관리력",
+        "거리감, 반복되는 갈등, 신뢰 저하로 관계가 약해지는 흐름을 줄이는 정도를 나타냅니다.",
+    ),
+    "거리 발생": (
+        "거리감 관리력",
+        "물리적 거리나 감정적 거리감이 생겨도 관계의 온도를 유지하는 정도를 나타냅니다.",
+    ),
+    "외부 변수 영향": (
+        "외부 변수 대응력",
+        "직장, 가족, 금전 문제 등이 연애 관계에 미치는 영향을 조정하는 정도를 나타냅니다.",
+    ),
+    "결혼 지연 요인": (
+        "결혼 지연 관리력",
+        "금전, 가족, 직업, 관계 문제로 결혼 계획이 늦어지는 흐름을 조정하는 정도를 나타냅니다.",
+    ),
+    "배우자 갈등": (
+        "배우자 갈등 조정력",
+        "반복되는 의견 차이나 감정 충돌을 부부 관계 안에서 조정하는 정도를 나타냅니다.",
+    ),
+    "가족 개입": (
+        "가족 개입 조절력",
+        "양가 가족의 의견이나 사정이 부부 관계를 흔들지 않도록 조절하는 정도를 나타냅니다.",
+    ),
+    "책임 증가": (
+        "책임 감당력",
+        "사회적 역할과 권한이 커질 때 책임을 무리 없이 받아내는 정도를 나타냅니다.",
+    ),
+    "구설 위험도": (
+        "구설 방어력",
+        "말, 행동, 공개 활동으로 부정적인 평가가 생기는 일을 줄이는 정도를 나타냅니다.",
+    ),
+    "스트레스 부담": (
+        "스트레스 관리력",
+        "업무, 관계, 금전 문제로 생기는 심리적 부담을 조절하는 정도를 나타냅니다.",
+    ),
+    "피로 누적도": (
+        "피로 회복력",
+        "충분히 쉬어도 이어지는 피로와 생활 부담을 회복하는 정도를 나타냅니다.",
+    ),
+    "과로 노출 위험": (
+        "과로 방지력",
+        "책임과 일정이 몰릴 때 휴식 부족과 과로를 막는 정도를 나타냅니다.",
+    ),
+    "부주의 사고 위험": (
+        "부주의 방지력",
+        "피로와 집중력 저하로 생길 수 있는 실수나 경미한 사고를 줄이는 정도를 나타냅니다.",
+    ),
+    "이동 피로도": (
+        "이동 피로 관리력",
+        "출장, 여행, 이사, 통근 변화 등 이동으로 인한 부담을 조절하는 정도를 나타냅니다.",
+    ),
+    "생활환경 변화 가능성": (
+        "생활환경 적응력",
+        "거주지나 생활 방식이 바뀔 때 일상의 균형을 다시 잡는 정도를 나타냅니다.",
+    ),
+}
+
+
+ANNUAL_METRIC_DISPLAY_MAP: dict[str, tuple[str, str]] = {
+    "역할 확장": (
+        "역할 확대 가능성",
+        "역할 확대 가능성은 새로운 업무와 프로젝트, 책임 범위가 들어오고 이를 감당할 조건이 형성되는 정도입니다.",
+    ),
+    "이직 기회": (
+        "이직 기회",
+        "이직 기회는 새로운 직장이나 직무에 관한 제안과 선택지가 들어오고, 실제 이동으로 이어질 조건이 마련되는 정도입니다.",
+    ),
+    "관계 확장": (
+        "관계 확장 가능성",
+        "관계 확장 가능성은 새로운 사람과 연결되고 인간관계의 범위가 넓어지며, 그 관계가 실제 활동으로 이어지는 정도입니다.",
+    ),
+    "연애 활성도": (
+        "연애 흐름 활성도",
+        "연애 흐름 활성도는 호감, 만남, 감정 교류가 늘어나고 관계가 다음 단계로 움직일 가능성을 나타냅니다.",
+    ),
+    "결혼 구체화": (
+        "결혼 구체화",
+        "결혼 구체화는 혼인에 관한 생각이 약속, 가족 협의, 주거, 재정 계획처럼 현실적인 단계로 이어지는 정도입니다. 혼인 시기가 아니라면, 연인 및 새로운 인연과의 관계를 현실적으로 안정시키고 유지하는 정도를 의미합니다.",
+    ),
+    "대외 노출도": (
+        "대외 활동성",
+        "대외 활동성은 발표, 홍보, 대표 역할, 외부 협력처럼 자신의 이름과 성과가 밖으로 드러나는 활동이 늘어나는 정도입니다.",
+    ),
+    "영향력 확대": (
+        "사회적 영향력 확대",
+        "사회적 영향력 확대는 자신의 말과 판단, 성과가 조직이나 주변 사람의 선택에 미치는 범위가 넓어지는 정도입니다.",
+    ),
+}
+
+
+ANNUAL_COMPONENT_FALLBACK_DOMAINS: dict[str, tuple[str, ...]] = {
+    "social": ("love", "marriage", "career"),
+    "honor": ("career", "money", "social"),
+    "personality": ("career", "social", "love", "marriage", "money"),
+}
+
+
+ANNUAL_COMPONENT_PROFILES: dict[str, tuple[float, float, float, float]] = {
+    "growth": (0.30, 0.42, 0.16, 0.12),
+    "opportunity": (0.58, 0.24, 0.12, 0.06),
+    "realization": (0.24, 0.50, 0.14, 0.12),
+    "change_management": (0.18, 0.24, -0.18, 0.40),
+    "stability": (0.22, 0.34, 0.08, 0.36),
+    "recovery": (0.22, 0.32, 0.12, 0.34),
+    "support": (0.46, 0.28, 0.08, 0.18),
+    "satisfaction": (0.24, 0.36, 0.08, 0.32),
+    "retention": (0.22, 0.46, 0.08, 0.24),
+    "role_expansion": (0.38, 0.24, 0.30, 0.08),
+    "authority": (0.28, 0.44, 0.12, 0.16),
+    "expertise": (0.24, 0.48, 0.12, 0.16),
+    "movement": (0.50, 0.22, 0.22, 0.06),
+    "competition_guard": (0.14, 0.22, -0.12, 0.52),
+    "burden_guard": (0.12, 0.20, -0.10, 0.58),
+    "contract_guard": (0.20, 0.30, -0.06, 0.50),
+    "contract_success": (0.32, 0.42, 0.08, 0.18),
+    "cashflow": (0.26, 0.42, 0.06, 0.26),
+    "asset": (0.24, 0.48, 0.08, 0.20),
+    "expense_guard": (0.10, 0.20, -0.08, 0.62),
+    "investment": (0.46, 0.26, 0.18, 0.10),
+    "relationship_entry": (0.52, 0.26, 0.12, 0.10),
+    "relationship_trust": (0.28, 0.44, 0.08, 0.20),
+    "relationship_recovery": (0.24, 0.34, 0.10, 0.32),
+    "relationship_guard": (0.12, 0.22, -0.10, 0.56),
+    "cooperation_success": (0.38, 0.42, 0.08, 0.12),
+    "choice_fit": (0.22, 0.36, 0.04, 0.38),
+    "love_progress": (0.36, 0.38, 0.14, 0.12),
+    "love_guard": (0.12, 0.24, -0.12, 0.56),
+    "marriage_reality": (0.24, 0.44, 0.10, 0.22),
+    "marriage_guard": (0.12, 0.24, -0.10, 0.54),
+    "honor_growth": (0.30, 0.46, 0.14, 0.10),
+    "public_exposure": (0.42, 0.32, 0.18, 0.08),
+    "reputation_guard": (0.12, 0.26, -0.08, 0.54),
+    "condition_vitality": (0.28, 0.34, 0.18, 0.20),
+    "condition_guard": (0.10, 0.22, -0.10, 0.58),
+}
+
+
+ANNUAL_LABEL_COMPONENT_PROFILE: dict[str, str] = {
+    "연간 상승도": "growth",
+    "기회 유입": "opportunity",
+    "성과 실현도": "realization",
+    "변화 강도": "change_management",
+    "안정 유지력": "stability",
+    "회복 탄력성": "recovery",
+    "외부 지원 정도": "support",
+    "주의 필요도": "burden_guard",
+    "체감 만족도": "satisfaction",
+    "연말 잔존 성과": "retention",
+    "직업 성과 상승도": "realization",
+    "평가 상승도": "honor_growth",
+    "승진·직책 상승도": "authority",
+    "역할 확장": "role_expansion",
+    "권한 확대": "authority",
+    "전문성 강화": "expertise",
+    "이직 기회": "movement",
+    "직업 변동": "change_management",
+    "독립 업무 기회": "movement",
+    "조직 지원": "support",
+    "경쟁 노출": "competition_guard",
+    "업무 갈등": "relationship_guard",
+    "업무 부담": "burden_guard",
+    "문서·계약 주의 정도": "contract_guard",
+    "직업 지속 안정성": "stability",
+    "성과 보상도": "realization",
+    "수입 상승도": "growth",
+    "추가 수입 기회": "opportunity",
+    "현금흐름 안정성": "cashflow",
+    "목돈 형성": "asset",
+    "자산 증가": "asset",
+    "지출 압박": "expense_guard",
+    "예상 밖 지출": "expense_guard",
+    "소비 통제력": "cashflow",
+    "투자 기회": "investment",
+    "투자 판단 안정성": "investment",
+    "계약 성사": "contract_success",
+    "계약 안정성": "contract_guard",
+    "손실 노출": "expense_guard",
+    "공동 재정 안정성": "cashflow",
+    "신규 인연 유입": "relationship_entry",
+    "관계 확장": "relationship_entry",
+    "신뢰 상승도": "relationship_trust",
+    "협력 성사": "cooperation_success",
+    "귀인 지원": "support",
+    "지인 도움": "support",
+    "관계 유지 안정성": "relationship_trust",
+    "관계 회복": "relationship_recovery",
+    "갈등 노출": "relationship_guard",
+    "구설·오해 노출": "reputation_guard",
+    "관계 피로도": "burden_guard",
+    "관계 정리": "relationship_guard",
+    "지인 손실 위험성": "expense_guard",
+    "소개·연결운": "relationship_entry",
+    "연애 활성도": "relationship_entry",
+    "호감 유입도": "relationship_entry",
+    "감정 교류 정도": "love_progress",
+    "관계 진전도": "love_progress",
+    "연애 안정성": "relationship_trust",
+    "갈등 회복성": "relationship_recovery",
+    "관계 주도권 변화": "love_guard",
+    "이별 위험성": "love_guard",
+    "새로운 연애 기회": "relationship_entry",
+    "소개 인연": "relationship_entry",
+    "관계 시작 가능성": "love_progress",
+    "선택 적합도": "choice_fit",
+    "애정 심화 정도": "love_progress",
+    "미래 합의": "marriage_reality",
+    "거리 발생": "love_guard",
+    "외부 변수 영향": "relationship_guard",
+    "결혼 인연 유입": "relationship_entry",
+    "결혼 구체화": "marriage_reality",
+    "결혼 결정": "marriage_reality",
+    "가족 합의": "marriage_reality",
+    "결혼 준비 안정성": "stability",
+    "결혼 지연 요인": "marriage_guard",
+    "부부 관계 안정도": "relationship_trust",
+    "생활 조율": "stability",
+    "재정 합의": "cashflow",
+    "가정 책임 분담": "marriage_reality",
+    "배우자 지원": "support",
+    "배우자 갈등": "marriage_guard",
+    "가족 개입": "marriage_guard",
+    "가정 환경 안정": "stability",
+    "사회적 인정 상승도": "honor_growth",
+    "평판 상승도": "honor_growth",
+    "공적 신뢰 상승도": "authority",
+    "직함 상승도": "authority",
+    "대외 노출도": "public_exposure",
+    "영향력 확대": "public_exposure",
+    "책임 증가": "burden_guard",
+    "명분 확보": "authority",
+    "구설 위험도": "reputation_guard",
+    "평판 회복도": "relationship_recovery",
+    "생활 활력": "condition_vitality",
+    "스트레스 부담": "condition_guard",
+    "피로 누적도": "condition_guard",
+    "생활 안정성": "stability",
+    "회복 관리": "recovery",
+    "과로 노출 위험": "condition_guard",
+    "부주의 사고 위험": "condition_guard",
+    "이동 피로도": "burden_guard",
+    "생활환경 변화 가능성": "change_management",
+    "자기관리 지속도": "stability",
+}
+
+
+ANNUAL_COMPONENT_SIGNAL_PROFILES: dict[str, tuple[str, ...]] = {
+    "growth": ("change_adaptation", "career_result", "continuity"),
+    "opportunity": ("relationship_opening", "change_adaptation", "market_reward"),
+    "realization": ("career_result", "market_reward", "evaluation"),
+    "change_management": ("change_adaptation", "risk_detection", "planning_judgment"),
+    "stability": ("continuity", "risk_detection", "domestic_stability"),
+    "recovery": ("conflict_recovery", "problem_solving", "continuity"),
+    "support": ("relationship_fit", "shared_asset", "organization_rule"),
+    "satisfaction": ("emotion_control", "domestic_stability", "continuity"),
+    "retention": ("asset_retention", "continuity", "long_term_accumulation"),
+    "role_expansion": ("authority_rise", "organization_rule", "change_adaptation"),
+    "authority": ("authority_rule", "authority_rise", "evaluation"),
+    "expertise": ("expertise", "resource_learning", "continuity"),
+    "movement": ("change_adaptation", "relationship_opening", "practical_execution"),
+    "competition_guard": ("peer_boundary", "risk_detection", "authority_rule"),
+    "burden_guard": ("responsibility", "risk_detection", "loss_guard"),
+    "contract_guard": ("contract_document", "risk_detection", "authority_rule"),
+    "contract_success": ("contract_document", "market_reward", "authority_rule"),
+    "cashflow": ("cashflow_control", "wealth_generation", "asset_retention"),
+    "asset": ("asset_retention", "wealth_generation", "long_term_accumulation"),
+    "expense_guard": ("cashflow_control", "loss_guard", "risk_detection"),
+    "investment": ("investment_judgment", "wealth_generation", "risk_detection"),
+    "relationship_entry": ("relationship_opening", "relationship_fit", "communication_expression"),
+    "relationship_trust": ("relationship_fit", "continuity", "public_reputation"),
+    "relationship_recovery": ("conflict_recovery", "relationship_fit", "communication_expression"),
+    "relationship_guard": ("peer_boundary", "conflict_recovery", "risk_detection"),
+    "cooperation_success": ("relationship_fit", "market_reward", "evaluation"),
+    "choice_fit": ("planning_judgment", "relationship_fit", "risk_detection"),
+    "love_progress": ("relationship_opening", "emotion_control", "relationship_fit"),
+    "love_guard": ("conflict_recovery", "peer_boundary", "risk_detection"),
+    "marriage_reality": ("spouse_connection", "domestic_stability", "contract_document", "negotiation_boundary"),
+    "marriage_guard": ("domestic_stability", "conflict_recovery", "risk_detection"),
+    "honor_growth": ("public_reputation", "evaluation", "authority_rise"),
+    "public_exposure": ("public_reputation", "communication_expression", "evaluation"),
+    "reputation_guard": ("public_reputation", "risk_detection", "communication_expression"),
+    "condition_vitality": ("practical_execution", "emotion_control", "continuity"),
+    "condition_guard": ("risk_detection", "responsibility", "continuity"),
+}
+
+
+ANNUAL_TEN_GOD_GROUP_ALIASES: dict[str, tuple[str, ...]] = {
+    "wealth": ("jeong_jae", "pyeon_jae", "정재", "편재"),
+    "output": ("sik_sin", "sang_gwan", "식신", "상관"),
+    "officer": ("jeong_gwan", "pyeon_gwan", "정관", "편관"),
+    "resource": ("jeong_in", "pyeon_in", "정인", "편인"),
+    "peer": ("bi_gyeon", "geob_jae", "비견", "겁재"),
+}
+
+
+ANNUAL_TEN_GOD_GROUP_DIRECT_TERMS: dict[str, tuple[str, ...]] = {
+    "wealth": (
+        "wealth",
+        "money",
+        "income",
+        "asset",
+        "contract",
+        "market",
+        "reward",
+        "재성",
+        "정재",
+        "편재",
+        "재물",
+        "수입",
+        "계약",
+        "보상",
+        "현실",
+    ),
+    "output": (
+        "output",
+        "market",
+        "reward",
+        "career",
+        "work",
+        "execution",
+        "expression",
+        "식상",
+        "식신",
+        "상관",
+        "생산",
+        "결과물",
+        "성과",
+        "표현",
+        "실무",
+    ),
+    "officer": (
+        "officer",
+        "authority",
+        "promotion",
+        "rule",
+        "public",
+        "responsibility",
+        "organization",
+        "관성",
+        "정관",
+        "편관",
+        "직책",
+        "평가",
+        "책임",
+        "권한",
+        "공식",
+    ),
+    "resource": (
+        "resource",
+        "document",
+        "support",
+        "recovery",
+        "expertise",
+        "retention",
+        "resource_learning",
+        "인성",
+        "정인",
+        "편인",
+        "문서",
+        "자격",
+        "학습",
+        "보호",
+        "회복",
+        "전문성",
+    ),
+    "peer": (
+        "peer",
+        "shared",
+        "boundary",
+        "relationship",
+        "contact",
+        "competition",
+        "비겁",
+        "비견",
+        "겁재",
+        "지인",
+        "동료",
+        "경쟁",
+        "공동",
+        "분배",
+        "관계",
+        "인연",
+    ),
+}
+
+
+ANNUAL_PROFILE_NARROW_DIRECT_TERMS: dict[str, tuple[str, ...]] = {
+    "growth": ("상승", "발전", "개선"),
+    "opportunity": ("기회", "제안", "선택지"),
+    "realization": ("성과", "결과", "보상"),
+    "change_management": ("변화", "전환", "적응"),
+    "stability": ("유지", "안정", "지속"),
+    "recovery": ("회복", "조정", "복구"),
+    "support": ("지원", "도움", "보호"),
+    "satisfaction": ("만족", "안정", "체감"),
+    "retention": ("잔존", "축적", "지속"),
+    "role_expansion": ("역할", "확장", "책임"),
+    "authority": ("권한", "직책", "명분"),
+    "expertise": ("전문성", "자격", "학습"),
+    "movement": ("이동", "전환", "변동"),
+    "competition_guard": ("경쟁", "경계", "선별"),
+    "burden_guard": ("부담", "책임", "관리"),
+    "contract_guard": ("계약", "문서", "조건"),
+    "contract_success": ("계약", "성사", "합의"),
+    "cashflow": ("현금", "유동성", "정산"),
+    "asset": ("자산", "축재", "소유"),
+    "expense_guard": ("지출", "손실", "방어"),
+    "investment": ("투자", "거래", "판단"),
+    "relationship_entry": ("인연", "연결", "만남"),
+    "relationship_trust": ("신뢰", "유대", "지속"),
+    "relationship_recovery": ("회복", "오해", "화해"),
+    "relationship_guard": ("갈등", "거리", "경계"),
+    "cooperation_success": ("협력", "공동", "성과"),
+    "choice_fit": ("선택", "적합", "신중"),
+    "love_progress": ("애정", "표현", "진전"),
+    "love_guard": ("거리", "오해", "갈등"),
+    "marriage_reality": ("결혼", "배우자", "합의"),
+    "marriage_guard": ("가정", "갈등", "조율"),
+    "honor_growth": ("인정", "평판", "평가"),
+    "public_exposure": ("대외", "노출", "영향력"),
+    "reputation_guard": ("평판", "구설", "오해"),
+    "condition_vitality": ("활력", "실행", "생활"),
+    "condition_guard": ("피로", "과로", "회복"),
+}
+
+
+ANNUAL_TEN_GOD_PROFILES: dict[str, dict[str, tuple[str, ...] | float]] = {
+    "growth": {"support": ("output", "wealth", "officer"), "pressure": ("peer",), "support_weight": 1.35, "pressure_weight": 0.85},
+    "opportunity": {"support": ("output", "peer", "wealth"), "pressure": ("resource",), "support_weight": 1.30, "pressure_weight": 0.55},
+    "realization": {"support": ("output", "wealth", "officer"), "pressure": ("peer",), "support_weight": 1.25, "pressure_weight": 0.80},
+    "change_management": {"support": ("resource", "officer"), "pressure": ("peer", "output"), "support_weight": 1.15, "pressure_weight": 0.95},
+    "stability": {"support": ("resource", "officer"), "pressure": ("peer", "output"), "support_weight": 1.20, "pressure_weight": 0.75},
+    "recovery": {"support": ("resource", "officer", "output"), "pressure": ("peer",), "support_weight": 1.18, "pressure_weight": 0.75},
+    "support": {"support": ("resource", "peer", "officer"), "pressure": ("wealth",), "support_weight": 1.16, "pressure_weight": 0.50},
+    "satisfaction": {"support": ("resource", "wealth"), "pressure": ("officer", "peer"), "support_weight": 1.00, "pressure_weight": 0.65},
+    "retention": {"support": ("wealth", "resource", "officer"), "pressure": ("peer", "output"), "support_weight": 1.20, "pressure_weight": 0.90},
+    "role_expansion": {"support": ("officer", "resource", "output"), "pressure": ("peer",), "support_weight": 1.22, "pressure_weight": 0.70},
+    "authority": {"support": ("officer", "resource", "wealth"), "pressure": ("peer", "output"), "support_weight": 1.28, "pressure_weight": 0.72},
+    "expertise": {"support": ("resource", "output"), "pressure": ("wealth", "peer"), "support_weight": 1.28, "pressure_weight": 0.52},
+    "movement": {"support": ("output", "peer", "wealth"), "pressure": ("resource", "officer"), "support_weight": 1.18, "pressure_weight": 0.58},
+    "competition_guard": {"support": ("officer", "resource"), "pressure": ("peer",), "support_weight": 1.20, "pressure_weight": 1.18},
+    "burden_guard": {"support": ("resource", "output"), "pressure": ("officer", "peer"), "support_weight": 1.12, "pressure_weight": 1.08},
+    "contract_guard": {"support": ("officer", "resource"), "pressure": ("peer", "wealth"), "support_weight": 1.26, "pressure_weight": 0.92},
+    "contract_success": {"support": ("wealth", "officer", "resource"), "pressure": ("peer",), "support_weight": 1.25, "pressure_weight": 0.75},
+    "cashflow": {"support": ("wealth", "resource", "officer"), "pressure": ("peer", "output"), "support_weight": 1.24, "pressure_weight": 0.86},
+    "asset": {"support": ("wealth", "resource", "officer"), "pressure": ("peer", "output"), "support_weight": 1.30, "pressure_weight": 0.78},
+    "expense_guard": {"support": ("resource", "officer"), "pressure": ("wealth", "peer", "output"), "support_weight": 1.18, "pressure_weight": 1.00},
+    "investment": {"support": ("wealth", "resource", "output"), "pressure": ("peer",), "support_weight": 1.12, "pressure_weight": 0.92},
+    "relationship_entry": {"support": ("peer", "output", "wealth"), "pressure": ("resource",), "support_weight": 1.16, "pressure_weight": 0.50},
+    "relationship_trust": {"support": ("officer", "resource"), "pressure": ("peer", "output"), "support_weight": 1.22, "pressure_weight": 0.72},
+    "relationship_recovery": {"support": ("resource", "output", "officer"), "pressure": ("peer",), "support_weight": 1.16, "pressure_weight": 0.84},
+    "relationship_guard": {"support": ("resource", "officer"), "pressure": ("peer", "output", "wealth"), "support_weight": 1.18, "pressure_weight": 1.02},
+    "cooperation_success": {"support": ("peer", "output", "officer"), "pressure": ("wealth",), "support_weight": 1.12, "pressure_weight": 0.55},
+    "choice_fit": {"support": ("resource", "officer"), "pressure": ("output", "peer"), "support_weight": 1.15, "pressure_weight": 0.70},
+    "love_progress": {"support": ("output", "wealth", "officer"), "pressure": ("resource",), "support_weight": 1.12, "pressure_weight": 0.48},
+    "love_guard": {"support": ("resource", "officer"), "pressure": ("peer", "output", "wealth"), "support_weight": 1.16, "pressure_weight": 1.00},
+    "marriage_reality": {"support": ("officer", "wealth", "resource"), "pressure": ("peer",), "support_weight": 1.24, "pressure_weight": 0.78},
+    "marriage_guard": {"support": ("resource", "officer"), "pressure": ("peer", "wealth", "output"), "support_weight": 1.16, "pressure_weight": 1.02},
+    "honor_growth": {"support": ("officer", "resource", "output"), "pressure": ("peer",), "support_weight": 1.25, "pressure_weight": 0.68},
+    "public_exposure": {"support": ("output", "officer"), "pressure": ("peer", "resource"), "support_weight": 1.16, "pressure_weight": 0.64},
+    "reputation_guard": {"support": ("resource", "officer"), "pressure": ("output", "peer"), "support_weight": 1.18, "pressure_weight": 0.95},
+    "condition_vitality": {"support": ("output", "resource"), "pressure": ("officer", "peer"), "support_weight": 1.08, "pressure_weight": 0.68},
+    "condition_guard": {"support": ("resource",), "pressure": ("officer", "output", "peer"), "support_weight": 1.18, "pressure_weight": 1.00},
+}
+
+
+ANNUAL_LABEL_TEN_GOD_PROFILE_OVERRIDES: dict[str, str] = {
+    "성과 보상도": "contract_success",
+    "수입 상승도": "growth",
+    "추가 수입 기회": "opportunity",
+    "목돈 형성": "asset",
+    "자산 증가": "asset",
+    "소비 통제력": "cashflow",
+    "투자 판단 안정성": "investment",
+    "신규 인연 유입": "relationship_entry",
+    "소개·연결운": "relationship_entry",
+    "결혼 인연 유입": "marriage_reality",
+    "결혼 구체화": "marriage_reality",
+    "결혼 결정": "marriage_reality",
+    "사회적 인정 상승도": "honor_growth",
+    "직함 상승도": "authority",
+    "명분 확보": "authority",
+}
+
+
+PRODUCT_DOMAIN_METRIC_SOURCE_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    "money": {
+        "재물 형성력": ("재물 형성력", "재물 잠재력", "재물 규모 확장력"),
+        "수입 창출력": ("수입 창출력", "재주 수익화", "성과 보상력"),
+        "자산화 성향": ("자산화 능력", "재정 안정성", "후반 축재력"),
+        "현금 운용력": ("자금 운용 안정성", "소비 통제력", "재정 방어력"),
+        "계약 안정성": ("계약·명의 안정성", "계약·문서 안정성", "채권·미수금 회수력"),
+        "공동재 관리": ("공동자금 운영력", "가족재산 경계력", "가족재산 관리력"),
+        "손실 회피력": ("재정 방어력", "부채·보증 관리력", "손실 회피력"),
+        "투자 판단력": ("투자·거래 판단력", "금전 기준성", "계약·명의 안정성"),
+        "보상 회수력": ("성과 보상력", "채권·미수금 회수력", "보상 협상력"),
+        "후반 축재성": ("후반 축재력", "자산화 능력", "재정 안정성"),
+    },
+    "career": {
+        "직업 성취도": ("성취 축적력", "직업 성취력", "직업 적성"),
+        "조직 적응성": ("조직 적응력", "직업 분야", "책임·권한 균형"),
+        "직책 상승성": ("승진·직함 가능성", "평가·명예 전환력", "사회적 도약성"),
+        "전문성 축적": ("전문 자산화", "전문성 축적", "직무 적합성"),
+        "실무 처리력": ("책임·권한 균형", "성취 축적력", "업무 조건 감별력"),
+        "기획 판단력": ("직업 분야", "업무 조건 감별력", "보상 협상력"),
+        "권한 확보력": ("권한 확보력", "책임·권한 균형", "승진·직함 가능성"),
+        "평가 관리력": ("평가·명예 전환력", "성취 축적력", "사회적 도약성"),
+        "독립 업무성": ("독립 가능성", "직업 분야", "소속 전환력"),
+        "직업 지속성": ("성취 축적력", "조직 적응력", "소속 전환력"),
+    },
+    "personality": {
+        "자기 기준": ("판단 방식", "자기 신뢰", "판단 기준", "자기 기준"),
+        "감정 조절": ("감정 조절", "감정 처리", "대인 조율감"),
+        "실행 속도": ("실행 속도", "행동 속도", "변화 수용성"),
+        "신중성": ("문제 해결력", "판단 방식", "자기 신뢰", "선택의 방향"),
+        "몰입 성향": ("몰입력", "관심 몰입도", "몰입 방향"),
+        "관계 거리 조절력": ("관계 거리 조절력", "관계 거리감", "대인 거리감", "대인 태도"),
+        "문제 해결력": ("문제 해결력", "압박 대응력", "압박 반응", "책임 감각"),
+        "변화 수용성": ("실행 방식", "실행 속도", "변화 수용성", "전환 대응력"),
+        "표현 방식": ("감정 조절", "감정 반응성", "애정 표현"),
+        "책임 감각": ("문제 해결력", "자기 신뢰", "공식 책임 수행력"),
+        "인정 욕구": ("공적 인정", "사회적 인정", "평가·명예 전환력"),
+        "위험 감지": ("문제 해결력", "압박 대응력", "재정 방어력"),
+    },
+    "love": {
+        "이성 대상 호감도": ("호감 기준", "인연 형성", "끌림의 기준"),
+        "애정 표현": ("애정 표현", "애정 표현성", "표현력"),
+        "관계 지속성": ("관계 지속력", "관계 지속성", "관계 진전"),
+        "감정 안정성": ("정서 수용력", "감정 안정성", "감정 조절"),
+        "선택 신중성": ("상대 선택", "상대 신뢰", "상대 선택력"),
+        "갈등 회복력": ("갈등 회복력", "오해 조정력", "갈등 관리력"),
+        "상대 의존도": ("상대 신뢰", "관계 속도", "연락·거리 안정성", "상대 의존도"),
+        "관계 주도성": ("관계 주도권", "관계 속도 조절력", "상대 선택"),
+        "인연 지속성": ("관계 지속력", "결혼 연결력", "인연 형성"),
+        "이별 위험도": ("갈등 회복력", "오해 조정력", "관계 지속력", "이별 위험도"),
+    },
+    "marriage": {
+        "결혼 안정성": ("생활 안정", "결혼 현실화력", "결혼 지속력"),
+        "배우자 인연": ("배우자 조건", "배우자 복", "결혼 연결"),
+        "생활 조율성": ("주거·생활 설계", "생활비 기준성", "가정 운영"),
+        "가정 책임감": ("가정 운영", "가족 책임 경계력", "자녀·양육 책임"),
+        "재정 합의성": ("부부 재정", "생활비 기준성", "주거·생활 설계"),
+        "가족 관계성": ("가족 책임 경계력", "배우자 가족 경계", "가정 운영"),
+        "장기 유지성": ("결혼 지속력", "생활 안정", "혼인 위기 대응력"),
+        "배우자 충돌도": ("부부 갈등 조정력", "부부 갈등 회복성", "혼인 위기 대응력", "배우자 충돌도"),
+        "결혼 시기성": ("결혼 적기", "결혼 현실화력", "결혼 연결"),
+        "결혼 후 안정도": ("생활 안정", "가정 운영", "결혼 지속력"),
+    },
+    "honor": {
+        "사회적 인정": ("공적 인정", "사회적 인정", "평가·명예 전환력"),
+        "평판 형성": ("평판 지속력", "평판 관리", "공적 인정"),
+        "직함 상승성": ("직책 상승 가능성", "승진·직함 가능성", "공식 책임 수행력"),
+        "공적 신뢰도": ("공식 책임 수행력", "공적 인정", "평판 지속력"),
+        "책임 수용도": ("공식 책임 수행력", "책임·권한 균형", "책임 수용도"),
+        "조직 내 존재감": ("공적 인정", "공식 책임 수행력", "사회적 도약성"),
+        "권위 확보력": ("직책 상승 가능성", "권한 확보력", "공식 책임 수행력"),
+        "명분 관리": ("평판 관리", "명예를 지켜내는 기준", "평판 지속력"),
+    },
+    "social": {
+        "친화성": ("인연 형성력", "표현 방식", "애정 표현성"),
+        "신뢰 형성": ("상대 신뢰 감별력", "신중성", "관계 지속력"),
+        "관계 유지성": ("관계 지속력", "연락·거리 안정성", "갈등 회복력"),
+        "거리 조절": ("관계 거리감", "연락·거리 안정성", "주변 개입 관리력"),
+        "협력성": ("주변 개입 관리력", "책임 감각", "감정 조절"),
+        "경쟁 노출도": ("관계 거리감", "위험 감지", "주변 개입 관리력"),
+        "말의 영향력": ("대인 영향력", "표현 방식", "애정 표현성"),
+        "갈등 회피력": ("갈등 회복력", "오해 조정력", "감정 조절"),
+        "지인 덕": ("인연 형성력", "관계 지속력", "주변 개입 관리력"),
+        "지인 피해/손실": ("위험 감지", "관계 거리감", "주변 개입 관리력", "가족 책임 경계력"),
+    },
+}
+
+
+PRODUCT_METRIC_REJECT_SOURCE_LABELS: dict[str, dict[str, tuple[str, ...]]] = {
+    "social": {
+        "말의 영향력": ("가정 운영", "가정 운영력", "생활 조율성", "생활 안정"),
+    },
+}
+
+
+PRODUCT_METRIC_BASIS_KEYWORD_OVERRIDES: dict[str, dict[str, tuple[str, ...]]] = {
+    "social": {
+        "말의 영향력": (
+            "말의 영향력",
+            "대인 영향력",
+            "언어 영향력",
+            "표현 전달력",
+            "의견 전달",
+            "설명력",
+            "맥락 이해",
+        ),
+    },
+}
+
+
+PRODUCT_METRIC_ENGINE_SIGNAL_PROFILES: dict[str, dict[str, tuple[str, ...]]] = {
+    "money": {
+        "재물 형성력": ("wealth_generation", "asset_retention", "cashflow_control", "loss_guard"),
+        "수입 창출력": ("wealth_generation", "output_to_wealth", "market_reward"),
+        "자산화 성향": ("asset_retention", "resource_storage", "long_term_accumulation"),
+        "현금 운용력": ("cashflow_control", "resource_storage", "loss_guard"),
+        "계약 안정성": ("contract_document", "authority_rule", "loss_guard"),
+        "공동재 관리": ("shared_asset", "peer_boundary", "contract_document"),
+        "손실 회피력": ("loss_guard", "contract_document", "risk_detection"),
+        "투자 판단력": ("investment_judgment", "risk_detection", "wealth_generation"),
+        "보상 회수력": ("market_reward", "authority_rule", "contract_document"),
+        "후반 축재성": ("long_term_accumulation", "asset_retention", "resource_storage"),
+    },
+    "career": {
+        "직업 성취도": ("career_result", "expertise", "evaluation", "continuity"),
+        "조직 적응성": ("organization_rule", "authority_rule", "relationship_fit"),
+        "직책 상승성": ("authority_rise", "evaluation", "public_reputation"),
+        "전문성 축적": ("expertise", "resource_learning", "continuity"),
+        "실무 처리력": ("practical_execution", "problem_solving", "responsibility"),
+        "기획 판단력": ("planning_judgment", "resource_learning", "problem_solving"),
+        "권한 확보력": ("authority_rule", "authority_rise", "negotiation_boundary"),
+        "평가 관리력": ("evaluation", "public_reputation", "contract_document"),
+        "독립 업무성": ("self_direction", "practical_execution", "planning_judgment"),
+        "직업 지속성": ("continuity", "organization_rule", "change_adaptation"),
+    },
+    "personality": {
+        "자기 기준": ("self_direction", "planning_judgment", "resource_learning"),
+        "감정 조절": ("emotion_control", "relationship_fit", "conflict_recovery"),
+        "실행 속도": ("practical_execution", "change_adaptation", "output_to_wealth"),
+        "신중성": ("risk_detection", "planning_judgment", "resource_learning"),
+        "몰입 성향": ("expertise", "continuity", "resource_learning"),
+        "관계 거리 조절력": ("peer_boundary", "relationship_fit", "negotiation_boundary"),
+        "문제 해결력": ("problem_solving", "practical_execution", "risk_detection"),
+        "변화 수용성": ("change_adaptation", "practical_execution", "relationship_fit"),
+        "표현 방식": ("communication_expression", "output_to_wealth", "emotion_control"),
+        "책임 감각": ("responsibility", "authority_rule", "continuity"),
+        "인정 욕구": ("public_reputation", "evaluation", "authority_rise"),
+        "위험 감지": ("risk_detection", "loss_guard", "contract_document"),
+    },
+    "love": {
+        "이성 대상 호감도": ("relationship_opening", "communication_expression", "emotion_control"),
+        "애정 표현": ("communication_expression", "emotion_control", "relationship_fit"),
+        "관계 지속성": ("relationship_fit", "continuity", "conflict_recovery"),
+        "감정 안정성": ("emotion_control", "relationship_fit", "risk_detection"),
+        "선택 신중성": ("planning_judgment", "risk_detection", "relationship_fit"),
+        "갈등 회복력": ("conflict_recovery", "communication_expression", "emotion_control"),
+        "상대 의존도": ("self_direction", "peer_boundary", "emotion_control"),
+        "관계 주도성": ("self_direction", "negotiation_boundary", "relationship_fit"),
+        "인연 지속성": ("continuity", "relationship_fit", "relationship_opening"),
+        "이별 위험도": ("conflict_recovery", "risk_detection", "peer_boundary"),
+    },
+    "marriage": {
+        "결혼 안정성": ("domestic_stability", "relationship_fit", "continuity"),
+        "배우자 인연": ("spouse_connection", "relationship_opening", "continuity"),
+        "생활 조율성": ("domestic_stability", "negotiation_boundary", "relationship_fit"),
+        "가정 책임감": ("responsibility", "domestic_stability", "continuity"),
+        "재정 합의성": ("cashflow_control", "contract_document", "negotiation_boundary"),
+        "가족 관계성": ("relationship_fit", "peer_boundary", "domestic_stability"),
+        "장기 유지성": ("continuity", "domestic_stability", "conflict_recovery"),
+        "배우자 충돌도": ("conflict_recovery", "negotiation_boundary", "emotion_control"),
+        "결혼 시기성": ("spouse_connection", "timing_activation", "domestic_stability"),
+        "결혼 후 안정도": ("domestic_stability", "continuity", "cashflow_control"),
+    },
+    "honor": {
+        "사회적 인정": ("public_reputation", "evaluation", "career_result"),
+        "평판 형성": ("public_reputation", "evaluation", "continuity"),
+        "직함 상승성": ("authority_rise", "public_reputation", "authority_rule"),
+        "공적 신뢰도": ("authority_rule", "public_reputation", "responsibility"),
+        "책임 수용도": ("responsibility", "authority_rule", "continuity"),
+        "조직 내 존재감": ("organization_rule", "public_reputation", "communication_expression"),
+        "권위 확보력": ("authority_rise", "authority_rule", "evaluation"),
+        "명분 관리": ("public_reputation", "contract_document", "planning_judgment"),
+    },
+    "social": {
+        "친화성": ("relationship_opening", "communication_expression", "relationship_fit"),
+        "신뢰 형성": ("relationship_fit", "public_reputation", "continuity"),
+        "관계 유지성": ("continuity", "relationship_fit", "relationship_opening"),
+        "거리 조절": ("peer_boundary", "negotiation_boundary", "emotion_control"),
+        "협력성": ("relationship_fit", "shared_asset", "organization_rule"),
+        "경쟁 노출도": ("peer_boundary", "risk_detection", "authority_rule"),
+        "말의 영향력": ("communication_expression", "public_reputation", "relationship_fit"),
+        "갈등 회피력": ("conflict_recovery", "peer_boundary", "communication_expression"),
+        "지인 덕": ("relationship_opening", "relationship_fit", "shared_asset"),
+        "지인 피해/손실": ("loss_guard", "peer_boundary", "shared_asset"),
+    },
+}
+
+
+PRODUCT_METRIC_ENGINE_SIGNAL_TERMS: dict[str, tuple[str, ...]] = {
+    "wealth_generation": ("재성", "정재", "편재", "재물", "수입", "소득", "돈", "시장", "거래", "재정"),
+    "asset_retention": ("축재", "자산", "보유", "저축", "소유", "명의", "재산", "축적", "잔존", "남는", "공동"),
+    "cashflow_control": ("현금", "유동성", "지출", "통제", "운용", "생활비", "정산", "재정", "합의", "공동"),
+    "loss_guard": ("손실", "방어", "부채", "보증", "사기", "위험", "피해", "손해"),
+    "output_to_wealth": ("식상", "식신", "상관", "생산", "결과물", "성과", "기술", "재주", "수익화"),
+    "market_reward": ("보상", "성과급", "협상", "회수", "미수금", "채권", "대가", "기회", "제안", "선택지"),
+    "resource_storage": ("인성", "정인", "편인", "문서", "자격", "학습", "보호", "기반"),
+    "long_term_accumulation": ("후반", "장기", "중년", "말년", "복리", "누적", "지속"),
+    "contract_document": ("계약", "문서", "명의", "권리", "정산", "서류", "조건", "약속", "성사", "합의", "안정성"),
+    "authority_rule": ("관성", "정관", "편관", "규칙", "책임", "권한", "제도", "공식", "명분", "확보"),
+    "shared_asset": ("공동", "가족", "배우자", "동업", "공유", "분배", "공동재"),
+    "peer_boundary": ("비겁", "비견", "겁재", "지인", "경쟁", "동료", "경계", "몫", "선별", "거리", "거리감"),
+    "risk_detection": ("위험", "주의", "손실", "충", "형", "파", "해", "불안정", "변수", "위험 감지", "예민", "불일치", "차질"),
+    "investment_judgment": ("투자", "거래", "판단", "매매", "기대", "수익", "리스크", "적합", "안정성"),
+    "career_result": ("직업", "성과", "성취", "경력", "업무", "직무", "결과", "상승", "개선", "발전", "향상", "실현"),
+    "expertise": ("전문", "기술", "자격", "학습", "숙련", "지식", "포트폴리오", "몰입", "집중", "탐구", "전문성"),
+    "evaluation": ("평가", "인정", "평판", "보상", "기여", "성과", "상사", "상승"),
+    "continuity": ("지속", "유지", "안정", "장기", "꾸준", "반복", "누적", "몰입", "잔존", "연말"),
+    "organization_rule": ("조직", "회사", "상사", "규정", "공식", "보고", "협업", "지원", "도움"),
+    "relationship_fit": ("관계", "신뢰", "협력", "인연", "대인", "유대", "친밀", "지원", "도움", "귀인", "적합", "애정", "심화"),
+    "authority_rise": ("직책", "승진", "직함", "권한", "책임", "대표", "상승"),
+    "public_reputation": ("명예", "평판", "인정", "대외", "공적", "신뢰", "노출"),
+    "responsibility": ("책임", "수용", "마무리", "감당", "역할", "의무", "관리", "부담"),
+    "practical_execution": ("실무", "처리", "실행", "현장", "마감", "절차", "수행", "활력"),
+    "problem_solving": ("해결", "문제", "대응", "회복", "조정", "개선", "대안"),
+    "planning_judgment": ("기획", "판단", "기준", "선택", "계획", "우선순위", "검토", "적합", "신중", "선별", "가치 선별"),
+    "negotiation_boundary": ("조율", "합의", "경계", "권한", "범위", "협상", "기준", "미래", "생활 조율", "갈등 조정", "거리감"),
+    "self_direction": ("자기", "독립", "주도", "주도권", "기준", "자율", "결정", "방향", "자립", "자립성"),
+    "change_adaptation": ("변화", "변동", "전환", "이동", "확장", "적응", "수용", "개선", "발전"),
+    "resource_learning": ("인성", "학습", "공부", "문서", "자격", "자료", "근거", "신뢰", "수용"),
+    "emotion_control": ("감정", "정서", "조절", "안정", "표현", "기복", "반응", "애정", "심화", "감수성", "감성", "불안", "서운함", "예민함", "수용"),
+    "conflict_recovery": ("갈등", "회복", "오해", "조정", "화해", "완화", "복구", "거리"),
+    "communication_expression": ("말", "표현", "설명", "전달", "대화", "소통", "언어", "영향력"),
+    "relationship_opening": ("호감", "인연", "만남", "소개", "개방", "연결", "시작", "기회", "유입", "신규", "제안", "연애", "활성", "대상"),
+    "domestic_stability": ("가정", "생활", "안정", "주거", "부부", "가족", "유지", "만족", "생활 기준", "생활 설계", "가정 운영"),
+    "spouse_connection": ("배우자", "혼인", "결혼", "인연", "상대", "부부", "배필", "미래", "배우자 조건", "혼인 논의"),
+    "timing_activation": ("시기", "대운", "세운", "연도", "발동", "흐름", "전환", "적기", "시기성", "결혼 적기", "혼인 논의"),
+}
+
+
+def _product_metric_rejects_source(domain: str, label: str, item: dict[str, Any]) -> bool:
+    source_label = _product_source_label(item)
+    if not source_label:
+        return False
+    rejected = PRODUCT_METRIC_REJECT_SOURCE_LABELS.get(domain, {}).get(label, ())
+    if not rejected:
+        return False
+    source_key = _compact_match_key(source_label)
+    return any(source_key == _compact_match_key(value) for value in rejected)
+
+
+PRODUCT_DOMAIN_METRIC_MEANINGS: dict[str, dict[str, str]] = {
+    "money": {
+        "재물 형성력": "재물 형성력은 벌어들인 자원을 장기간 보유 가능한 재산으로 바꾸어 가는 종합적인 힘을 뜻합니다. 단순한 수입 규모가 아니라 지출 통제, 저축의 지속성, 자산 배분, 목표 관리가 함께 반영됩니다.",
+        "수입 창출력": "수입 창출력은 노동, 사업, 전문 기술, 거래, 콘텐츠 등 자신의 자원을 시장 가치로 전환하여 반복적인 소득을 만들어 내는 능력을 말합니다. 기회 포착, 협상, 직업 경쟁력, 수익원 확장 가능성을 함께 살핍니다.",
+        "자산화 성향": "자산화 성향은 현재의 소득과 노력을 미래에도 가치가 남는 형태로 전환하려는 경향입니다. 예금, 투자 자산, 부동산뿐 아니라 지식재산, 자격, 기술, 사업 기반처럼 반복적으로 가치를 만드는 자원도 포함됩니다.",
+        "현금 운용력": "현금 운용력은 들어오는 돈과 나가는 돈의 시점을 관리하고, 필요한 순간에 사용할 수 있는 유동성을 확보하는 능력입니다. 생활비, 비상금, 결제 일정, 단기 부채, 여유 자금 배분이 핵심입니다.",
+        "계약 안정성": "계약 안정성은 근로계약, 임대차, 대출, 보험, 투자, 사업 거래 등 금전과 권리가 얽힌 약속을 안전하게 체결하고 관리하는 능력을 의미합니다. 조건 확인, 문서 보관, 책임 범위, 해지와 분쟁 가능성을 함께 봅니다.",
+        "공동재 관리": "공동재 관리는 부부, 가족, 동업자, 조직 등 여러 사람이 함께 소유하거나 사용하는 돈과 자산을 투명하고 공정하게 운영하는 능력입니다. 기여 비율, 사용 권한, 기록, 책임 분담, 합의 절차가 포함됩니다.",
+        "손실 회피력": "손실 회피력은 금전적 위험을 미리 감지하고, 손실 규모를 제한하거나 회복 가능성을 남겨 두는 능력입니다. 분산, 보험, 비상 자금, 손절 기준, 사기 예방, 과도한 부채 억제가 주요 요소입니다.",
+        "투자 판단력": "투자 판단력은 기대 수익, 위험, 기간, 유동성, 정보의 신뢰도, 자신의 감당 범위를 종합하여 투자 결정을 내리는 능력입니다. 유행을 맞히는 재능이 아니라 판단 절차의 질을 평가합니다.",
+        "보상 회수력": "보상 회수력은 자신의 노동, 권리, 손해에 대해 정당한 금전적 보상을 실제로 받아 내는 능력입니다. 급여 협상, 미수금 회수, 환불, 보험금, 손해 배상, 비용 정산, 성과 보상 청구가 포함됩니다.",
+        "후반 축재성": "후반 축재성은 경력, 경험, 관계망, 복리 효과가 쌓인 뒤 인생의 중후반부에 자산이 더 안정적으로 증가하는 경향을 말합니다. 젊은 시기의 소득보다 시간이 지날수록 축적 구조가 강해지는지를 봅니다.",
+    },
+    "career": {
+        "직업 성취도": "직업 성취도는 자신의 직업 목표를 실제 결과로 바꾸고, 그 성과를 경력의 단계로 축적하는 종합 지표입니다. 단순한 연봉이나 직급뿐 아니라 목표 달성, 영향력, 보상, 성장감, 직업 만족을 함께 반영합니다.",
+        "조직 적응성": "조직 적응성은 회사나 단체의 공식 규정과 비공식 관행을 파악하고, 자신의 역할을 그 안에서 효과적으로 수행하는 능력입니다. 협업, 보고, 의사결정 구조, 문화 이해, 역할 변화에 대한 대응이 포함됩니다.",
+        "직책 상승성": "직책 상승성은 더 큰 책임과 의사결정 권한을 가진 역할로 이동할 가능성과 준비도를 뜻합니다. 성과, 리더십 신뢰, 후임 양성, 조직 필요, 승진 후보로서의 가시성을 함께 봅니다.",
+        "전문성 축적": "전문성 축적은 한 분야의 지식과 기술을 반복적으로 깊게 쌓아, 다른 사람이 쉽게 대체하기 어려운 역량으로 만드는 능력입니다. 경험의 양보다 학습, 적용, 기록, 검증, 전수의 누적을 봅니다.",
+        "실무 처리력": "실무 처리력은 주어진 과제를 정확한 결과물로 바꾸고, 기한과 품질을 관리하여 끝까지 마무리하는 능력입니다. 우선순위, 세부 확인, 일정 관리, 협업 요청, 후속 조치가 핵심입니다.",
+        "기획 판단력": "기획 판단력은 막연한 요구를 명확한 문제로 정의하고, 목표·우선순위·자원·위험을 구조화하여 실행 가능한 계획으로 만드는 능력입니다. 불완전한 정보 속에서 무엇을 먼저 결정할지 판단하는 힘도 포함됩니다.",
+        "권한 확보력": "권한 확보력은 맡은 책임을 수행하는 데 필요한 의사결정권, 예산, 정보, 인력, 일정 조정권을 실제로 얻어 내는 능력입니다. 신뢰, 협상, 역할 명확화, 이해관계 조정이 함께 작용합니다.",
+        "평가 관리력": "평가 관리력은 자신의 성과가 조직의 평가 기준에 맞게 이해되고 기록되도록 관리하는 능력입니다. 목표 합의, 진행 공유, 성과 근거, 피드백 반영, 기여도 설명이 포함됩니다.",
+        "독립 업무성": "독립 업무성은 세밀한 지시나 지속적인 감독 없이도 목표를 이해하고, 필요한 정보를 찾아 스스로 일을 진행하는 능력입니다. 자기 동기, 범위 설정, 판단, 문제 해결, 진행 공유, 책임 완수가 포함됩니다.",
+        "직업 지속성": "직업 지속성은 한 번의 성과가 아니라 장기간에 걸쳐 일할 수 있는 역량과 생활 기반을 유지하는 능력입니다. 건강, 동기, 학습, 관계, 시장 변화 대응, 소진 관리, 경력 전환 가능성을 함께 살핍니다.",
+    },
+    "personality": {
+        "자기 기준": "자기 기준은 타인의 기대나 분위기만 따르지 않고, 자신의 가치관과 판단 원칙에 따라 선택하는 정도를 뜻합니다. 무엇을 중요하게 여기고 어디까지 허용할지에 대한 내부 기준의 선명함을 봅니다.",
+        "감정 조절": "감정 조절은 자신의 감정을 알아차리고, 상황에 맞는 방식으로 표현하거나 진정시키며, 감정이 행동 전체를 지배하지 않게 하는 능력입니다. 감정을 없애는 것이 아니라 다루는 힘에 가깝습니다.",
+        "실행 속도": "실행 속도는 생각이나 결정을 실제 행동으로 옮기기까지 걸리는 시간과 추진 리듬을 의미합니다. 시작의 빠르기, 시험 행동, 수정 속도가 주요 요소입니다.",
+        "신중성": "신중성은 행동하기 전에 정보, 결과, 위험, 타인에게 미칠 영향을 검토하는 정도입니다. 확인 습관과 결정의 숙고 깊이를 반영합니다.",
+        "몰입 성향": "몰입 성향은 한 대상이나 과제에 주의와 에너지를 깊게 집중하는 정도입니다. 집중의 강도, 지속 시간, 주변 자극을 차단하는 능력을 봅니다.",
+        "관계 거리 조절력": "관계 거리 조절력은 사람과 가까워지는 속도와 개인 영역의 범위를 관계의 단계와 상황에 맞게 조정하는 능력입니다. 친밀감을 받아들이면서도 지나친 개입이나 의존을 막는 정도를 봅니다.",
+        "문제 해결력": "문제 해결력은 문제가 생겼을 때 원인을 구분하고, 가능한 대안을 비교한 뒤, 실행과 검증을 통해 상황을 개선하는 능력입니다. 단순한 지식보다 해결 절차의 안정성을 봅니다.",
+        "변화 수용성": "변화 수용성은 새로운 정보, 환경, 역할, 관계 방식이 등장했을 때 기존 생각과 행동을 조정할 수 있는 정도를 뜻합니다.",
+        "표현 방식": "표현 방식은 생각, 감정, 요구, 거절을 얼마나 분명하고 직접적으로 전달하는지를 나타냅니다. 말의 양보다 의미가 상대에게 정확히 전달되는 정도를 봅니다.",
+        "책임 감각": "책임 감각은 자신이 맡은 역할과 선택의 결과를 인식하고, 문제가 생겼을 때 회피하지 않고 마무리하려는 정도를 뜻합니다.",
+        "인정 욕구": "인정 욕구는 타인에게 능력, 가치, 매력을 확인받고 싶어 하는 정도입니다. 칭찬, 지위, 관심, 성과 평가에 대한 민감도를 반영합니다.",
+        "위험 감지": "위험 감지는 사람, 상황, 계획 속의 불일치와 잠재적 문제를 초기에 알아차리는 민감도입니다. 안전, 손실, 배신, 일정 차질, 감정 변화의 신호를 읽는 능력을 포함합니다.",
+    },
+    "love": {
+        "이성 대상 호감도": "이성 대상 호감도는 연애 관계의 가능성이 있는 상대에게 첫인상, 대화, 분위기, 태도를 통해 긍정적인 관심을 불러일으키는 정도를 뜻합니다. 외모만이 아니라 편안함, 매력 전달, 정서적 개방성, 상호 적합성이 함께 작용합니다.",
+        "애정 표현": "애정 표현은 좋아하는 마음을 말, 행동, 접촉, 시간, 배려, 선물 등 상대가 알아볼 수 있는 방식으로 전달하는 정도입니다.",
+        "관계 지속성": "관계 지속성은 연애가 시작된 뒤 관심과 노력을 꾸준히 유지하고, 일상 속에서 관계를 관리하는 능력을 뜻합니다. 연락, 약속, 신뢰, 책임, 생활 변화에 대한 조정이 포함됩니다.",
+        "감정 안정성": "연애 영역의 감정 안정성은 상대의 반응, 연락 빈도, 갈등, 질투, 불확실성에 의해 감정이 얼마나 크게 흔들리는지를 나타냅니다.",
+        "선택 신중성": "선택 신중성은 연애 상대를 정하고 관계를 깊게 만들기 전에 가치관, 생활 방식, 신뢰, 장기 적합성을 충분히 살피는 정도입니다.",
+        "갈등 회복력": "갈등 회복력은 다툼이나 실망이 생긴 뒤 감정을 정리하고, 문제를 대화하며, 신뢰와 친밀감을 다시 회복하는 능력입니다.",
+        "상대 의존도": "상대 의존도는 연애 관계에서 정서 안정과 판단 기준을 상대의 반응에 맡기는 정도입니다. 연락, 확인, 결정, 생활 리듬이 상대에게 얼마나 좌우되는지를 나타냅니다.",
+        "관계 주도성": "관계 주도성은 만남을 시작하고, 관계의 속도와 방향을 제안하며, 필요한 대화를 먼저 꺼내는 정도를 뜻합니다.",
+        "인연 지속성": "인연 지속성은 거리, 시간, 환경 변화가 있어도 특정 상대와의 연결이 쉽게 끊어지지 않고 다시 이어지는 경향을 뜻합니다. 공통 관계망, 반복적인 접점, 정서적 여운, 상호 관심이 함께 작용합니다.",
+        "이별 위험도": "이별 위험도는 반복 갈등, 신뢰 손상, 소통 단절, 생활 목표의 불일치가 관계의 단절로 이어질 가능성을 나타냅니다.",
+    },
+    "marriage": {
+        "결혼 안정성": "결혼 안정성은 신뢰, 약속, 생활 구조, 갈등 조정, 책임 분담이 균형을 이루어 결혼 관계가 쉽게 흔들리지 않는 정도를 뜻합니다.",
+        "배우자 인연": "배우자 인연은 결혼에 적합한 상대를 만나고, 서로가 장기적 약속을 선택하는 관계로 발전할 가능성을 나타냅니다. 만남의 수보다 상호 준비도와 현실적 적합성을 중시합니다.",
+        "생활 조율성": "생활 조율성은 수면, 식사, 청소, 가사, 여가, 사생활, 시간 사용처럼 일상의 작은 차이를 협의하고 조정하는 능력입니다.",
+        "가정 책임감": "가정 책임감은 배우자와 가족의 생활, 돌봄, 의사결정, 위기 대응에 자신의 역할을 꾸준히 수행하려는 정도를 뜻합니다.",
+        "재정 합의성": "재정 합의성은 부부가 수입, 지출, 저축, 부채, 투자, 가족 지원에 관한 기준을 공유하고 납득 가능한 방식으로 결정하는 정도입니다.",
+        "가족 관계성": "가족 관계성은 양가 가족과의 친밀도, 의무, 지원, 간섭, 경계를 부부가 함께 조정하는 능력을 의미합니다.",
+        "장기 유지성": "장기 유지성은 자녀, 이사, 경력 변화, 질병, 노화처럼 생애 단계가 바뀌어도 결혼 관계를 지속적으로 재조정하는 능력입니다.",
+        "배우자 충돌도": "배우자 충돌도는 가치관, 생활 습관, 감정 표현, 가족, 재정 문제에서 의견 대립이 반복되는 정도를 나타냅니다.",
+        "결혼 시기성": "결혼 시기성은 특정 시점에 관계, 심리, 생활, 재정, 가족 환경이 결혼을 현실적으로 추진하기에 얼마나 맞물려 있는지를 뜻합니다.",
+        "결혼 후 안정도": "결혼 후 안정도는 혼인, 동거, 공동 재정, 가족 역할 변화가 시작된 뒤 새로운 생활 체계에 얼마나 원활히 적응하는지를 나타냅니다.",
+    },
+    "honor": {
+        "사회적 인정": "사회적 인정은 개인의 능력, 성과, 기여가 주변과 사회에서 가치 있는 것으로 받아들여지는 정도입니다. 공식 수상뿐 아니라 추천, 초청, 영향력, 반복적인 긍정 평가도 포함됩니다.",
+        "평판 형성": "평판 형성은 반복된 행동과 성과가 주변 사람들의 공통된 평가로 굳어지는 정도입니다. 일관성, 신뢰, 가시성, 이야기의 확산이 주요 요소입니다.",
+        "직함 상승성": "직함 상승성은 조직, 단체, 전문 분야에서 더 높은 공식 명칭과 대표성을 부여받을 가능성을 뜻합니다. 직급, 위원, 책임자, 대표, 전문가 타이틀 등이 포함됩니다.",
+        "공적 신뢰도": "공적 신뢰도는 업무와 사회적 역할에서 약속, 판단, 정보, 책임을 믿을 수 있는 사람으로 평가받는 정도입니다.",
+        "책임 수용도": "책임 수용도는 영향력이 커질수록 따라오는 의무, 판단, 공개적 검증을 기꺼이 감당하려는 정도입니다.",
+        "조직 내 존재감": "조직 내 존재감은 회의, 의사결정, 협업, 위기 대응에서 개인의 의견과 역할이 얼마나 분명하게 인식되는지를 뜻합니다.",
+        "권위 확보력": "권위 확보력은 전문성, 일관성, 책임, 공식 지위를 바탕으로 자신의 판단과 지침이 타인에게 정당하게 받아들여지는 정도입니다.",
+        "명분 관리": "명분 관리는 자신의 결정과 행동이 왜 필요한지, 어떤 원칙과 절차에 근거하는지를 이해관계자에게 설득력 있게 설명하는 능력입니다.",
+    },
+    "social": {
+        "친화성": "친화성은 낯선 사람이나 다양한 성향의 사람과 편안한 분위기를 만들고, 관계의 첫 문턱을 낮추는 정도를 뜻합니다.",
+        "신뢰 형성": "신뢰 형성은 말과 행동의 일치, 약속 준수, 비밀 유지, 정직한 소통을 통해 상대가 안심하고 관계를 이어가게 하는 능력입니다.",
+        "관계 유지성": "관계 유지성은 시간이 지나거나 생활 환경이 달라져도 필요한 연락과 관심을 이어 가는 능력입니다.",
+        "거리 조절": "거리 조절은 관계의 단계와 상황에 맞게 친밀감, 정보 공유, 도움, 개입의 범위를 조정하는 능력입니다.",
+        "협력성": "협력성은 공동 목표를 위해 정보와 자원을 나누고, 역할을 조정하며, 자신의 이익과 집단의 필요를 균형 있게 맞추는 정도입니다.",
+        "경쟁 노출도": "경쟁 노출도는 성과, 관심, 자원, 지위를 둘러싼 비교와 견제에 놓이는 정도를 나타냅니다.",
+        "말의 영향력": "말의 영향력은 자신의 설명, 의견, 조언, 감정 표현이 상대의 판단과 행동에 변화를 일으키는 정도입니다. 표현력뿐 아니라 신뢰, 타이밍, 맥락 이해가 함께 작용합니다.",
+        "갈등 회피력": "갈등 회피력은 불필요한 충돌이 커지기 전에 표현, 타이밍, 거리, 중재 방식을 조절하여 문제를 완화하는 능력입니다.",
+        "지인 덕": "지인 덕은 친구, 동료, 선후배, 가족, 커뮤니티 등 기존 관계망을 통해 도움, 정보, 기회, 보호를 얻는 정도입니다.",
+        "지인 피해/손실": "지인 피해/손실은 가까운 사람의 부탁, 보증, 금전 거래, 정보 유출, 갈등 전이로 손해를 떠안을 가능성을 나타냅니다.",
+    },
+}
+
+
+def _product_metric_meaning(domain: str, label: str) -> str:
+    return PRODUCT_DOMAIN_METRIC_MEANINGS.get(domain, {}).get(label, _public_metric_meaning(domain, label))
+
+
+def _product_metric_fallback_score(section: dict[str, Any]) -> int:
+    if _domain_key(section) == "personality":
+        facet_scores = [
+            _score_from_product_source_item(item)
+            for item in _product_metric_domain_decision_sources(section)
+            if isinstance(item, dict)
+        ]
+        numeric_facet_scores = [score for score in facet_scores if isinstance(score, int)]
+        if numeric_facet_scores:
+            return round(sum(numeric_facet_scores) / len(numeric_facet_scores))
+    for key in ("score", "strength_score", "total_score", "event_probability_score"):
+        value = section.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            bounded = _bounded_metric_score(value)
+            if isinstance(bounded, int):
+                return bounded
+        if isinstance(value, float):
+            bounded = _bounded_metric_score(round(value))
+            if isinstance(bounded, int):
+                return bounded
+    return 62
+
+
+def _product_metric_domain_decision_sources(section: dict[str, Any]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    for item in _domain_decision_items_for_section(section):
+        if not isinstance(item, dict):
+            continue
+        next_item = dict(item)
+        next_item.setdefault("source", "domain_decision_facet")
+        sources.append(next_item)
+    return sources
+
+
+def _product_metric_source_lists(section: dict[str, Any]) -> tuple[Any, ...]:
+    profile = section.get("visual_profile") if isinstance(section.get("visual_profile"), dict) else {}
+    category_contract = section.get("category_contract") if isinstance(section.get("category_contract"), dict) else {}
+    return (
+        _product_metric_domain_decision_sources(section),
+        section.get("judgment_axes"),
+        section.get("feature_axes"),
+        section.get("representative_metrics"),
+        section.get("topic_items"),
+        section.get("detail_blocks"),
+        profile.get("items"),
+        profile.get("coordinate_axes"),
+        category_contract.get("reading_units"),
+        category_contract.get("content_plan"),
+    )
+
+
+def _product_metric_scoring_source_lists(section: dict[str, Any]) -> tuple[Any, ...]:
+    """Return only engine-facing sources that may affect metric scores.
+
+    Presentation projections such as topic/detail/visual/category cards are
+    derived from the same engine result. Feeding those display values back into
+    scoring duplicates an already-counted judgment and pulls unrelated charts
+    toward the same polished surface range.
+    """
+    decision_sources = _product_metric_domain_decision_sources(section)
+    if _domain_key(section) == "personality" and decision_sources:
+        # The personality profile axes are relative ranks inside one person and
+        # belong to type presentation. The engine's twelve absolute personality
+        # facets are the only valid score source for the public ability bars.
+        return (decision_sources,)
+    return (
+        decision_sources,
+        section.get("judgment_axes"),
+        section.get("feature_axes"),
+        section.get("representative_metrics"),
+    )
+
+
+def _is_generated_product_metric_item(item: dict[str, Any]) -> bool:
+    source = str(item.get("source") or "").strip()
+    key = str(item.get("key") or "").strip()
+    return source == "product_metric" or key.startswith("product_")
+
+
+def _product_metric_source_lookup(section: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    lookup: dict[str, list[dict[str, Any]]] = {}
+    for values in _product_metric_scoring_source_lists(section):
+        for item in list(values or []):
+            if not isinstance(item, dict):
+                continue
+            if _is_generated_product_metric_item(item):
+                continue
+            for key in (
+                "key",
+                "source_axis_key",
+                "source_key",
+                "source_label",
+                "label",
+                "title",
+                "display_label",
+                "source_title",
+                "metric_label",
+                "topic",
+                "focus",
+            ):
+                text = str(item.get(key) or "").strip()
+                if not text:
+                    continue
+                compact = _compact_match_key(text)
+                if not compact:
+                    continue
+                lookup.setdefault(compact, []).append(item)
+    return lookup
+
+
+def _product_metric_aliases(
+    domain: str,
+    label: str,
+    aliases: tuple[tuple[str, float], ...],
+) -> tuple[tuple[str, float], ...]:
+    merged: list[tuple[str, float]] = [(label, 0.5)]
+    merged.extend((alias, weight) for alias, weight in aliases)
+    for alias in PRODUCT_DOMAIN_METRIC_SOURCE_ALIASES.get(domain, {}).get(label, ()):
+        merged.append((alias, 0.68))
+    for alias in DOMAIN_DECISION_METRIC_ALIASES.get(label, ()):
+        merged.append((alias, 0.45))
+    deduped: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for alias, weight in merged:
+        compact = _compact_match_key(alias)
+        if not compact or compact in seen:
+            continue
+        seen.add(compact)
+        deduped.append((alias, weight))
+    return tuple(deduped)
+
+
+def _score_from_product_source_item(item: dict[str, Any]) -> int | None:
+    score = _metric_score_from_public_item(item)
+    if isinstance(score, int):
+        return score
+    return None
+
+
+def _product_source_label(item: dict[str, Any]) -> str:
+    return str(
+        item.get("label")
+        or item.get("title")
+        or item.get("source_label")
+        or item.get("source_title")
+        or item.get("display_label")
+        or item.get("metric_label")
+        or item.get("required_conclusion")
+        or item.get("key")
+        or ""
+    ).strip()
+
+
+def _product_metric_item_signature(item: dict[str, Any]) -> tuple[str, str, int | None]:
+    label_key = _compact_match_key(_product_source_label(item))
+    item_key = _compact_match_key(item.get("key") or item.get("source_key") or item.get("source_axis_key"))
+    score = _score_from_product_source_item(item)
+    return (item_key, label_key, score if isinstance(score, int) else None)
+
+
+def _product_metric_item_cache_key(item: dict[str, Any]) -> int:
+    source_object_id = item.get("_product_metric_source_object_id")
+    if isinstance(source_object_id, int):
+        return source_object_id
+    return id(item)
+
+
+def _product_metric_source_family(item: dict[str, Any]) -> str:
+    label = _product_source_label(item)
+    if label:
+        return _compact_match_key(label)
+    return _compact_match_key(item.get("key") or item.get("source_key") or item.get("source_axis_key")) or "source"
+
+
+@lru_cache(maxsize=32768)
+def _cached_product_metric_match_terms(values: tuple[str, ...]) -> frozenset[str]:
+    terms: set[str] = set()
+    for value in values:
+        text = value.strip()
+        if not text:
+            continue
+        for token in re.findall(r"[가-힣A-Za-z0-9一-龥]+", text):
+            compact = _compact_match_key(token)
+            if len(compact) >= 2:
+                terms.add(compact)
+    return frozenset(terms)
+
+
+def _product_metric_match_terms(*values: Any) -> set[str]:
+    normalized = tuple(str(value or "").strip() for value in values)
+    return set(_cached_product_metric_match_terms(normalized))
+
+
+PRODUCT_METRIC_ENGINE_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
+    "wealth": ("재성", "정재", "편재", "재물", "수입", "거래", "시장"),
+    "money": ("재물", "수입", "현금", "지출", "정산"),
+    "income": ("수입", "소득", "보상", "성과급"),
+    "cash": ("현금", "유동성", "지출", "정산"),
+    "asset": ("자산", "재산", "보유", "축재", "소유"),
+    "property": ("자산", "재산", "명의", "권리", "소유"),
+    "retention": ("축재", "보유", "저축", "잔존", "지속"),
+    "accumulation": ("축적", "누적", "후반", "장기"),
+    "output": ("식상", "식신", "상관", "생산", "결과물", "성과", "재주", "수익화"),
+    "market": ("시장", "거래", "수익화", "제안", "기회"),
+    "reward": ("보상", "성과급", "대가", "회수"),
+    "compensation": ("보상", "성과급", "정산", "대가"),
+    "resource": ("인성", "정인", "편인", "문서", "자격", "학습", "보호", "기반"),
+    "document": ("문서", "계약", "서류", "조건", "권리"),
+    "contract": ("계약", "문서", "조건", "약속", "합의", "성사"),
+    "officer": ("관성", "정관", "편관", "규칙", "책임", "권한", "제도", "직책", "명분"),
+    "authority": ("권한", "직책", "직함", "책임", "제도", "명분"),
+    "promotion": ("승진", "직책", "직함", "상승", "평가"),
+    "title": ("직함", "직책", "권한", "공식"),
+    "rule": ("규칙", "제도", "책임", "공식", "기준"),
+    "peer": ("비겁", "비견", "겁재", "지인", "경쟁", "동료", "몫"),
+    "boundary": ("경계", "거리", "조율", "합의", "권한", "범위"),
+    "shared": ("공동", "가족", "배우자", "동업", "분배", "공동재"),
+    "risk": ("위험", "주의", "손실", "불안정", "변수"),
+    "loss": ("손실", "방어", "피해", "손해", "부채", "보증"),
+    "recovery": ("회복", "복구", "갈등", "조정", "완화"),
+    "career": ("직업", "성과", "성취", "경력", "업무", "직무"),
+    "work": ("직업", "업무", "실무", "처리", "수행"),
+    "organization": ("조직", "회사", "상사", "규정", "공식", "협업"),
+    "public": ("공적", "대외", "평판", "인정", "명예", "노출"),
+    "reputation": ("평판", "인정", "명예", "공적", "신뢰"),
+    "responsibility": ("책임", "감당", "역할", "의무", "관리"),
+    "execution": ("실행", "실무", "처리", "수행", "현장"),
+    "problem": ("문제", "해결", "대응", "조정"),
+    "planning": ("기획", "판단", "계획", "우선순위"),
+    "judgment": ("판단", "기준", "검토", "선택"),
+    "relationship": ("관계", "신뢰", "협력", "인연", "유대", "친밀"),
+    "contact": ("만남", "호감", "연결", "인연", "시작"),
+    "affection": ("애정", "감정", "표현", "호감", "친밀"),
+    "emotion": ("감정", "정서", "조절", "안정", "기복"),
+    "expression": ("표현", "말", "설명", "전달", "소통"),
+    "marriage": ("결혼", "혼인", "배우자", "부부", "가정"),
+    "spouse": ("배우자", "결혼", "혼인", "상대", "부부"),
+    "household": ("가정", "생활", "주거", "가족", "안정"),
+    "family": ("가족", "가정", "생활", "책임"),
+    "support": ("지원", "도움", "보호", "기반"),
+    "visible": ("투출", "드러남", "가시성", "노출"),
+    "usable": ("유용", "작용", "활용", "적합"),
+    "useful": ("유용", "희신", "보완", "작용"),
+    "six_combine": ("합", "지지합", "묶임", "연결"),
+    "self_punishment": ("형", "자형", "압박", "불안정"),
+    "clash": ("충", "변동", "충돌", "이동"),
+    "harm": ("해", "손상", "불화", "오해"),
+    "break": ("파", "파손", "균열", "손실"),
+    "jeongjae": ("정재", "재성", "재물", "수입", "계약", "현실"),
+    "pyeonjae": ("편재", "재성", "재물", "거래", "시장", "확장"),
+    "siksin": ("식신", "식상", "생산", "결과물", "실무", "표현"),
+    "sanggwan": ("상관", "식상", "표현", "노출", "성과", "변화"),
+    "jeonggwan": ("정관", "관성", "규칙", "책임", "직책", "명분"),
+    "pyeongwan": ("편관", "관성", "압박", "책임", "위험", "대응"),
+    "jeongin": ("정인", "인성", "문서", "자격", "보호", "신뢰"),
+    "pyeonin": ("편인", "인성", "학습", "분석", "보완", "변수"),
+    "bigyeon": ("비견", "비겁", "자기 기준", "동료", "경쟁"),
+    "geobjae": ("겁재", "비겁", "경쟁", "공동", "분배", "손실"),
+}
+
+
+@lru_cache(maxsize=1)
+def _product_metric_engine_token_alias_key_rows() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    return tuple(
+        (key, aliases)
+        for key, aliases in (
+            (_compact_match_key(marker), alias_values)
+            for marker, alias_values in PRODUCT_METRIC_ENGINE_TOKEN_ALIASES.items()
+        )
+        if key
+    )
+
+
+@lru_cache(maxsize=32768)
+def _product_metric_engine_token_semantic_terms(token_key: str) -> frozenset[str]:
+    terms: set[str] = set()
+    for marker_key, aliases in _product_metric_engine_token_alias_key_rows():
+        if marker_key in token_key:
+            terms.update(_product_metric_match_terms(*aliases))
+    return frozenset(terms)
+
+
+@lru_cache(maxsize=32768)
+def _cached_product_metric_engine_semantic_terms(values: tuple[str, ...]) -> tuple[str, ...]:
+    terms = _product_metric_match_terms(*values)
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        for token in re.findall(r"[A-Za-z0-9가-힣一-龥]+", text):
+            token_key = _compact_match_key(token)
+            if not token_key:
+                continue
+            terms.update(_product_metric_engine_token_semantic_terms(token_key))
+    return tuple(terms)
+
+
+def _product_metric_engine_semantic_terms(*values: Any) -> set[str]:
+    normalized = tuple(
+        str(value or "").strip()[:180]
+        for value in values
+        if str(value or "").strip()
+    )
+    if not normalized:
+        return set()
+    return set(_cached_product_metric_engine_semantic_terms(normalized))
+
+
+def _product_metric_engine_signal_profile(domain: str, label: str) -> list[str]:
+    profile = PRODUCT_METRIC_ENGINE_SIGNAL_PROFILES.get(domain, {}).get(label)
+    if profile:
+        return list(profile)
+    domain_default = {
+        "money": ("wealth_generation", "asset_retention", "loss_guard"),
+        "career": ("career_result", "evaluation", "continuity"),
+        "personality": ("self_direction", "emotion_control", "risk_detection"),
+        "love": ("relationship_fit", "emotion_control", "conflict_recovery"),
+        "marriage": ("domestic_stability", "relationship_fit", "continuity"),
+        "honor": ("public_reputation", "authority_rule", "evaluation"),
+        "social": ("relationship_fit", "peer_boundary", "communication_expression"),
+    }.get(domain)
+    return list(domain_default or ("career_result",))
+
+
+def _product_metric_engine_signal_evidence_terms(
+    items: list[dict[str, Any]],
+    *,
+    basis_codes: list[str],
+    basis_keywords: list[str],
+) -> set[str]:
+    terms = _product_metric_engine_semantic_terms(*basis_codes, *basis_keywords)
+    for item in items:
+        engine_terms, _, _ = _product_metric_item_evidence_term_sets(item)
+        terms.update(engine_terms)
+    return terms
+
+
+def _product_metric_is_structural_basis_code(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    key = _compact_match_key(text)
+    if not key:
+        return False
+    non_structural_prefixes = (
+        "feature",
+        "productmetric",
+        "derived",
+        "personalityprofile",
+        "personalityprofileaxis",
+    )
+    if any(key.startswith(prefix) for prefix in non_structural_prefixes):
+        return False
+    return True
+
+
+def _product_metric_structural_basis_codes(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not _product_metric_is_structural_basis_code(text):
+            continue
+        if text not in result:
+            result.append(text)
+    return result[:8]
+
+
+PRODUCT_METRIC_STRUCTURAL_SOURCE_MARKERS: tuple[str, ...] = (
+    "일간",
+    "월령",
+    "월지",
+    "격국",
+    "십신",
+    "오행",
+    "천간",
+    "지지",
+    "지장간",
+    "투출",
+    "통근",
+    "용신",
+    "기신",
+    "합",
+    "충",
+    "형",
+    "파",
+    "해",
+    "대운",
+    "세운",
+    "재성",
+    "관성",
+    "인성",
+    "식상",
+    "비겁",
+)
+
+
+def _product_metric_is_structural_source_value(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    compact = _compact_match_key(text)
+    if not compact:
+        return False
+    return any(_compact_match_key(marker) in compact for marker in PRODUCT_METRIC_STRUCTURAL_SOURCE_MARKERS)
+
+
+def _product_metric_structural_source_values(item: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+
+    def append(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and _product_metric_is_structural_source_value(text) and text not in values:
+            values.append(text)
+
+    for key in ("source", "source_key", "source_axis_key", "category", "domain_projection"):
+        append(item.get(key))
+    components = item.get("judgment_components")
+    if isinstance(components, dict):
+        for entry in list(components.get("structural_basis_codes") or []):
+            append(entry)
+    return values[:8]
+
+
+def _product_metric_direct_keyword_values(item: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+
+    def append(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in values:
+            values.append(text)
+
+    for entry in list(item.get("basis_keywords") or []):
+        append(entry)
+    components = item.get("judgment_components")
+    if isinstance(components, dict):
+        for entry in list(components.get("basis_keywords") or []):
+            append(entry)
+    return values[:8]
+
+
+def _product_metric_has_direct_context(item: dict[str, Any]) -> bool:
+    if _product_metric_structural_source_values(item):
+        return True
+    if _product_metric_direct_keyword_values(item):
+        return True
+    for key in ("basis_codes", "cycle_tags", "principle_tags", "raw_layer_coverage"):
+        if item.get(key):
+            return True
+    components = item.get("judgment_components")
+    if isinstance(components, dict):
+        return any(
+            components.get(key)
+            for key in (
+                "cycle_tags",
+                "principle_tags",
+                "raw_layer_coverage",
+                "gyeokguk_action_titles",
+                "structural_basis_codes",
+            )
+        )
+    return False
+
+
+def _product_metric_evidence_context_items(
+    section: dict[str, Any],
+    domain: str,
+    label: str,
+    used_items: list[dict[str, Any]],
+    *,
+    evidence_catalog: list[
+        tuple[
+            dict[str, Any],
+            tuple[str, str, int | None],
+            str,
+            frozenset[str],
+        ]
+    ]
+    | None = None,
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = list(used_items)
+    seen: set[tuple[str, str, int | None]] = {
+        _product_metric_item_signature(item) for item in used_items
+    }
+    used_label_keys = {
+        _compact_match_key(_product_source_label(item))
+        for item in used_items
+        if _product_source_label(item)
+    }
+    reference_terms = _product_metric_match_terms(
+        label,
+        _product_metric_meaning(domain, label),
+        *PRODUCT_DOMAIN_METRIC_SOURCE_ALIASES.get(domain, {}).get(label, ()),
+        *(_product_source_label(item) for item in used_items),
+    )
+
+    added = 0
+    catalog = evidence_catalog or _product_metric_evidence_catalog(section)
+    for item, signature, item_label_key, item_terms in catalog:
+        if signature in seen:
+            continue
+        label_related = bool(
+            item_label_key
+            and (
+                item_label_key in used_label_keys
+                or any(
+                    item_label_key == used_key
+                    or item_label_key in used_key
+                    or used_key in item_label_key
+                    for used_key in used_label_keys
+                )
+            )
+        )
+        signal_related = bool(reference_terms & item_terms)
+        if not label_related and not signal_related:
+            continue
+        selected.append(item)
+        seen.add(signature)
+        added += 1
+        if added >= 4:
+            return selected
+    return selected
+
+
+def _product_metric_evidence_catalog(
+    section: dict[str, Any],
+) -> list[
+    tuple[
+        dict[str, Any],
+        tuple[str, str, int | None],
+        str,
+        frozenset[str],
+    ]
+]:
+    catalog: list[
+        tuple[
+            dict[str, Any],
+            tuple[str, str, int | None],
+            str,
+            frozenset[str],
+        ]
+    ] = []
+    for values in _product_metric_source_lists(section):
+        for item in list(values or []):
+            if not isinstance(item, dict):
+                continue
+            if _is_generated_product_metric_item(item):
+                continue
+            if not _product_metric_has_direct_context(item):
+                continue
+            catalog.append(
+                (
+                    item,
+                    _product_metric_item_signature(item),
+                    _compact_match_key(_product_source_label(item)),
+                    frozenset(
+                        _product_metric_match_terms(
+                            _product_source_label(item),
+                            item.get("source"),
+                            item.get("category"),
+                            item.get("domain_projection"),
+                            *(_product_metric_structural_source_values(item)),
+                            *(_product_metric_direct_keyword_values(item)),
+                        )
+                    ),
+                )
+            )
+    return catalog
+
+
+def _product_metric_item_evidence_term_sets(
+    item: dict[str, Any],
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    cache = getattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, "item_evidence_term_sets", None)
+    cache_key = _product_metric_item_cache_key(item)
+    cached = cache.get(cache_key) if isinstance(cache, dict) else None
+    if cached is not None:
+        return cached
+
+    engine_parts: list[Any] = []
+    direct_parts: list[Any] = []
+    label_parts: list[Any] = [
+        _product_source_label(item),
+        item.get("definition"),
+        item.get("focus"),
+        item.get("summary"),
+        item.get("meaning"),
+        item.get("body"),
+        item.get("source"),
+        item.get("category"),
+        item.get("domain_projection"),
+    ]
+
+    structural_values = _product_metric_structural_source_values(item)
+    direct_keyword_values = _product_metric_direct_keyword_values(item)
+    engine_parts.extend(structural_values)
+    engine_parts.extend(direct_keyword_values)
+    direct_parts.extend(structural_values)
+    direct_parts.extend(direct_keyword_values)
+
+    for key in ("basis_codes", "cycle_tags", "principle_tags", "layer_coverage", "raw_layer_coverage"):
+        value = item.get(key)
+        if isinstance(value, list):
+            engine_parts.extend(value)
+    item_basis_codes = item.get("basis_codes")
+    if isinstance(item_basis_codes, list):
+        direct_parts.extend(_product_metric_structural_basis_codes(item_basis_codes))
+    for key in ("cycle_tags", "principle_tags", "raw_layer_coverage"):
+        value = item.get(key)
+        if isinstance(value, list):
+            direct_parts.extend(value)
+
+    for source in list(item.get("cycle_sources") or []):
+        if not isinstance(source, dict):
+            continue
+        values = (source.get("classical_name"), source.get("signal_id"), source.get("relation"))
+        engine_parts.extend(values)
+        direct_parts.extend(values)
+    for edge in list(item.get("principle_edges") or []):
+        if not isinstance(edge, dict):
+            continue
+        values = (edge.get("classical_name"), edge.get("relation"), edge.get("target"))
+        engine_parts.extend(values)
+        direct_parts.extend(values)
+    for action in list(item.get("gyeokguk_action_sources") or []):
+        if isinstance(action, dict):
+            values = (action.get("title"), action.get("source"), action.get("domain_projection"))
+            engine_parts.extend(values)
+            direct_parts.extend(values)
+        else:
+            engine_parts.append(action)
+            direct_parts.append(action)
+
+    components = item.get("judgment_components")
+    if isinstance(components, dict):
+        for key in (
+            "basis_keywords",
+            "cycle_tags",
+            "principle_tags",
+            "raw_layer_coverage",
+            "gyeokguk_action_titles",
+        ):
+            value = components.get(key)
+            if isinstance(value, list):
+                engine_parts.extend(value)
+        for key in (
+            "cycle_tags",
+            "principle_tags",
+            "raw_layer_coverage",
+            "gyeokguk_action_titles",
+            "structural_basis_codes",
+        ):
+            value = components.get(key)
+            if isinstance(value, list):
+                direct_parts.extend(value)
+        source_labels = components.get("source_labels")
+        if isinstance(source_labels, list):
+            label_parts.extend(source_labels)
+
+    result = (
+        frozenset(_product_metric_engine_semantic_terms(*engine_parts)),
+        frozenset(_product_metric_engine_semantic_terms(*direct_parts)),
+        frozenset(_product_metric_match_terms(*label_parts)),
+    )
+    if isinstance(cache, dict):
+        cache[cache_key] = result
+    return result
+
+
+def _product_metric_engine_direct_signal_evidence_terms(
+    items: list[dict[str, Any]],
+    *,
+    basis_codes: list[str],
+    basis_keywords: list[str] | None = None,
+) -> set[str]:
+    terms = _product_metric_engine_semantic_terms(
+        *_product_metric_structural_basis_codes(list(basis_codes or [])),
+        *list(basis_keywords or [])[:8],
+    )
+    for item in items:
+        _, direct_terms, _ = _product_metric_item_evidence_term_sets(item)
+        terms.update(direct_terms)
+    return terms
+
+
+def _product_metric_label_signal_evidence_terms(
+    domain: str,
+    label: str,
+    items: list[dict[str, Any]],
+    *,
+    basis_keywords: list[str],
+) -> set[str]:
+    terms = _product_metric_match_terms(domain, label, *basis_keywords)
+    for item in items:
+        _, _, label_terms = _product_metric_item_evidence_term_sets(item)
+        terms.update(label_terms)
+    return terms
+
+
+def _term_matches_evidence(
+    term: str,
+    evidence_terms: set[str] | frozenset[str],
+) -> bool:
+    term_key = _compact_match_key(term)
+    if not term_key:
+        return False
+    frozen_evidence = (
+        evidence_terms
+        if isinstance(evidence_terms, frozenset)
+        else frozenset(evidence_terms)
+    )
+    cache = getattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, "term_match_results", None)
+    cache_key = (term_key, frozen_evidence)
+    if isinstance(cache, dict) and cache_key in cache:
+        return bool(cache[cache_key])
+    matched = "" in frozen_evidence or any(
+        term_key in evidence or evidence in term_key
+        for evidence in frozen_evidence
+    )
+    if isinstance(cache, dict):
+        cache[cache_key] = matched
+    return matched
+
+
+def _product_metric_signal_matches(
+    profile: list[str],
+    evidence_terms: set[str],
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for signal in profile:
+        raw_terms = PRODUCT_METRIC_ENGINE_SIGNAL_TERMS.get(signal, ())
+        matched_terms: list[str] = []
+        for term in raw_terms:
+            if _term_matches_evidence(term, evidence_terms) and term not in matched_terms:
+                matched_terms.append(term)
+            if len(matched_terms) >= 4:
+                break
+        if matched_terms:
+            matches.append({"signal": signal, "terms": matched_terms})
+    return matches
+
+
+def _product_metric_signal_fit(profile: list[str], matches: list[dict[str, Any]]) -> float:
+    matched_count = len(matches)
+    total_count = max(1, len(profile))
+    matched_term_count = sum(len(match.get("terms") or []) for match in matches)
+    return min(1.0, (matched_count / total_count) * 0.82 + min(matched_term_count, 8) * 0.0225)
+
+
+PRODUCT_METRIC_DIRECT_GENERIC_TERMS: frozenset[str] = frozenset(
+    {
+        "안정",
+        "관계",
+        "신뢰",
+        "기준",
+        "공동",
+        "조절",
+        "수용",
+        "거리",
+        "판단",
+        "책임",
+        "역할",
+        "부담",
+        "조건",
+        "생활",
+        "방향",
+        "몰입",
+        "노출",
+        "보상",
+    }
+)
+
+
+@lru_cache(maxsize=1)
+def _product_metric_direct_generic_keys() -> frozenset[str]:
+    return frozenset(
+        key
+        for key in (_compact_match_key(value) for value in PRODUCT_METRIC_DIRECT_GENERIC_TERMS)
+        if key
+    )
+
+
+def _product_metric_direct_term_weight(term: Any) -> float:
+    text = str(term or "").strip()
+    if not text:
+        return 0.0
+    key = _compact_match_key(text)
+    if key in _product_metric_direct_generic_keys():
+        return 0.62
+    if len(key) <= 1:
+        return 0.72
+    return 1.0
+
+
+def _product_metric_direct_signal_fit(profile: list[str], matches: list[dict[str, Any]]) -> float:
+    if not matches:
+        return 0.0
+    total_count = max(1, len(profile))
+    signal_strength = 0.0
+    term_strength = 0.0
+    for match in matches:
+        terms = list(match.get("terms") or [])
+        weighted_terms = sum(_product_metric_direct_term_weight(term) for term in terms)
+        signal_strength += min(1.0, weighted_terms / 1.45)
+        term_strength += min(3.0, weighted_terms)
+    matched_ratio = signal_strength / total_count
+    term_ratio = term_strength / (total_count * 3)
+    return min(0.92, matched_ratio * 0.58 + term_ratio * 0.34)
+
+
+def _product_metric_engine_signal_diagnostics(
+    domain: str,
+    label: str,
+    items: list[dict[str, Any]],
+    *,
+    basis_codes: list[str],
+    basis_keywords: list[str],
+) -> dict[str, Any]:
+    profile = _product_metric_engine_signal_profile(domain, label)
+    evidence_cache = getattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, "evidence_terms", None)
+    evidence_cache_key = (
+        tuple(_product_metric_item_signature(item) for item in items),
+        tuple(basis_codes),
+        tuple(basis_keywords),
+    )
+    cached_evidence = evidence_cache.get(evidence_cache_key) if isinstance(evidence_cache, dict) else None
+    if cached_evidence is None:
+        evidence_terms = frozenset(
+            _product_metric_engine_signal_evidence_terms(
+                items,
+                basis_codes=basis_codes,
+                basis_keywords=basis_keywords,
+            )
+        )
+        direct_evidence_terms = frozenset(
+            _product_metric_engine_direct_signal_evidence_terms(
+                items,
+                basis_codes=basis_codes,
+                basis_keywords=basis_keywords,
+            )
+        )
+        if isinstance(evidence_cache, dict):
+            evidence_cache[evidence_cache_key] = (evidence_terms, direct_evidence_terms)
+    else:
+        evidence_terms, direct_evidence_terms = cached_evidence
+    label_evidence_terms = frozenset(
+        _product_metric_label_signal_evidence_terms(
+            domain,
+            label,
+            items,
+            basis_keywords=basis_keywords,
+        )
+    )
+    matches = _product_metric_signal_matches(profile, evidence_terms)
+    direct_matches = _product_metric_signal_matches(profile, direct_evidence_terms)
+    label_matches = _product_metric_signal_matches(profile, label_evidence_terms)
+    matched_count = len(matches)
+    direct_matched_count = len(direct_matches)
+    label_matched_count = len(label_matches)
+    fit = _product_metric_signal_fit(profile, matches)
+    direct_fit = _product_metric_direct_signal_fit(profile, direct_matches)
+    label_fit = _product_metric_signal_fit(profile, label_matches)
+    return {
+        "engine_signal_profile": profile,
+        "engine_signal_matches": matches[:6],
+        "engine_signal_fit": round(fit, 3),
+        "engine_signal_matched_count": matched_count,
+        "engine_direct_signal_matches": direct_matches[:6],
+        "engine_direct_signal_fit": round(direct_fit, 3),
+        "engine_direct_signal_matched_count": direct_matched_count,
+        "engine_label_signal_matches": label_matches[:6],
+        "engine_label_signal_fit": round(label_fit, 3),
+        "engine_label_signal_matched_count": label_matched_count,
+        "engine_signal_profile_count": len(profile),
+    }
+
+
+def _product_metric_item_basis_keywords(item: dict[str, Any]) -> list[str]:
+    # Signal fitting must be anchored to terms explicitly carried by the engine
+    # item. Fuzzy dictionary expansion from customer-facing summaries is useful
+    # for evidence copy, but feeding it back into a score makes wording part of
+    # the calculation and adds hundreds of full-dictionary searches per chart.
+    parts: list[Any] = [
+        _product_source_label(item),
+        item.get("definition"),
+        item.get("focus"),
+        item.get("summary"),
+        item.get("meaning"),
+        item.get("body"),
+        item.get("source"),
+        item.get("category"),
+        item.get("domain_projection"),
+        *_product_metric_direct_keyword_values(item),
+    ]
+    for key in ("basis_codes", "cycle_tags", "principle_tags", "raw_layer_coverage"):
+        value = item.get(key)
+        if isinstance(value, list):
+            parts.extend(value)
+    for source in list(item.get("cycle_sources") or []):
+        if isinstance(source, dict):
+            parts.extend((source.get("classical_name"), source.get("signal_id"), source.get("relation")))
+    for edge in list(item.get("principle_edges") or []):
+        if isinstance(edge, dict):
+            parts.extend((edge.get("classical_name"), edge.get("relation"), edge.get("target")))
+    for action in list(item.get("gyeokguk_action_sources") or []):
+        if isinstance(action, dict):
+            parts.extend((action.get("title"), action.get("source"), action.get("domain_projection")))
+        else:
+            parts.append(action)
+    components = item.get("judgment_components")
+    if isinstance(components, dict):
+        for key in ("basis_keywords", "cycle_tags", "principle_tags", "gyeokguk_action_titles"):
+            value = components.get(key)
+            if isinstance(value, list):
+                parts.extend(value)
+
+    explicit_terms: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = re.sub(r"\s+", " ", str(part or "").strip())[:180]
+        key = _compact_match_key(text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        explicit_terms.append(text)
+        if len(explicit_terms) >= 24:
+            break
+    return explicit_terms
+
+
+def _product_metric_item_signal_fit(domain: str, label: str, item: dict[str, Any]) -> float:
+    cache = getattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, "item_signal_fit", None)
+    item_signature = _product_metric_item_signature(item)
+    cache_key = (domain, label, item_signature)
+    if isinstance(cache, dict) and cache_key in cache:
+        return float(cache[cache_key])
+
+    materials_cache = getattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, "item_signal_materials", None)
+    materials_key = item_signature
+    cached_materials = materials_cache.get(materials_key) if isinstance(materials_cache, dict) else None
+    if cached_materials is None:
+        basis_codes = tuple(_product_metric_basis_codes([item]))
+        basis_keywords = tuple(_product_metric_item_basis_keywords(item))
+        if isinstance(materials_cache, dict):
+            materials_cache[materials_key] = (basis_codes, basis_keywords)
+    else:
+        basis_codes, basis_keywords = cached_materials
+
+    diagnostics = _product_metric_engine_signal_diagnostics(
+        domain,
+        label,
+        [item],
+        basis_codes=list(basis_codes),
+        basis_keywords=list(basis_keywords),
+    )
+    engine_fit = float(diagnostics.get("engine_signal_fit") or 0.0)
+    direct_fit = float(diagnostics.get("engine_direct_signal_fit") or 0.0)
+    label_fit = float(diagnostics.get("engine_label_signal_fit") or 0.0)
+    if direct_fit > 0:
+        result = min(1.0, direct_fit * 0.82 + engine_fit * 0.10 + label_fit * 0.08)
+    elif engine_fit > 0:
+        result = min(0.62, max(0.22, engine_fit * 0.52 + label_fit * 0.10))
+    else:
+        result = min(0.48, label_fit * 0.46)
+    if isinstance(cache, dict):
+        cache[cache_key] = result
+    return result
+
+
+def _product_metric_signal_weight_multiplier(signal_fit: float) -> float:
+    fit = max(0.0, min(1.0, float(signal_fit or 0.0)))
+    if fit <= 0:
+        return 0.62
+    return max(0.64, min(1.20, 0.62 + fit * 0.58))
+
+
+def _product_metric_source_signal_fit_diagnostics(
+    domain: str,
+    label: str,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    fits = [
+        _product_metric_item_signal_fit(domain, label, item)
+        for item in items
+        if isinstance(item, dict)
+    ]
+    if not fits:
+        return {}
+    return {
+        "source_signal_fit_min": round(min(fits), 3),
+        "source_signal_fit_max": round(max(fits), 3),
+        "source_signal_fit_avg": round(sum(fits) / len(fits), 3),
+        "source_signal_fit_weighted": True,
+    }
+
+
+def _product_metric_quality_ledger(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Expose source-level quality evidence without rescoring the product metric."""
+
+    rows: list[dict[str, Any]] = []
+    support_count = 0
+    pressure_count = 0
+    counter_count = 0
+    unresolved_critical_count = 0
+    gate_count = 0
+    gated_source_count = 0
+    observed_signal_count = 0
+    applicable_signal_count = 0
+    rejected_signal_count = 0
+    retained_source_count = 0
+    raw_evidence_count = 0
+    coverage_values: list[float] = []
+    for item in items:
+        score_components = item.get("score_components")
+        if not isinstance(score_components, dict):
+            continue
+        judgment = score_components.get("judgment_components")
+        if not isinstance(judgment, dict):
+            continue
+        quality_score = judgment.get("quality_score")
+        if not isinstance(quality_score, (int, float)):
+            quality_score = score_components.get("adjudicated_score")
+        if not isinstance(quality_score, (int, float)):
+            quality_score = item.get("score")
+        if not isinstance(quality_score, (int, float)):
+            continue
+        source_support = int(judgment.get("support_evidence_count") or 0)
+        source_pressure = int(judgment.get("pressure_evidence_count") or 0)
+        source_counter = int(judgment.get("counter_evidence_count") or 0)
+        source_unresolved = int(judgment.get("unresolved_critical_pressure_count") or 0)
+        coverage = float(judgment.get("evidence_coverage") or 0.0)
+        gates = [str(value) for value in list(judgment.get("quality_gates") or []) if str(value)]
+        support_count += source_support
+        pressure_count += source_pressure
+        counter_count += source_counter
+        unresolved_critical_count += source_unresolved
+        gate_count += len(gates)
+        gated_source_count += int(bool(gates))
+        source_observed = int(judgment.get("theory_observed_signal_count") or 0)
+        source_applicable = int(judgment.get("theory_applicable_signal_count") or 0)
+        source_rejected = int(judgment.get("theory_rejected_signal_count") or 0)
+        source_retained = int(judgment.get("theory_retained_source_count") or 0)
+        source_raw_evidence = int(judgment.get("theory_raw_evidence_count") or 0)
+        observed_signal_count += source_observed
+        applicable_signal_count += source_applicable
+        rejected_signal_count += source_rejected
+        retained_source_count += source_retained
+        raw_evidence_count += source_raw_evidence
+        coverage_values.append(coverage)
+        rows.append(
+            {
+                "source": _product_source_label(item),
+                "component": str(item.get("_product_metric_component_alias") or ""),
+                "component_weight": float(item.get("_product_metric_component_weight") or 0.0),
+                "quality_score": int(round(float(quality_score))),
+                "raw_quality_score": judgment.get("raw_quality_score"),
+                "high_dimensional_score": judgment.get("high_dimensional_score"),
+                "score_blend_method": judgment.get("score_blend_method"),
+                "effect_strength": judgment.get("effect_strength"),
+                "signed_quality": judgment.get("signed_quality"),
+                "evidence_coverage": round(coverage, 3),
+                "support_evidence_count": source_support,
+                "pressure_evidence_count": source_pressure,
+                "counter_evidence_count": source_counter,
+                "unresolved_critical_pressure_count": source_unresolved,
+                "quality_gates": gates,
+                "theory_observed_signal_count": source_observed,
+                "theory_applicable_signal_count": source_applicable,
+                "theory_rejected_signal_count": source_rejected,
+                "theory_signal_application_ratio": judgment.get(
+                    "theory_signal_application_ratio"
+                ),
+                "theory_raw_evidence_count": source_raw_evidence,
+                "theory_retained_source_count": source_retained,
+                "theory_source_retention_ratio": judgment.get(
+                    "theory_source_retention_ratio"
+                ),
+                "theory_independent_family_count": judgment.get(
+                    "theory_independent_family_count"
+                ),
+                "theory_correlation_cluster_count": judgment.get(
+                    "theory_correlation_cluster_count"
+                ),
+                "decisive_system_quality": (
+                    judgment.get("high_dimensional_quality") or {}
+                ).get("decisive_system_quality"),
+                "decisive_system_materiality": (
+                    judgment.get("high_dimensional_quality") or {}
+                ).get("decisive_system_materiality"),
+                "decisive_conflict_ratio": (
+                    judgment.get("high_dimensional_quality") or {}
+                ).get("decisive_conflict_ratio"),
+                "essential_bottleneck": (
+                    judgment.get("high_dimensional_quality") or {}
+                ).get("essential_bottleneck"),
+                "theory_signal_treatment_ledger": list(
+                    judgment.get("theory_signal_treatment_ledger") or []
+                ),
+            }
+        )
+    if not rows:
+        return {}
+    return {
+        "source_quality_ledger": rows,
+        "source_support_evidence_count": support_count,
+        "source_pressure_evidence_count": pressure_count,
+        "source_counter_evidence_count": counter_count,
+        "source_unresolved_critical_pressure_count": unresolved_critical_count,
+        "source_quality_gate_count": gate_count,
+        "source_quality_gated_source_count": gated_source_count,
+        "source_theory_observed_signal_count": observed_signal_count,
+        "source_theory_applicable_signal_count": applicable_signal_count,
+        "source_theory_rejected_signal_count": rejected_signal_count,
+        "source_theory_signal_conservation_valid": (
+            observed_signal_count == applicable_signal_count + rejected_signal_count
+        ),
+        "source_theory_raw_evidence_count": raw_evidence_count,
+        "source_theory_retained_source_count": retained_source_count,
+        "source_theory_retention_ratio": round(
+            retained_source_count / raw_evidence_count if raw_evidence_count else 1.0,
+            3,
+        ),
+        "source_evidence_coverage_avg": round(
+            sum(coverage_values) / len(coverage_values),
+            3,
+        ),
+    }
+
+
+def _product_metric_relevant_basis_keywords(
+    domain: str,
+    label: str,
+    keywords: list[str],
+) -> list[str]:
+    override = PRODUCT_METRIC_BASIS_KEYWORD_OVERRIDES.get(domain, {}).get(label)
+    if override:
+        return list(override)[:7]
+    if not keywords:
+        return []
+    reference_terms = _product_metric_match_terms(
+        label,
+        _product_metric_meaning(domain, label),
+        *PRODUCT_DOMAIN_METRIC_SOURCE_ALIASES.get(domain, {}).get(label, ()),
+    )
+    if not reference_terms:
+        return keywords[:7]
+    filtered: list[str] = []
+    for keyword in keywords:
+        keyword_terms = _product_metric_match_terms(keyword)
+        if not keyword_terms:
+            continue
+        if keyword_terms & reference_terms or any(
+            left in right or right in left
+            for left in keyword_terms
+            for right in reference_terms
+        ):
+            if keyword not in filtered:
+                filtered.append(keyword)
+    return (filtered if len(filtered) >= 3 else keywords)[:7]
+
+
+def _product_metric_score(
+    lookup: dict[str, list[dict[str, Any]]],
+    aliases: tuple[tuple[str, float], ...],
+    fallback: int,
+    *,
+    domain: str,
+    label: str,
+) -> tuple[int, list[dict[str, Any]]]:
+    weighted_total = Decimal("0")
+    weight_total = Decimal("0")
+    used_items: list[dict[str, Any]] = []
+    used_signatures: set[tuple[str, str, int | None]] = set()
+
+    # Every declared alias is one explicit scoring component, not a synonym.
+    # Missing components are omitted and the remaining weights are normalized.
+    # This keeps a metric calculable on older engine payloads without silently
+    # replacing it with an unrelated section average.
+    for alias, weight in aliases:
+        if weight <= 0:
+            continue
+        compact = _compact_match_key(alias)
+        if not compact:
+            continue
+        candidates = lookup.get(compact, [])
+        for item in candidates:
+            if _product_metric_rejects_source(domain, label, item):
+                continue
+            score = _score_from_product_source_item(item)
+            signature = _product_metric_item_signature(item)
+            if not isinstance(score, int) or signature in used_signatures:
+                continue
+            component_item = dict(item)
+            component_item["_product_metric_component_alias"] = alias
+            component_item["_product_metric_component_weight"] = weight
+            component_item["_product_metric_source_object_id"] = id(item)
+            decimal_weight = Decimal(str(weight))
+            weighted_total += Decimal(score) * decimal_weight
+            weight_total += decimal_weight
+            used_items.append(component_item)
+            used_signatures.add(signature)
+            break
+
+    if weight_total > 0:
+        # Exact .5 scores always round upward. Decimal arithmetic prevents the
+        # same declared weights from producing 52 or 53 according to binary
+        # floating-point residue.
+        weighted_score = int(
+            (weighted_total / weight_total).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+        return int(max(0, min(100, weighted_score))), used_items
+
+    # A missing dedicated facet is a contract failure, not permission to use
+    # a similarly named legacy axis. Keep the neutral value and empty evidence
+    # so audits can see the omission instead of receiving a plausible but
+    # semantically unrelated score.
+    return fallback, []
+
+
+def _product_metric_basis_codes(items: list[dict[str, Any]]) -> list[str]:
+    codes: list[str] = []
+
+    def append_code(value: Any) -> bool:
+        text = str(value or "").strip()
+        if text and text not in codes:
+            codes.append(text)
+        return len(codes) >= 5
+
+    for item in items:
+        for key in ("basis_codes", "cycle_tags", "principle_tags"):
+            value = item.get(key)
+            if not isinstance(value, list):
+                continue
+            for entry in value:
+                if append_code(entry):
+                    return codes
+        for source in list(item.get("cycle_sources") or []):
+            if isinstance(source, dict) and append_code(source.get("classical_name") or source.get("signal_id")):
+                return codes
+        for edge in list(item.get("principle_edges") or []):
+            if isinstance(edge, dict) and append_code(edge.get("classical_name") or edge.get("relation")):
+                return codes
+        for action in list(item.get("gyeokguk_action_sources") or []):
+            if isinstance(action, dict) and append_code(action.get("title") or action.get("source")):
+                return codes
+            if not isinstance(action, dict) and append_code(action):
+                return codes
+        components = item.get("judgment_components")
+        if isinstance(components, dict):
+            for key in ("cycle_tags", "principle_tags", "raw_layer_coverage", "gyeokguk_action_titles"):
+                for entry in list(components.get(key) or []):
+                    if append_code(entry):
+                        return codes
+    return codes
+
+
+def _product_metric_basis_keywords(
+    section: dict[str, Any],
+    domain: str,
+    label: str,
+    items: list[dict[str, Any]],
+) -> list[str]:
+    parts: list[Any] = [domain, label, section.get("heading"), section.get("title")]
+    for item in items:
+        parts.extend(
+            (
+                _product_source_label(item),
+                item.get("definition"),
+                item.get("focus"),
+                item.get("summary"),
+                item.get("meaning"),
+                item.get("body"),
+            )
+        )
+        for key in ("basis_codes", "cycle_tags", "principle_tags", "layer_coverage", "raw_layer_coverage"):
+            value = item.get(key)
+            if isinstance(value, list):
+                parts.extend(value)
+        for source in list(item.get("cycle_sources") or []):
+            if isinstance(source, dict):
+                parts.extend((source.get("classical_name"), source.get("signal_id")))
+        for edge in list(item.get("principle_edges") or []):
+            if isinstance(edge, dict):
+                parts.extend((edge.get("classical_name"), edge.get("relation")))
+        for action in list(item.get("gyeokguk_action_sources") or []):
+            if isinstance(action, dict):
+                parts.extend((action.get("title"), action.get("source"), action.get("domain_projection")))
+            else:
+                parts.append(action)
+        components = item.get("judgment_components")
+        if isinstance(components, dict):
+            for key in ("basis_keywords", "cycle_tags", "principle_tags", "raw_layer_coverage", "gyeokguk_action_titles"):
+                value = components.get(key)
+                if isinstance(value, list):
+                    parts.extend(value)
+    keywords = _compact_core_keyword_query(parts, limit=7)
+    return _product_metric_relevant_basis_keywords(domain, label, keywords)
+
+
+def _build_product_domain_metrics(section: dict[str, Any]) -> list[dict[str, Any]]:
+    domain = _domain_key(section)
+    specs = PRODUCT_DOMAIN_METRIC_SPECS.get(domain)
+    if not specs:
+        return []
+    neutral_score = 50
+    lookup = _product_metric_source_lookup(section)
+    evidence_catalog = _product_metric_evidence_catalog(section)
+    metrics: list[dict[str, Any]] = []
+    for index, (label, aliases, polarity) in enumerate(specs):
+        source_score, used_items = _product_metric_score(
+            lookup,
+            aliases,
+            neutral_score,
+            domain=domain,
+            label=label,
+        )
+        is_negative_intensity = polarity == "risk"
+        source_is_direct_risk = (domain, label) in PRODUCT_METRIC_DIRECT_RISK_LABELS
+        if is_negative_intensity and source_is_direct_risk:
+            quality_score = 100 - source_score
+            risk_intensity_score = source_score
+            source_to_quality_transform = "inverse_direct_risk_intensity"
+        elif is_negative_intensity:
+            # Current risk concepts are sourced from dedicated protection,
+            # stability and recovery facets. Their source score is already the
+            # customer-facing quality score; only the diagnostic risk intensity
+            # is its inverse.
+            quality_score = source_score
+            risk_intensity_score = 100 - source_score
+            source_to_quality_transform = "protective_capacity_is_quality"
+        else:
+            quality_score = source_score
+            risk_intensity_score = None
+            source_to_quality_transform = "direct_quality"
+        display_label, display_meaning = PRODUCT_RISK_DISPLAY_MAP.get(label, (label, ""))
+        display_label, curated_meaning = PRODUCT_METRIC_DISPLAY_MAP.get(
+            label,
+            (display_label, ""),
+        )
+        meaning = curated_meaning or display_meaning or _product_metric_meaning(domain, label)
+        source_labels = _compact_unique_texts(
+            [_product_source_label(item) for item in used_items if _product_source_label(item)],
+            limit=4,
+        )
+        source_scores: list[dict[str, Any]] = []
+        seen_source_score_labels: set[str] = set()
+        for item in used_items:
+            item_label = _product_source_label(item)
+            item_score = _score_from_product_source_item(item)
+            item_label_key = _compact_match_key(item_label)
+            if item_label_key in seen_source_score_labels:
+                continue
+            if item_label and isinstance(item_score, int):
+                source_scores.append(
+                    {
+                        "label": item_label,
+                        "score": item_score,
+                        "component": str(item.get("_product_metric_component_alias") or item_label),
+                        "weight": float(item.get("_product_metric_component_weight") or 0.0),
+                        "engine_signal_fit": round(_product_metric_item_signal_fit(domain, label, item), 3),
+                    }
+                )
+                seen_source_score_labels.add(item_label_key)
+            if len(source_scores) >= 4:
+                break
+        source_families = _compact_unique_texts(
+            [_product_metric_source_family(item) for item in used_items],
+            limit=4,
+        )
+        source_diagnostics = {
+            "used_source_count": len(used_items),
+            "source_family_count": len(source_families),
+            "source_families": source_families,
+        }
+        source_quality_diagnostics = _product_metric_quality_ledger(used_items)
+        evidence_items = _product_metric_evidence_context_items(
+            section,
+            domain,
+            label,
+            used_items,
+            evidence_catalog=evidence_catalog,
+        )
+        source_signal_diagnostics = _product_metric_source_signal_fit_diagnostics(domain, label, evidence_items)
+        basis_codes = _product_metric_basis_codes(evidence_items)
+        basis_keywords = _product_metric_basis_keywords(section, domain, label, evidence_items)
+        signal_diagnostics = _product_metric_engine_signal_diagnostics(
+            domain,
+            label,
+            evidence_items,
+            basis_codes=basis_codes,
+            basis_keywords=basis_keywords,
+        )
+        level = _contract_level_from_score(quality_score)
+        layer_coverage = ["product_metric_source"]
+        if basis_codes:
+            layer_coverage.append("engine_basis_code")
+        structural_basis_codes = _product_metric_structural_basis_codes(basis_codes)
+        if structural_basis_codes:
+            layer_coverage.append("engine_structural_basis_code")
+        if basis_keywords:
+            layer_coverage.append("core_keyword_dictionary")
+        if signal_diagnostics.get("engine_signal_profile"):
+            layer_coverage.append("engine_signal_profile")
+        if float(signal_diagnostics.get("engine_signal_fit") or 0.0) > 0:
+            layer_coverage.append("engine_signal_profile_matched")
+        if float(signal_diagnostics.get("engine_direct_signal_fit") or 0.0) > 0:
+            layer_coverage.append("engine_direct_signal_matched")
+        if source_signal_diagnostics.get("source_signal_fit_weighted"):
+            layer_coverage.append("source_signal_fit_weighted")
+        if len(source_scores) >= 2:
+            layer_coverage.append("multi_source_metric")
+        if len(source_scores) >= 4:
+            layer_coverage.append("broad_source_metric")
+        if int(source_diagnostics.get("source_family_count") or 0) >= 2:
+            layer_coverage.append("multi_family_metric")
+        if int(source_diagnostics.get("source_family_count") or 0) >= 3:
+            layer_coverage.append("broad_family_metric")
+        score_method = (
+            "risk_control_from_direct_risk_axis"
+            if is_negative_intensity and used_items and source_is_direct_risk
+            else "risk_control_from_weighted_engine_axes"
+            if is_negative_intensity and len(used_items) >= 2
+            else "risk_control_from_direct_engine_axis"
+            if is_negative_intensity and used_items
+            else "weighted_engine_axes"
+            if len(used_items) >= 2
+            else "direct_source_axis"
+            if used_items
+            else "neutral_no_direct_source"
+        )
+        metric: dict[str, Any] = {
+            "key": f"product_{domain}_{_public_metric_key(display_label, index, 'product')}",
+            "label": display_label,
+            "source_label": label if display_label != label else "",
+            "score": quality_score,
+            "display_score": quality_score,
+            "quality_score": quality_score,
+            "polarity": polarity,
+            "display_axis": "높을수록 안정적으로 작용함",
+            "score_direction": "higher_is_better",
+            "level": level,
+            "value": level,
+            "summary": meaning,
+            "meaning": meaning,
+            "source": "product_metric",
+            "source_labels": source_labels,
+            "score_components": {
+                "neutral_score": neutral_score,
+                "source_scores": source_scores,
+                "score_method": score_method,
+                "source_score": source_score,
+                "source_to_quality_transform": source_to_quality_transform,
+                "source_is_direct_risk": source_is_direct_risk,
+                "risk_intensity_score": risk_intensity_score,
+                **source_diagnostics,
+                **source_quality_diagnostics,
+                **source_signal_diagnostics,
+                **signal_diagnostics,
+            },
+            "judgment_components": {
+                "source_labels": source_labels,
+                "basis_keywords": basis_keywords,
+                "structural_basis_codes": structural_basis_codes,
+                "engine_signal_profile": signal_diagnostics.get("engine_signal_profile", []),
+                "engine_signal_matches": signal_diagnostics.get("engine_signal_matches", []),
+                "engine_direct_signal_matches": signal_diagnostics.get("engine_direct_signal_matches", []),
+                "source_quality_ledger": source_quality_diagnostics.get(
+                    "source_quality_ledger",
+                    [],
+                ),
+                "layer_coverage": layer_coverage,
+            },
+        }
+        if basis_codes:
+            metric["basis_codes"] = basis_codes
+        if basis_keywords:
+            metric["basis_keywords"] = basis_keywords
+        if basis_codes or source_labels:
+            metric["gyeokguk_action_sources"] = (basis_codes or source_labels)[:4]
+        if is_negative_intensity:
+            metric["risk_intensity_score"] = risk_intensity_score
+        metrics.append(_ensure_public_metric_meaning(metric, domain))
+    return metrics
+
+
+def _annual_section_metric_score(section: dict[str, Any] | None) -> int | None:
+    if not isinstance(section, dict):
+        return None
+    direct_values = [
+        section.get("total_score"),
+        (section.get("section_verdict") or {}).get("score") if isinstance(section.get("section_verdict"), dict) else None,
+        section.get("strength_score"),
+        section.get("score"),
+    ]
+    for value in direct_values:
+        bounded = _bounded_metric_score(value)
+        if isinstance(bounded, int):
+            return bounded
+    metrics = [
+        item
+        for key in ("representative_metrics", "feature_axes", "topic_items", "judgment_axes")
+        for item in list(section.get(key) or [])
+        if isinstance(item, dict)
+    ]
+    score = _representative_score_from_public_metrics(section, metrics)
+    if isinstance(score, int):
+        return score
+    strength = _section_strength(section)
+    return strength if strength else None
+
+
+def _annual_section_scores_by_domain(sections: list[dict[str, Any]]) -> dict[str, int]:
+    scores: dict[str, int] = {}
+    for section in sections:
+        domain = _domain_key(section)
+        if not domain or domain in {"timing", "life", "year_2026", "year_2027"}:
+            continue
+        score = _annual_section_metric_score(section)
+        if isinstance(score, int):
+            scores[domain] = score
+    return scores
+
+
+def _annual_section_metric_scores_by_domain(
+    sections: list[dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    """Index the natal product metrics used as capacities by annual contracts.
+
+    A yearly contract must refer to the relevant natal ability, not to one
+    broad domain average. Both the public label and the source label are kept
+    because risk-control facets are renamed on the customer surface.
+    """
+
+    indexed: dict[str, dict[str, int]] = {}
+    metric_fields = (
+        "feature_axes",
+        "representative_metrics",
+        "judgment_axes",
+        "topic_items",
+    )
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        domain = _domain_key(section)
+        if not domain or domain in {"timing", "life", "year_2026", "year_2027"}:
+            continue
+        domain_metrics = indexed.setdefault(domain, {})
+        for field in metric_fields:
+            for metric in list(section.get(field) or []):
+                if not isinstance(metric, dict):
+                    continue
+                quality_score = _public_metric_quality_score(metric)
+                if not isinstance(quality_score, int):
+                    continue
+                for label_value in (metric.get("label"), metric.get("source_label")):
+                    label = str(label_value or "").strip()
+                    if label and label not in domain_metrics:
+                        domain_metrics[label] = quality_score
+    return indexed
+
+
+def _annual_contract_natal_capacity(
+    label: str,
+    *,
+    metric_scores_by_domain: dict[str, dict[str, int]] | None,
+    fallback_anchor_score: int,
+) -> tuple[float, list[dict[str, Any]]]:
+    contract = ANNUAL_METRIC_CONTRACTS.get(str(label or "").strip())
+    if contract is None or not metric_scores_by_domain:
+        return float(fallback_anchor_score), []
+
+    flat_lookup: dict[str, tuple[str, str, int]] = {}
+    for domain, metrics in metric_scores_by_domain.items():
+        for metric_label, score in metrics.items():
+            key = _compact_match_key(metric_label)
+            if key and key not in flat_lookup and isinstance(score, int):
+                flat_lookup[key] = (domain, metric_label, score)
+
+    sources: list[dict[str, Any]] = []
+    for natal_label in contract.natal_labels:
+        matched = flat_lookup.get(_compact_match_key(natal_label))
+        if matched is None:
+            continue
+        domain, matched_label, score = matched
+        sources.append({"domain": domain, "label": matched_label, "score": score})
+
+    if not sources:
+        return float(fallback_anchor_score), []
+    capacity = sum(float(source["score"]) for source in sources) / len(sources)
+    return capacity, sources
+
+
+def _annual_row_for_year(chart_summary: dict[str, Any], year: int) -> dict[str, Any]:
+    for key in ("timingAnnualRows", "timingRows", "timing_rows", "annualRows", "annual_rows"):
+        rows = chart_summary.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                row_year = int(row.get("year") or 0)
+            except (TypeError, ValueError):
+                row_year = 0
+            if row_year == year:
+                return dict(row)
+    return {}
+
+
+def _annual_anchor_score(
+    domain_scores: dict[str, int],
+    anchor: str,
+    row: dict[str, Any],
+) -> int:
+    if anchor == "overall":
+        values = [score for score in domain_scores.values() if isinstance(score, int)]
+        base = round(sum(values) / len(values)) if values else 62
+    else:
+        base = domain_scores.get(anchor)
+        if not isinstance(base, int):
+            base = round(sum(domain_scores.values()) / len(domain_scores)) if domain_scores else 62
+    # This value is the natal capacity anchor only. The annual row is applied
+    # once in `_annual_metric_score_breakdown`; blending it here and again
+    # there counted the same annual flow twice.
+    _ = row
+    return int(max(28, min(98, base)))
+
+
+def _annual_component_scores(row: dict[str, Any], anchor: str) -> dict[str, float]:
+    if not isinstance(row, dict):
+        return {}
+    domain_scores = row.get("domainScores") or {}
+    if not isinstance(domain_scores, dict):
+        return {}
+
+    candidate_domains: list[str]
+    if anchor == "overall":
+        candidate_domains = [
+            domain
+            for domain in ("money", "career", "love", "marriage", "social", "honor")
+            if isinstance(domain_scores.get(domain), dict)
+        ]
+    elif isinstance(domain_scores.get(anchor), dict):
+        candidate_domains = [anchor]
+    else:
+        candidate_domains = [
+            domain
+            for domain in ANNUAL_COMPONENT_FALLBACK_DOMAINS.get(anchor, ())
+            if isinstance(domain_scores.get(domain), dict)
+        ]
+    if not candidate_domains:
+        return {}
+
+    result: dict[str, float] = {}
+    for field in ("opportunity", "probability", "change", "risk"):
+        values = [
+            _number_value((domain_scores.get(domain) or {}).get(field), 50.0)
+            for domain in candidate_domains
+            if isinstance(domain_scores.get(domain), dict)
+        ]
+        if values:
+            result[field] = sum(values) / len(values)
+    return result
+
+
+def _annual_component_source_domains(row: dict[str, Any], anchor: str) -> list[str]:
+    if not isinstance(row, dict):
+        return []
+    domain_scores = row.get("domainScores") or {}
+    if not isinstance(domain_scores, dict):
+        return []
+    if anchor == "overall":
+        candidates = ("money", "career", "love", "marriage", "social", "honor")
+    elif isinstance(domain_scores.get(anchor), dict):
+        candidates = (anchor,)
+    else:
+        candidates = ANNUAL_COMPONENT_FALLBACK_DOMAINS.get(anchor, ())
+    return [domain for domain in candidates if isinstance(domain_scores.get(domain), dict)]
+
+
+def _annual_component_profile_name(label: str, polarity: str) -> str:
+    label = str(label or "").strip()
+    profile = ANNUAL_LABEL_COMPONENT_PROFILE.get(label)
+    if profile:
+        return profile
+    return "burden_guard" if polarity == "risk" else "realization"
+
+
+def _annual_component_profile_source(label: str) -> str:
+    return "label_map" if str(label or "").strip() in ANNUAL_LABEL_COMPONENT_PROFILE else "fallback"
+
+
+def _annual_metric_signal_profile(label: str, polarity: str) -> list[str]:
+    profile_name = _annual_component_profile_name(label, polarity)
+    return list(ANNUAL_COMPONENT_SIGNAL_PROFILES.get(profile_name, ("change_adaptation", "continuity", "risk_detection")))
+
+
+def _annual_basis_code_direct_terms(
+    basis_codes: list[str],
+    counter_signals: list[str],
+    branch_relations: list[str],
+) -> list[str]:
+    terms: list[str] = []
+
+    def add(*values: Any) -> None:
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in terms:
+                terms.append(text)
+
+    for code in _product_metric_structural_basis_codes(list(basis_codes or [])):
+        key = _compact_match_key(code)
+        add(code)
+        if "annualpillar" in key or "daeunpillar" in key:
+            add("timing_activation", "시기", "세운", "대운")
+        if "protrude" in key or "visible" in key:
+            add("visible", "public", "expression", "드러남", "투출")
+        if "root" in key or "roots" in key:
+            add("retention", "continuity", "기반", "통근")
+        if "useful" in key:
+            add("useful", "usable", "support", "유용", "보완")
+        if "caution" in key or "pressure" in key:
+            add("risk", "loss", "responsibility", "주의", "부담")
+        if "clash" in key:
+            add("clash", "change_adaptation", "risk", "충", "변동")
+        if "break" in key:
+            add("break", "loss", "risk", "파", "균열")
+        if "harm" in key:
+            add("harm", "relationship", "conflict_recovery", "해", "오해")
+        if "punishment" in key:
+            add("self_punishment", "risk", "responsibility", "형", "압박")
+        if "combine" in key or "trine" in key:
+            add("six_combine", "relationship", "support", "cooperation", "합", "연결")
+        if "wealth" in key or "jae" in key:
+            add("wealth", "income", "asset", "재성", "재물")
+        if "officer" in key or "gwan" in key:
+            add("officer", "authority", "public", "관성", "직책")
+        if (
+            "resource" in key
+            or "inseong" in key
+            or "jeongin" in key
+            or "pyeonin" in key
+            or "정인" in key
+            or "편인" in key
+        ):
+            add("resource", "document", "support", "인성", "문서")
+        if "output" in key or "siksin" in key or "sanggwan" in key or "식신" in key or "상관" in key:
+            add("output", "career", "expression", "식상", "성과")
+        if "peer" in key or "bigyeon" in key or "geobjae" in key or "비견" in key or "겁재" in key:
+            add("peer", "shared", "boundary", "비겁", "공동")
+
+    for signal in list(counter_signals or []):
+        key = _compact_match_key(signal)
+        add(signal)
+        if "loss" in key or "risk" in key:
+            add("loss", "risk", "주의", "손실")
+        if "conflict" in key or "clash" in key:
+            add("conflict_recovery", "relationship_guard", "갈등", "충돌")
+        if "pressure" in key or "burden" in key:
+            add("responsibility", "burden_guard", "부담", "책임")
+
+    for relation in list(branch_relations or []):
+        relation_text = str(relation or "").strip()
+        add(relation_text)
+        if relation_text in {"충"}:
+            add("clash", "change_adaptation", "risk")
+        elif relation_text in {"형", "자형"}:
+            add("self_punishment", "risk", "responsibility")
+        elif relation_text in {"파"}:
+            add("break", "loss", "risk")
+        elif relation_text in {"해"}:
+            add("harm", "relationship", "conflict_recovery")
+        elif "합" in relation_text:
+            add("six_combine", "relationship", "support")
+
+    return terms[:48]
+
+
+def _annual_ten_god_direct_terms(
+    row: dict[str, Any],
+    *,
+    label: str,
+    polarity: str,
+) -> list[str]:
+    terms: list[str] = []
+
+    def add(*values: Any) -> None:
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in terms:
+                terms.append(text)
+
+    profile_name = _annual_metric_ten_god_profile_name(label, polarity)
+    profile = ANNUAL_TEN_GOD_PROFILES.get(profile_name, {})
+    support_groups = {str(group) for group in profile.get("support", ())}
+    pressure_groups = {str(group) for group in profile.get("pressure", ())}
+    profile_terms = ANNUAL_PROFILE_NARROW_DIRECT_TERMS.get(profile_name, ())
+    groups = _annual_ten_god_groups(row)
+    for group, count in groups.items():
+        if int(count or 0) <= 0:
+            continue
+        add(group, *ANNUAL_TEN_GOD_GROUP_DIRECT_TERMS.get(group, ()))
+        if group in support_groups:
+            add(*profile_terms)
+            add("useful", "support", "작용", "보완")
+        if group in pressure_groups:
+            add("risk", "loss", "boundary", "부담", "주의", "변수")
+            if polarity == "risk":
+                add(*profile_terms)
+    return terms[:48]
+
+
+def _annual_metric_signal_diagnostics(
+    *,
+    label: str,
+    polarity: str,
+    row: dict[str, Any],
+    activation_keywords: list[str],
+    basis_codes: list[str],
+    counter_signals: list[str],
+    branch_relations: list[str],
+    ten_god_labels: list[str],
+    component_keywords: list[str] | None = None,
+) -> dict[str, Any]:
+    profile = _annual_metric_signal_profile(label, polarity)
+    display_label, display_description = ANNUAL_RISK_DISPLAY_MAP.get(label, ("", ""))
+    display_label, display_description = ANNUAL_METRIC_DISPLAY_MAP.get(
+        label,
+        (display_label, display_description),
+    )
+    annual_direct_structural_terms = _annual_basis_code_direct_terms(
+        basis_codes,
+        counter_signals,
+        branch_relations,
+    )
+    annual_direct_ten_god_terms = _annual_ten_god_direct_terms(row, label=label, polarity=polarity)
+    engine_evidence_terms = frozenset(
+        _product_metric_engine_semantic_terms(
+            row.get("pillar"),
+            row.get("daeunPillar"),
+            row.get("stemTenGod"),
+            row.get("branchTenGod"),
+            row.get("daeunStemTenGod"),
+            row.get("daeunBranchTenGod"),
+            *activation_keywords,
+            *basis_codes,
+            *counter_signals,
+            *branch_relations,
+            *ten_god_labels,
+            *(component_keywords or []),
+        )
+    )
+    direct_evidence_terms = frozenset(
+        _product_metric_engine_semantic_terms(
+            row.get("pillar"),
+            row.get("daeunPillar"),
+            row.get("stemTenGod"),
+            row.get("branchTenGod"),
+            row.get("daeunStemTenGod"),
+            row.get("daeunBranchTenGod"),
+            *activation_keywords,
+            *_product_metric_structural_basis_codes(list(basis_codes or [])),
+            *counter_signals,
+            *branch_relations,
+            *ten_god_labels,
+            *annual_direct_structural_terms,
+            *annual_direct_ten_god_terms,
+        )
+    )
+    label_evidence_terms = frozenset(
+        _product_metric_match_terms(
+            label,
+            display_label,
+            display_description,
+        )
+    )
+    matches: list[dict[str, Any]] = []
+    direct_matches: list[dict[str, Any]] = []
+    label_matches: list[dict[str, Any]] = []
+    for signal in profile:
+        matched_terms: list[str] = []
+        direct_matched_terms: list[str] = []
+        label_matched_terms: list[str] = []
+        for term in PRODUCT_METRIC_ENGINE_SIGNAL_TERMS.get(signal, ()):
+            if _term_matches_evidence(term, engine_evidence_terms) and term not in matched_terms:
+                matched_terms.append(term)
+            if _term_matches_evidence(term, direct_evidence_terms) and term not in direct_matched_terms:
+                direct_matched_terms.append(term)
+            if _term_matches_evidence(term, label_evidence_terms) and term not in label_matched_terms:
+                label_matched_terms.append(term)
+            if len(matched_terms) >= 4 and len(direct_matched_terms) >= 4 and len(label_matched_terms) >= 4:
+                break
+        if matched_terms:
+            matches.append({"signal": signal, "terms": matched_terms})
+        if direct_matched_terms:
+            direct_matches.append({"signal": signal, "terms": direct_matched_terms[:4]})
+        if label_matched_terms:
+            label_matches.append({"signal": signal, "terms": label_matched_terms[:4]})
+    matched_count = len(matches)
+    fit = _product_metric_direct_signal_fit(profile, matches)
+    direct_matched_count = len(direct_matches)
+    direct_fit = _product_metric_direct_signal_fit(profile, direct_matches)
+    label_matched_count = len(label_matches)
+    label_matched_term_count = sum(len(match.get("terms") or []) for match in label_matches)
+    label_fit = min(
+        1.0,
+        (label_matched_count / max(1, len(profile))) * 0.82 + min(label_matched_term_count, 8) * 0.0225,
+    )
+    return {
+        "annual_signal_profile": profile,
+        "annual_signal_matches": matches[:6],
+        "annual_signal_fit": round(fit, 3),
+        "annual_signal_matched_count": matched_count,
+        "annual_direct_signal_matches": direct_matches[:6],
+        "annual_direct_signal_fit": round(direct_fit, 3),
+        "annual_direct_signal_matched_count": direct_matched_count,
+        "annual_label_signal_fit": round(label_fit, 3),
+        "annual_label_signal_matched_count": label_matched_count,
+        "annual_direct_structural_terms": annual_direct_structural_terms[:12],
+        "annual_direct_ten_god_terms": annual_direct_ten_god_terms[:12],
+    }
+
+
+def _annual_component_evidence_keywords(
+    components: dict[str, float],
+    *,
+    anchor: str,
+    group_key: str,
+    polarity: str,
+) -> list[str]:
+    if not components:
+        return []
+    keywords: list[str] = []
+
+    def add(*values: str) -> None:
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in keywords:
+                keywords.append(text)
+
+    opportunity = _number_value(components.get("opportunity"), 50.0)
+    probability = _number_value(components.get("probability"), 50.0)
+    change = _number_value(components.get("change"), 50.0)
+    risk = _number_value(components.get("risk"), 50.0)
+    if opportunity >= 56:
+        add("기회", "유입", "제안", "선택지", "지원", "도움")
+    if probability >= 56:
+        add("성과", "실현", "상승", "안정성")
+    if change >= 56:
+        add("변화", "전환", "확장", "이동")
+    if risk >= 56:
+        add("위험", "주의", "손실", "갈등", "부담", "변수")
+    elif risk <= 44:
+        add("안정", "유지", "회복", "방어")
+    if polarity == "risk":
+        add("관리", "조정", "방어")
+
+    domain = group_key if group_key != "overall" else anchor
+    if domain == "money":
+        add("재정", "수입", "자산", "계약", "현금")
+    elif domain == "career":
+        add("직업", "업무", "직무", "성과", "권한")
+    elif domain == "social":
+        add("관계", "협력", "인연", "신뢰")
+    elif domain == "love":
+        add("연애", "호감", "인연", "감정")
+    elif domain == "marriage":
+        add("결혼", "배우자", "가정", "합의", "인연")
+    elif domain == "honor":
+        add("평판", "인정", "직함", "명분")
+    elif domain == "condition":
+        add("생활", "활력", "피로", "회복")
+    return keywords[:24]
+
+
+def _annual_metric_signal_context(
+    row: dict[str, Any],
+    polarity: str,
+    *,
+    anchor: str = "",
+    group_key: str = "",
+) -> dict[str, list[str]]:
+    activation_keywords = _timing_activation_keywords(row, "caution" if polarity == "risk" else "good")
+    basis_codes = [str(item).strip() for item in list(row.get("basisCodes") or []) if str(item).strip()]
+    counter_signals = [str(item).strip() for item in list(row.get("counterSignals") or []) if str(item).strip()]
+    # The compact timing row keeps only a short public trace at the top level,
+    # while each domain score retains the complete engine basis. Scoring must
+    # consume that complete domain evidence instead of silently judging every
+    # metric from the first five generic codes.
+    domain_scores = row.get("domainScores") if isinstance(row, dict) else None
+    if isinstance(domain_scores, dict):
+        if anchor == "overall":
+            evidence_domains = tuple(
+                domain
+                for domain in ("money", "career", "love", "marriage", "social", "honor")
+                if isinstance(domain_scores.get(domain), dict)
+            )
+        elif isinstance(domain_scores.get(anchor), dict):
+            evidence_domains = (anchor,)
+        else:
+            evidence_domains = tuple(
+                domain
+                for domain in ANNUAL_COMPONENT_FALLBACK_DOMAINS.get(anchor, ())
+                if isinstance(domain_scores.get(domain), dict)
+            )
+        for domain in evidence_domains:
+            domain_row = domain_scores.get(domain) or {}
+            for item in list(domain_row.get("basis_codes") or domain_row.get("basisCodes") or []):
+                text = str(item or "").strip()
+                if text and text not in basis_codes:
+                    basis_codes.append(text)
+            for item in list(domain_row.get("counter_signals") or domain_row.get("counterSignals") or []):
+                text = str(item or "").strip()
+                if text and text not in counter_signals:
+                    counter_signals.append(text)
+    branch_relations = [
+        TIMING_RELATION_LABELS.get(str(item.get("relationType") or item.get("relation_type") or ""), "")
+        for item in list(row.get("branchInteractions") or [])
+        if isinstance(item, dict)
+    ]
+    branch_relations = [item for item in branch_relations if item]
+    ten_god_labels = [
+        str(row.get(key) or "").strip()
+        for key in ("stemTenGodLabel", "branchTenGodLabel", "daeunStemTenGodLabel", "daeunBranchTenGodLabel")
+        if str(row.get(key) or "").strip()
+    ]
+    component_keywords = _annual_component_evidence_keywords(
+        _annual_component_scores(row, anchor),
+        anchor=anchor,
+        group_key=group_key,
+        polarity=polarity,
+    )
+    return {
+        "activation_keywords": activation_keywords,
+        "basis_codes": basis_codes,
+        "counter_signals": counter_signals,
+        "branch_relations": branch_relations,
+        "ten_god_labels": ten_god_labels,
+        "component_keywords": component_keywords,
+    }
+
+
+def _annual_metric_component_score(
+    *,
+    label: str,
+    polarity: str,
+    anchor_score: int,
+    components: dict[str, float],
+) -> float | None:
+    if not components:
+        return None
+    opportunity = _number_value(components.get("opportunity"), 50.0)
+    probability = _number_value(components.get("probability"), 50.0)
+    change = _number_value(components.get("change"), 50.0)
+    risk = _number_value(components.get("risk"), 50.0)
+    risk_guard = 100.0 - risk
+
+    contract = ANNUAL_METRIC_CONTRACTS.get(str(label or "").strip())
+    if contract is not None:
+        if contract.change_mode == "guard":
+            change_value = 100.0 - change
+        elif contract.change_mode == "neutral":
+            # Change is neither inherently favorable nor unfavorable here.
+            # A moderate range is easier to retain than either stagnation or
+            # excessive volatility.
+            change_value = max(18.0, 100.0 - abs(change - 52.0) * 1.35)
+        else:
+            change_value = change
+        opportunity_w, probability_w, change_w, risk_guard_w = contract.component_weights
+        return (
+            opportunity * opportunity_w
+            + probability * probability_w
+            + change_value * change_w
+            + risk_guard * risk_guard_w
+        )
+
+    profile_name = _annual_component_profile_name(label, polarity)
+    profile = ANNUAL_COMPONENT_PROFILES.get(profile_name)
+    if polarity == "risk" and profile:
+        # Every risk label is individually assigned to a guard profile in
+        # ANNUAL_LABEL_COMPONENT_PROFILE. Convert that profile into the
+        # corresponding management quality: change and risk are represented by
+        # their guarded values, while opportunity and realization remain useful
+        # supporting conditions. Normalizing the audited weights prevents a
+        # profile with a negative change coefficient from shrinking the score.
+        opportunity_w, probability_w, change_w, risk_guard_w = profile
+        weights = (
+            max(0.0, opportunity_w),
+            max(0.0, probability_w),
+            abs(change_w),
+            max(0.0, risk_guard_w),
+        )
+        weight_total = sum(weights) or 1.0
+        change_guard = 100.0 - change
+        component = (
+            opportunity * weights[0]
+            + probability * weights[1]
+            + change_guard * weights[2]
+            + risk_guard * weights[3]
+        ) / weight_total
+    elif polarity == "risk":
+        # A future unmapped risk metric still follows the public quality
+        # direction, but mapped production metrics never use this fallback.
+        risk_intensity = risk * 0.72 + change * 0.28
+        component = 100.0 - risk_intensity
+    elif profile:
+        opportunity_w, probability_w, change_w, risk_guard_w = profile
+        component = (
+            opportunity * opportunity_w
+            + probability * probability_w
+            + change * change_w
+            + risk_guard * risk_guard_w
+        )
+    elif any(token in label for token in ("안정", "유지", "회복", "통제", "관리", "지속", "방어")):
+        component = opportunity * 0.26 + probability * 0.34 + change * 0.10 + risk_guard * 0.30
+    elif any(token in label for token in ("기회", "유입", "소개", "인연", "이직", "투자", "신규", "새로운")):
+        component = opportunity * 0.55 + probability * 0.25 + change * 0.15 + risk_guard * 0.05
+    elif any(token in label for token in ("상승", "성과", "실현", "성사", "구체화", "결정", "권한", "확대", "전문", "강화", "직함", "인정", "평판", "영향력", "수입", "목돈", "자산", "보상")):
+        component = opportunity * 0.36 + probability * 0.42 + change * 0.12 + risk_guard * 0.10
+    elif any(token in label for token in ("변화", "확장", "노출", "역할")):
+        component = opportunity * 0.38 + probability * 0.22 + change * 0.32 + risk_guard * 0.08
+    else:
+        component = opportunity * 0.36 + probability * 0.36 + change * 0.14 + risk_guard * 0.14
+    return component
+
+
+def _annual_metric_ten_god_profile_name(label: str, polarity: str) -> str:
+    mapped = ANNUAL_LABEL_TEN_GOD_PROFILE_OVERRIDES.get(str(label or "").strip())
+    if mapped:
+        return mapped
+    return _annual_component_profile_name(label, polarity)
+
+
+def _annual_ten_god_groups(row: dict[str, Any]) -> dict[str, int]:
+    if not isinstance(row, dict):
+        return {}
+    # A flow position exposes the same ten-god twice: once as an engine key and
+    # once as its Korean label. Count each annual/daeun position only once.
+    values: list[str] = []
+    for key_field, label_field in (
+        ("stemTenGod", "stemTenGodLabel"),
+        ("branchTenGod", "branchTenGodLabel"),
+        ("daeunStemTenGod", "daeunStemTenGodLabel"),
+        ("daeunBranchTenGod", "daeunBranchTenGodLabel"),
+    ):
+        value = str(row.get(key_field) or row.get(label_field) or "").strip()
+        if value:
+            values.append(value)
+    groups: dict[str, int] = {}
+    for group, aliases in ANNUAL_TEN_GOD_GROUP_ALIASES.items():
+        count = sum(1 for value in values if value in aliases)
+        if count:
+            groups[group] = count
+    return groups
+
+
+def _annual_weighted_ten_god_groups(row: dict[str, Any]) -> dict[str, float]:
+    """Measure annual and daeun ten gods by their actual event position."""
+
+    if not isinstance(row, dict):
+        return {}
+    weighted_fields = (
+        ("stemTenGod", "stemTenGodLabel", 1.00),
+        ("branchTenGod", "branchTenGodLabel", 1.15),
+        ("daeunStemTenGod", "daeunStemTenGodLabel", 0.72),
+        ("daeunBranchTenGod", "daeunBranchTenGodLabel", 0.95),
+    )
+    groups: dict[str, float] = {}
+    for key_field, label_field, position_weight in weighted_fields:
+        value = str(row.get(key_field) or row.get(label_field) or "").strip()
+        if not value:
+            continue
+        for group, aliases in ANNUAL_TEN_GOD_GROUP_ALIASES.items():
+            if value in aliases:
+                groups[group] = groups.get(group, 0.0) + position_weight
+                break
+    return groups
+
+
+def _annual_contract_ten_god_groups(label: str, gender: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    contract = ANNUAL_METRIC_CONTRACTS.get(str(label or "").strip())
+    if contract is None:
+        return (), ()
+    spouse_group = "wealth" if gender == "male" else "officer" if gender == "female" else ""
+
+    def resolve(groups: tuple[str, ...]) -> tuple[str, ...]:
+        resolved: list[str] = []
+        for group in groups:
+            actual = spouse_group if group == "spouse" else group
+            if actual and actual not in resolved:
+                resolved.append(actual)
+        return tuple(resolved)
+
+    return resolve(contract.support_groups), resolve(contract.pressure_groups)
+
+
+def _annual_activation_quality(
+    row: dict[str, Any],
+    *,
+    label: str,
+    gender: str = "unknown",
+    ten_god_profile: dict[str, Any] | None = None,
+) -> float:
+    """Return the broad daeun/annual environment without ten-god duplication.
+
+    Exact annual ten-god fit is an independent layer in the public contract.
+    Reusing it here counted the same four flow positions twice.  This layer is
+    deliberately limited to month-governed useful/caution hits and the
+    compound direction of daeun and annual flow.
+    """
+
+    context = row.get("activationContext") if isinstance(row, dict) else None
+    if not isinstance(context, dict):
+        context = {}
+    useful_hits = int(context.get("useful_hit_count") or 0)
+    caution_hits = int(context.get("caution_hit_count") or 0)
+    compound = context.get("compound_direction")
+    compound = compound if isinstance(compound, dict) else {}
+    general_quality = 50.0 + max(-5, min(5, useful_hits - caution_hits)) * 3.0
+    for key, support_bonus, burden_penalty in (
+        ("annual_status", 10.0, 12.0),
+        ("daeun_status", 6.0, 8.0),
+    ):
+        status = str(compound.get(key) or "neutral")
+        if status == "supportive":
+            general_quality += support_bonus
+        elif status == "burdensome":
+            general_quality -= burden_penalty
+    general_quality = max(18.0, min(92.0, general_quality))
+
+    _ = (label, gender, ten_god_profile)
+    return general_quality
+
+
+def _annual_direct_structural_quality(
+    row: dict[str, Any],
+    *,
+    label: str,
+    group_key: str,
+    polarity: str,
+    annual_signal_diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Judge label-specific direct activation without replacing annual flow.
+
+    This fifth layer consumes the full domain basis, counter signals and
+    branch interactions.  Signal-profile fit determines applicability; the
+    month-governed support/pressure balance determines direction.  It remains
+    a qualifier because the domain flow already contains the event magnitude.
+    """
+
+    anchor = "overall" if group_key == "overall" else group_key
+    signal_context = _annual_metric_signal_context(
+        row,
+        polarity,
+        anchor=anchor,
+        group_key=group_key,
+    )
+    diagnostics = annual_signal_diagnostics or _annual_metric_signal_diagnostics(
+        label=label,
+        polarity=polarity,
+        row=row,
+        activation_keywords=signal_context["activation_keywords"],
+        basis_codes=signal_context["basis_codes"],
+        counter_signals=signal_context["counter_signals"],
+        branch_relations=signal_context["branch_relations"],
+        ten_god_labels=signal_context["ten_god_labels"],
+        component_keywords=signal_context["component_keywords"],
+    )
+    direct_fit = max(0.0, min(1.0, float(diagnostics.get("annual_direct_signal_fit") or 0.0)))
+    direct_matches = list(diagnostics.get("annual_direct_signal_matches") or [])
+    basis_codes = signal_context["basis_codes"]
+    counter_signals = signal_context["counter_signals"]
+
+    context = row.get("activationContext") if isinstance(row, dict) else None
+    context = context if isinstance(context, dict) else {}
+    compound = context.get("compound_direction")
+    compound = compound if isinstance(compound, dict) else {}
+    support_mass = (
+        float(compound.get("annual_support_score") or 0.0)
+        + float(compound.get("daeun_support_score") or 0.0) * 0.72
+    )
+    pressure_mass = (
+        float(compound.get("annual_pressure_score") or 0.0)
+        + float(compound.get("daeun_pressure_score") or 0.0) * 0.72
+    )
+
+    useful_relation_count = sum(
+        "useful_relation" in _compact_match_key(code)
+        for code in basis_codes
+    )
+    support_operation_count = sum(
+        any(token in _compact_match_key(code) for token in (
+            "supportsmonth", "usefulelement", "flowannualsupportive",
+            "rootsnatal", "protrudesnatal", "repeatsnatal",
+        ))
+        for code in basis_codes
+    )
+    pressure_operation_count = sum(
+        any(token in _compact_match_key(code) for token in (
+            "caution", "pressure", "burden", "overuse", "harmsmonth",
+            "competition", "drainsweak", "controlsweak",
+        ))
+        for code in counter_signals
+    )
+    support_mass += min(5.0, useful_relation_count * 0.75)
+    support_mass += min(6.0, support_operation_count * 0.34)
+    pressure_mass += min(8.0, len(counter_signals) * 0.24 + pressure_operation_count * 0.42)
+
+    total_mass = support_mass + pressure_mass
+    if total_mass <= 0.001 or direct_fit <= 0.0:
+        quality_score = 50.0
+        materiality = 0.0
+    else:
+        balance = (support_mass - pressure_mass) / total_mass
+        quality_score = max(18.0, min(92.0, 50.0 + balance * 37.0))
+        materiality = min(
+            1.0,
+            0.16 + direct_fit * 0.62 + min(0.22, len(direct_matches) * 0.045),
+        )
+    return {
+        "quality_score": round(quality_score, 3),
+        "materiality": round(materiality, 3),
+        "support_mass": round(support_mass, 3),
+        "pressure_mass": round(pressure_mass, 3),
+        "direct_signal_fit": round(direct_fit, 3),
+        "direct_signal_match_count": len(direct_matches),
+    }
+
+
+def _annual_ten_god_profile_payload(
+    row: dict[str, Any],
+    *,
+    label: str,
+    polarity: str,
+    gender: str = "unknown",
+) -> dict[str, Any]:
+    profile_name = _annual_metric_ten_god_profile_name(label, polarity)
+    profile = ANNUAL_TEN_GOD_PROFILES.get(profile_name, {})
+    contract_support, contract_pressure = _annual_contract_ten_god_groups(label, gender)
+    support_groups = contract_support or tuple(str(item) for item in (profile.get("support") or ()))
+    pressure_groups = contract_pressure or tuple(str(item) for item in (profile.get("pressure") or ()))
+    groups = _annual_ten_god_groups(row)
+    weighted_groups = _annual_weighted_ten_god_groups(row)
+    support_hit_count = sum(groups.get(group, 0) for group in support_groups)
+    pressure_hit_count = sum(groups.get(group, 0) for group in pressure_groups)
+    support_strength = sum(weighted_groups.get(group, 0.0) for group in support_groups)
+    pressure_strength = sum(weighted_groups.get(group, 0.0) for group in pressure_groups)
+    active_strength = sum(weighted_groups.values())
+    if active_strength:
+        ten_god_quality = max(
+            18.0,
+            min(92.0, 50.0 + (support_strength - pressure_strength) / active_strength * 36.0),
+        )
+    else:
+        ten_god_quality = 50.0
+    return {
+        "ten_god_profile": profile_name,
+        "ten_god_groups": groups,
+        "weighted_ten_god_groups": {key: round(value, 2) for key, value in weighted_groups.items()},
+        "ten_god_support_groups": list(support_groups),
+        "ten_god_pressure_groups": list(pressure_groups),
+        "ten_god_support_hit_count": support_hit_count,
+        "ten_god_pressure_hit_count": pressure_hit_count,
+        "ten_god_support_strength": round(support_strength, 3),
+        "ten_god_pressure_strength": round(pressure_strength, 3),
+        "ten_god_quality_score": round(ten_god_quality, 3),
+        "ten_god_support_weight": float(profile.get("support_weight") or 1.0),
+        "ten_god_pressure_weight": float(profile.get("pressure_weight") or 0.8),
+    }
+
+
+def _annual_qualifier_delta(
+    score: float,
+    *,
+    support_weight: float,
+    pressure_weight: float,
+    support_cap: float,
+    pressure_cap: float,
+) -> float:
+    """Return a centered annual qualifier while preserving downside evidence."""
+
+    delta = float(score) - 50.0
+    if delta >= 0.0:
+        return min(float(support_cap), delta * float(support_weight))
+    return max(-float(pressure_cap), delta * float(pressure_weight))
+
+
+def _annual_activation_is_material(row: dict[str, Any]) -> bool:
+    context = row.get("activationContext") if isinstance(row, dict) else None
+    if not isinstance(context, dict):
+        context = {}
+    if int(context.get("useful_hit_count") or 0) + int(context.get("caution_hit_count") or 0) > 0:
+        return True
+    compound = context.get("compound_direction")
+    if isinstance(compound, dict) and any(
+        str(compound.get(key) or "neutral") != "neutral"
+        for key in ("annual_status", "daeun_status")
+    ):
+        return True
+    return bool(
+        row.get("basisCodes")
+        or row.get("counterSignals")
+        or row.get("branchInteractions")
+    )
+
+
+def _annual_quality_evidence_ledger(
+    *,
+    component_score: float | None,
+    natal_capacity: float,
+    natal_capacity_sources: list[dict[str, Any]],
+    ten_god_quality: float,
+    ten_god_support_strength: float,
+    ten_god_pressure_strength: float,
+    activation_quality: float,
+    direct_structural_quality: float,
+    direct_structural_materiality: float,
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    """Build five independent annual quality layers for public-score auditing."""
+
+    annual_flow_score = float(component_score) if isinstance(component_score, float) else 50.0
+    maximum_ten_god_exposure = 3.82
+    ten_god_materiality = min(
+        1.0,
+        (float(ten_god_support_strength) + float(ten_god_pressure_strength))
+        / maximum_ten_god_exposure,
+    )
+    activation_active = _annual_activation_is_material(row)
+    natal_has_direct_sources = bool(natal_capacity_sources)
+    natal_is_available = natal_has_direct_sources or abs(float(natal_capacity) - 50.0) > 0.001
+    layer_specs = (
+        ("annual_flow", annual_flow_score, 1.0, isinstance(component_score, float)),
+        (
+            "natal_capacity",
+            float(natal_capacity),
+            0.82 if natal_has_direct_sources else 0.45,
+            natal_is_available,
+        ),
+        ("annual_ten_god_fit", float(ten_god_quality), ten_god_materiality, ten_god_materiality > 0.0),
+        ("activation_context", float(activation_quality), 0.78, activation_active),
+        (
+            "direct_structural_activation",
+            float(direct_structural_quality),
+            float(direct_structural_materiality),
+            float(direct_structural_materiality) > 0.0,
+        ),
+    )
+    primary_pressure = isinstance(component_score, float) and annual_flow_score <= 44.0
+    ledger: list[dict[str, Any]] = []
+    for family, score, materiality, active in layer_specs:
+        if not active:
+            kind = "context"
+        elif score >= 65.0:
+            kind = "counter" if primary_pressure and family != "annual_flow" else "support"
+        elif score <= 44.0:
+            kind = "pressure"
+        elif score > 55.0:
+            kind = "partial_support"
+        elif score < 45.0:
+            kind = "partial_pressure"
+        else:
+            kind = "context"
+        ledger.append(
+            {
+                "family": family,
+                "kind": kind,
+                "quality_score": round(score, 3),
+                "materiality": round(float(materiality), 3),
+                "critical": bool(active and materiality >= 0.75 and score <= 35.0),
+                "activated": bool(active),
+            }
+        )
+
+    support_count = sum(
+        item["kind"] == "support" and float(item["materiality"]) >= 0.55
+        for item in ledger
+    )
+    pressure_count = sum(
+        item["kind"] == "pressure" and float(item["materiality"]) >= 0.55
+        for item in ledger
+    )
+    counter_count = sum(
+        item["kind"] == "counter" and float(item["materiality"]) >= 0.55
+        for item in ledger
+    )
+    critical_pressure_count = sum(
+        item["kind"] == "pressure" and bool(item["critical"])
+        for item in ledger
+    )
+    unresolved_critical_pressure_count = max(0, critical_pressure_count - counter_count)
+    active_rows = [item for item in ledger if item["activated"]]
+    evidence_strength = (
+        sum(
+            abs(float(item["quality_score"]) - 50.0)
+            * float(item["materiality"])
+            * 2.0
+            for item in active_rows
+        )
+        / len(active_rows)
+        if active_rows
+        else 0.0
+    )
+    return {
+        "evidence_ledger": ledger,
+        "support_evidence_count": int(support_count),
+        "pressure_evidence_count": int(pressure_count),
+        "counter_evidence_count": int(counter_count),
+        "critical_pressure_count": int(critical_pressure_count),
+        "unresolved_critical_pressure_count": int(unresolved_critical_pressure_count),
+        "evidence_coverage": round(len(active_rows) / 5.0, 3),
+        "effect_strength": round(max(0.0, min(100.0, evidence_strength)), 2),
+    }
+
+
+def _apply_annual_public_quality_gate(
+    raw_score: float,
+    *,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Require independent annual layers before exposing an extreme grade."""
+
+    support_count = int(evidence.get("support_evidence_count") or 0)
+    pressure_count = int(evidence.get("pressure_evidence_count") or 0)
+    counter_count = int(evidence.get("counter_evidence_count") or 0)
+    unresolved_critical = int(evidence.get("unresolved_critical_pressure_count") or 0)
+    score = float(raw_score)
+    gates: list[str] = []
+
+    if score >= 80.0 and support_count < 3:
+        score = min(score, 74.0 + min(5.0, support_count * 2.0 + counter_count))
+        gates.append("annual_very_good_requires_three_layers")
+    # The annual-flow layer already combines opportunity, realization,
+    # change and risk. A critically weak primary flow is therefore sufficient
+    # to retain a danger result unless another layer actually counters it.
+    if score <= 29.0 and pressure_count < 3 and unresolved_critical < 1:
+        score = max(score, 34.0 - min(4.0, pressure_count * 2.0 + unresolved_critical))
+        gates.append("annual_danger_requires_three_layers")
+    if score >= 65.0 and not (
+        support_count >= 2 or (support_count >= 1 and counter_count >= 1)
+    ):
+        # Keep unsupported good results below B+ without folding every value
+        # onto one fixed boundary.  The previous hard cap made materially
+        # different raw scores (for example 65.2 and 72.8) both appear as 62.
+        # A bounded compression retains their order while the evidence gate
+        # still prevents an unsupported public-good grade.
+        overflow = max(0.0, min(27.0, score - 65.0))
+        support_credit = min(1.25, support_count * 0.75 + counter_count * 0.5)
+        # Map unsupported 65..92 results across 57..64 instead of crowding
+        # them into 62..64. The grade ceiling stays closed, while a stronger
+        # annual flow still remains visibly stronger inside the guarded band.
+        score = min(64.0, 57.0 + support_credit + overflow * (7.0 / 27.0))
+        gates.append("annual_good_requires_independent_support")
+    if score <= 44.0 and not (pressure_count >= 2 or unresolved_critical >= 1):
+        # Preserve severity inside the guarded normal band for the same
+        # reason: a weak 44 and a much weaker 34 must not become one value.
+        shortfall = max(0.0, min(32.0, 44.0 - score))
+        pressure_credit = min(1.25, pressure_count * 0.75 + unresolved_critical * 0.5)
+        # Likewise, retain severity across the protected normal band. A raw
+        # 44 and a raw 20 remain distinct even when neither has enough
+        # independent pressure evidence for a public caution grade.
+        score = max(45.0, 53.0 - pressure_credit - shortfall * (8.0 / 32.0))
+        gates.append("annual_caution_requires_independent_pressure")
+    if unresolved_critical >= 1 and score > 64.0:
+        score = 64.0
+        gates.append("annual_unresolved_critical_pressure_caps_good")
+    # Convergent pressure is already deducted by the centered qualifier
+    # deltas above. Do not flatten every normal-range metric to the same
+    # caution boundary here. The independent-support and unresolved-critical
+    # gates still prevent an unsupported good or very-good result.
+
+    # The customer sees the rounded integer.  Close the boundary after all
+    # other gates so 64.9 cannot become an unsupported 65 and 44.4 cannot
+    # become an unsupported caution grade merely through rounding.
+    display_score = int(round(score))
+    if display_score >= 80 and support_count < 3:
+        score = min(score, 79.0)
+        if "annual_very_good_requires_three_layers" not in gates:
+            gates.append("annual_very_good_requires_three_layers")
+    display_score = int(round(score))
+    if display_score >= 65 and not (
+        support_count >= 2 or (support_count >= 1 and counter_count >= 1)
+    ):
+        score = min(score, 64.0)
+        if "annual_good_requires_independent_support" not in gates:
+            gates.append("annual_good_requires_independent_support")
+    display_score = int(round(score))
+    if display_score <= 29 and pressure_count < 3 and unresolved_critical < 1:
+        score = max(score, 30.0)
+        if "annual_danger_requires_three_layers" not in gates:
+            gates.append("annual_danger_requires_three_layers")
+    display_score = int(round(score))
+    if display_score <= 44 and not (pressure_count >= 2 or unresolved_critical >= 1):
+        score = max(score, 45.0)
+        if "annual_caution_requires_independent_pressure" not in gates:
+            gates.append("annual_caution_requires_independent_pressure")
+
+    score = max(18.0, min(98.0, score))
+    return {
+        "quality_score": int(round(score)),
+        "raw_quality_score": round(float(raw_score), 3),
+        "quality_gate_applied": bool(gates),
+        "quality_gates": gates,
+    }
+
+
+def _annual_metric_score_breakdown(
+    *,
+    label: str,
+    group_key: str,
+    polarity: str,
+    anchor_score: int,
+    row: dict[str, Any],
+    anchor: str,
+    metric_scores_by_domain: dict[str, dict[str, int]] | None = None,
+    gender: str = "unknown",
+    annual_signal_diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Calculate one annual metric from its flow, natal capacity and ten-god fit.
+
+    The engine flow remains primary. A label-specific natal capacity, weighted
+    annual/daeun ten gods and the month-governed activation direction then
+    decide whether that flow can actually be used by this chart.
+    """
+    components = _annual_component_scores(row, anchor)
+    component_score = _annual_metric_component_score(
+        label=label,
+        polarity=polarity,
+        anchor_score=anchor_score,
+        components=components,
+    )
+    natal_capacity, natal_capacity_sources = _annual_contract_natal_capacity(
+        label,
+        metric_scores_by_domain=metric_scores_by_domain,
+        fallback_anchor_score=anchor_score,
+    )
+    anchor_oriented_score = float(natal_capacity)
+    annual_contract = ANNUAL_METRIC_CONTRACTS.get(str(label or "").strip())
+    expected_natal_source_count = len(annual_contract.natal_labels) if annual_contract else 0
+    natal_source_coverage = (
+        min(1.0, len(natal_capacity_sources) / expected_natal_source_count)
+        if expected_natal_source_count > 0
+        else 0.0
+    )
+    # Absolute capacity answers whether the person can use this annual event
+    # at all.  Relative capacity answers which facet is stronger or weaker
+    # inside the same domain.  Without the second comparison, every contract
+    # source above 50 added a small bonus and marriage/love facets collapsed
+    # around one score even when their natal capacities differed materially.
+    natal_capacity_reference_score = float(anchor_score)
+    natal_capacity_contrast_score = max(
+        18.0,
+        min(92.0, 50.0 + natal_capacity - natal_capacity_reference_score),
+    )
+    ten_god_profile = _annual_ten_god_profile_payload(
+        row,
+        label=label,
+        polarity=polarity,
+        gender=gender,
+    )
+    active_ten_god_count = sum(
+        int(value or 0)
+        for value in dict(ten_god_profile.get("ten_god_groups") or {}).values()
+    )
+    support_strength = float(ten_god_profile.get("ten_god_support_strength") or 0.0)
+    pressure_strength = float(ten_god_profile.get("ten_god_pressure_strength") or 0.0)
+    active_weighted_strength = sum(
+        float(value or 0.0)
+        for value in dict(ten_god_profile.get("weighted_ten_god_groups") or {}).values()
+    )
+    ten_god_balance = (
+        (support_strength - pressure_strength) / active_weighted_strength
+        if active_weighted_strength
+        else 0.0
+    )
+    ten_god_quality = float(ten_god_profile.get("ten_god_quality_score") or 50.0)
+    activation_quality = _annual_activation_quality(
+        row,
+        label=label,
+        gender=gender,
+        ten_god_profile=ten_god_profile,
+    )
+    direct_structural = _annual_direct_structural_quality(
+        row,
+        label=label,
+        group_key=group_key,
+        polarity=polarity,
+        annual_signal_diagnostics=annual_signal_diagnostics,
+    )
+    direct_structural_quality = float(direct_structural["quality_score"])
+    direct_structural_materiality = float(direct_structural["materiality"])
+
+    if isinstance(component_score, float):
+        # The annual flow is the event itself. Natal capacity, active ten-god
+        # fit and structural activation only qualify that event. Averaging all
+        # four absolute scores pulled a weak annual signal back toward the
+        # middle whenever the natal chart was strong, and it counted the same
+        # annual/daeun roles once in the flow and again as a second baseline.
+        # Center each qualifier on 50 so neutral evidence adds nothing and the
+        # year's opportunity, realization, change and risk control remain the
+        # public score's primary meaning.
+        component_weight = 1.0
+        anchor_weight = 0.12
+        ten_god_weight = 0.10
+        activation_weight = 0.05
+        direct_structural_weight = 0.08 * direct_structural_materiality
+        anchor_pressure_weight = 0.20
+        ten_god_pressure_weight = 0.16
+        activation_pressure_weight = 0.10
+        direct_structural_pressure_weight = 0.13 * direct_structural_materiality
+        natal_capacity_absolute_delta = _annual_qualifier_delta(
+            anchor_oriented_score,
+            support_weight=anchor_weight,
+            pressure_weight=anchor_pressure_weight,
+            support_cap=5.5,
+            pressure_cap=8.0,
+        )
+        natal_capacity_contrast_delta = _annual_qualifier_delta(
+            natal_capacity_contrast_score,
+            support_weight=0.35,
+            pressure_weight=0.50,
+            support_cap=4.0,
+            pressure_cap=7.5,
+        ) * natal_source_coverage
+        natal_capacity_delta = (
+            natal_capacity_absolute_delta + natal_capacity_contrast_delta
+        )
+        ten_god_fit_delta = _annual_qualifier_delta(
+            ten_god_quality,
+            support_weight=ten_god_weight,
+            pressure_weight=ten_god_pressure_weight,
+            support_cap=4.0,
+            pressure_cap=6.0,
+        )
+        activation_delta = _annual_qualifier_delta(
+            activation_quality,
+            support_weight=activation_weight,
+            pressure_weight=activation_pressure_weight,
+            support_cap=2.2,
+            pressure_cap=4.0,
+        )
+        direct_structural_delta = _annual_qualifier_delta(
+            direct_structural_quality,
+            support_weight=direct_structural_weight,
+            pressure_weight=direct_structural_pressure_weight,
+            support_cap=3.0,
+            pressure_cap=4.8,
+        )
+        blended_score = (
+            component_score
+            + natal_capacity_delta
+            + ten_god_fit_delta
+            + activation_delta
+            + direct_structural_delta
+        )
+        base_method = "annual_flow_with_five_layer_centered_qualification"
+    else:
+        component_weight = 0.0
+        anchor_weight = 0.72
+        ten_god_weight = 0.16
+        activation_weight = 0.12
+        direct_structural_weight = 0.08 * direct_structural_materiality
+        anchor_pressure_weight = anchor_weight
+        ten_god_pressure_weight = ten_god_weight
+        activation_pressure_weight = activation_weight
+        direct_structural_pressure_weight = 0.12 * direct_structural_materiality
+        fallback_weight_total = (
+            anchor_weight + ten_god_weight + activation_weight + direct_structural_weight
+        ) or 1.0
+        blended_score = (
+            anchor_oriented_score * anchor_weight
+            + ten_god_quality * ten_god_weight
+            + activation_quality * activation_weight
+            + direct_structural_quality * direct_structural_weight
+        ) / fallback_weight_total
+        natal_capacity_delta = None
+        natal_capacity_absolute_delta = None
+        natal_capacity_contrast_delta = None
+        ten_god_fit_delta = None
+        activation_delta = None
+        direct_structural_delta = None
+        base_method = "annual_contract_capacity_fallback"
+
+    evidence_ledger = _annual_quality_evidence_ledger(
+        component_score=component_score,
+        natal_capacity=natal_capacity,
+        natal_capacity_sources=natal_capacity_sources,
+        ten_god_quality=ten_god_quality,
+        ten_god_support_strength=support_strength,
+        ten_god_pressure_strength=pressure_strength,
+        activation_quality=activation_quality,
+        direct_structural_quality=direct_structural_quality,
+        direct_structural_materiality=direct_structural_materiality,
+        row=row,
+    )
+    quality_gate = _apply_annual_public_quality_gate(
+        blended_score,
+        evidence=evidence_ledger,
+    )
+    final_score = int(quality_gate["quality_score"])
+    signed_quality = max(-1.0, min(1.0, (float(final_score) - 50.0) / 48.0))
+    risk_intensity_component_score = (
+        round(100.0 - component_score, 3)
+        if polarity == "risk" and isinstance(component_score, float)
+        else None
+    )
+    risk_intensity_score = 100 - final_score if polarity == "risk" else None
+    return {
+        "score_method": (
+            "annual_flow_profile_risk_control_quality"
+            if polarity == "risk"
+            else "annual_flow_profile_quality"
+        ),
+        "base_score_method": base_method,
+        "group_key": group_key,
+        "anchor": anchor,
+        "component_profile": _annual_component_profile_name(label, polarity),
+        "component_profile_source": _annual_component_profile_source(label),
+        "judgment_contract_grade": annual_contract_grade(ANNUAL_METRIC_CONTRACTS.get(label)),
+        "judgment_contract_source": "explicit_annual_metric_contract",
+        "component_domains": _annual_component_source_domains(row, anchor),
+        "anchor_score": anchor_score,
+        "anchor_oriented_score": round(anchor_oriented_score, 2),
+        "natal_capacity_score": round(natal_capacity, 2),
+        "natal_capacity_sources": natal_capacity_sources,
+        "natal_capacity_reference_score": round(natal_capacity_reference_score, 2),
+        "natal_capacity_contrast_score": round(natal_capacity_contrast_score, 2),
+        "natal_capacity_source_coverage": round(natal_source_coverage, 3),
+        "component_weight": component_weight,
+        "anchor_weight": anchor_weight,
+        "ten_god_weight": ten_god_weight,
+        "activation_weight": activation_weight,
+        "direct_structural_weight": round(direct_structural_weight, 4),
+        "anchor_pressure_weight": anchor_pressure_weight,
+        "ten_god_pressure_weight": ten_god_pressure_weight,
+        "activation_pressure_weight": activation_pressure_weight,
+        "direct_structural_pressure_weight": round(
+            direct_structural_pressure_weight,
+            4,
+        ),
+        "natal_capacity_delta": round(natal_capacity_delta, 3) if isinstance(natal_capacity_delta, float) else None,
+        "natal_capacity_absolute_delta": round(natal_capacity_absolute_delta, 3) if isinstance(natal_capacity_absolute_delta, float) else None,
+        "natal_capacity_contrast_delta": round(natal_capacity_contrast_delta, 3) if isinstance(natal_capacity_contrast_delta, float) else None,
+        "ten_god_fit_delta": round(ten_god_fit_delta, 3) if isinstance(ten_god_fit_delta, float) else None,
+        "activation_delta": round(activation_delta, 3) if isinstance(activation_delta, float) else None,
+        "direct_structural_delta": round(direct_structural_delta, 3) if isinstance(direct_structural_delta, float) else None,
+        "polarity": polarity,
+        "risk_guard_applied": polarity == "risk",
+        "opportunity": round(float(components.get("opportunity", 50.0)), 2) if components else None,
+        "probability": round(float(components.get("probability", 50.0)), 2) if components else None,
+        "change": round(float(components.get("change", 50.0)), 2) if components else None,
+        "risk": round(float(components.get("risk", 50.0)), 2) if components else None,
+        "component_score": round(component_score, 3) if isinstance(component_score, float) else None,
+        "risk_intensity_component_score": risk_intensity_component_score,
+        "blended_score": round(blended_score, 3),
+        "raw_quality_score": quality_gate["raw_quality_score"],
+        "quality_score": final_score,
+        "effect_strength": evidence_ledger["effect_strength"],
+        "signed_quality": round(signed_quality, 3),
+        "evidence_coverage": evidence_ledger["evidence_coverage"],
+        "quality_gate_applied": quality_gate["quality_gate_applied"],
+        "quality_gates": quality_gate["quality_gates"],
+        "quality_evidence_ledger": evidence_ledger["evidence_ledger"],
+        "support_evidence_count": evidence_ledger["support_evidence_count"],
+        "pressure_evidence_count": evidence_ledger["pressure_evidence_count"],
+        "counter_evidence_count": evidence_ledger["counter_evidence_count"],
+        "critical_pressure_count": evidence_ledger["critical_pressure_count"],
+        "unresolved_critical_pressure_count": evidence_ledger[
+            "unresolved_critical_pressure_count"
+        ],
+        "activation_quality_score": round(activation_quality, 3),
+        "direct_structural_quality_score": round(direct_structural_quality, 3),
+        "direct_structural_materiality": round(direct_structural_materiality, 3),
+        "direct_structural_support_mass": direct_structural["support_mass"],
+        "direct_structural_pressure_mass": direct_structural["pressure_mass"],
+        "direct_structural_signal_fit": direct_structural["direct_signal_fit"],
+        "direct_structural_signal_match_count": direct_structural[
+            "direct_signal_match_count"
+        ],
+        "active_ten_god_count": active_ten_god_count,
+        "ten_god_support_strength": round(support_strength, 3),
+        "ten_god_pressure_strength": round(pressure_strength, 3),
+        "ten_god_balance": round(ten_god_balance, 3),
+        "ten_god_score_adjustment_applied": True,
+        "final_score": final_score,
+        "risk_intensity_score": risk_intensity_score,
+        **ten_god_profile,
+    }
+
+
+def _annual_metric_score(
+    *,
+    label: str,
+    group_key: str,
+    polarity: str,
+    anchor_score: int,
+    row: dict[str, Any],
+    anchor: str,
+    metric_scores_by_domain: dict[str, dict[str, int]] | None = None,
+    gender: str = "unknown",
+) -> int:
+    breakdown = _annual_metric_score_breakdown(
+        label=label,
+        group_key=group_key,
+        polarity=polarity,
+        anchor_score=anchor_score,
+        row=row,
+        anchor=anchor,
+        metric_scores_by_domain=metric_scores_by_domain,
+        gender=gender,
+    )
+    return int(breakdown["final_score"])
+
+
+def _annual_metric_evidence_payload(
+    *,
+    label: str,
+    group_key: str,
+    polarity: str,
+    anchor_score: int,
+    row: dict[str, Any],
+    anchor: str,
+    annual_signal_diagnostics: dict[str, Any] | None = None,
+    metric_scores_by_domain: dict[str, dict[str, int]] | None = None,
+    gender: str = "unknown",
+) -> dict[str, Any]:
+    components = _annual_component_scores(row, anchor)
+    signal_context = _annual_metric_signal_context(row, polarity, anchor=anchor, group_key=group_key)
+    activation_keywords = signal_context["activation_keywords"]
+    basis_codes = signal_context["basis_codes"]
+    counter_signals = signal_context["counter_signals"]
+    branch_relations = signal_context["branch_relations"]
+    ten_god_labels = signal_context["ten_god_labels"]
+    component_keywords = signal_context["component_keywords"]
+    if annual_signal_diagnostics is None:
+        annual_signal_diagnostics = _annual_metric_signal_diagnostics(
+            label=label,
+            polarity=polarity,
+            row=row,
+            activation_keywords=activation_keywords,
+            basis_codes=basis_codes,
+            counter_signals=counter_signals,
+            branch_relations=branch_relations,
+            ten_god_labels=ten_god_labels,
+            component_keywords=signal_context["component_keywords"],
+        )
+    score_components = _annual_metric_score_breakdown(
+        label=label,
+        group_key=group_key,
+        polarity=polarity,
+        anchor_score=anchor_score,
+        row=row,
+        anchor=anchor,
+        metric_scores_by_domain=metric_scores_by_domain,
+        gender=gender,
+        annual_signal_diagnostics=annual_signal_diagnostics,
+    )
+    score_components = {
+        **score_components,
+        "component_keywords": component_keywords,
+        **annual_signal_diagnostics,
+    }
+    score_components = {key: value for key, value in score_components.items() if value is not None}
+    layer_coverage = ["연도별 흐름", "대운·세운"]
+    if components:
+        layer_coverage.append("분야별 흐름 점수")
+    if basis_codes or counter_signals:
+        layer_coverage.append("명리 근거")
+    if activation_keywords:
+        layer_coverage.append("발동 키워드")
+    if branch_relations:
+        layer_coverage.append("지지 관계")
+    if ten_god_labels:
+        layer_coverage.append("십신")
+    if annual_signal_diagnostics.get("annual_signal_profile"):
+        layer_coverage.append("연간 신호 프로파일")
+    if float(annual_signal_diagnostics.get("annual_signal_fit") or 0.0) > 0:
+        layer_coverage.append("연간 신호 매칭")
+    if float(annual_signal_diagnostics.get("annual_direct_signal_fit") or 0.0) > 0:
+        layer_coverage.append("연간 직접 신호 매칭")
+    judgment_components = {
+        "year": row.get("year"),
+        "saeun_pillar": str(row.get("pillar") or "").strip(),
+        "daeun_pillar": str(row.get("daeunPillar") or "").strip(),
+        "ten_god_labels": list(dict.fromkeys(ten_god_labels))[:4],
+        "basis_keywords": list(dict.fromkeys(activation_keywords + component_keywords + basis_codes + branch_relations))[:7],
+        "basis_codes": basis_codes[:8],
+        "counter_signals": counter_signals[:8],
+        "branch_relations": list(dict.fromkeys(branch_relations))[:4],
+        "component_keywords": component_keywords,
+        "annual_signal_profile": annual_signal_diagnostics.get("annual_signal_profile", []),
+        "annual_signal_matches": annual_signal_diagnostics.get("annual_signal_matches", []),
+        "annual_direct_signal_matches": annual_signal_diagnostics.get("annual_direct_signal_matches", []),
+        "layer_coverage": layer_coverage,
+    }
+    return {
+        "score_components": score_components,
+        "judgment_components": {
+            key: value
+            for key, value in judgment_components.items()
+            if value not in (None, "", [])
+        },
+    }
+
+
+def _annual_metric_payload(
+    *,
+    domain: str,
+    group_key: str,
+    label: str,
+    description: str,
+    polarity: str,
+    score: int,
+    index: int,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    display_score = int(max(0, min(100, score)))
+    display_score = int(max(18, min(98, display_score)))
+    quality_score = display_score
+    display_label, display_description = (
+        ANNUAL_RISK_DISPLAY_MAP.get(label, (label, description))
+        if polarity == "risk"
+        else (label, description)
+    )
+    display_label, display_description = ANNUAL_METRIC_DISPLAY_MAP.get(
+        label,
+        (display_label, display_description),
+    )
+    level = _contract_level_from_score(display_score)
+    payload = {
+        "key": f"{domain}_{group_key}_{_public_metric_key(display_label, index, 'annual')}",
+        "label": display_label,
+        "source_label": label if display_label != label else "",
+        "score": display_score,
+        "display_score": display_score,
+        "quality_score": quality_score,
+        "polarity": polarity,
+        "display_axis": "높을수록 안정적으로 작용함",
+        "score_direction": "higher_is_better",
+        "level": level,
+        "value": level,
+        "summary": display_description,
+        "meaning": display_description,
+        "source": "annual_metric",
+    }
+    if polarity == "risk":
+        payload["risk_intensity_score"] = 100 - display_score
+    if isinstance(evidence, dict):
+        if isinstance(evidence.get("score_components"), dict):
+            payload["score_components"] = dict(evidence["score_components"])
+            payload["score_components"]["display_axis"] = payload["display_axis"]
+            payload["score_components"]["display_score_direction"] = "higher_is_better"
+        if isinstance(evidence.get("judgment_components"), dict):
+            payload["judgment_components"] = dict(evidence["judgment_components"])
+            payload["basis_keywords"] = list(payload["judgment_components"].get("basis_keywords") or [])
+            payload["basis_codes"] = list(payload["judgment_components"].get("basis_codes") or [])
+            source_labels = [
+                str(payload["judgment_components"].get("saeun_pillar") or "").strip(),
+                str(payload["judgment_components"].get("daeun_pillar") or "").strip(),
+                *[str(item).strip() for item in list(payload["judgment_components"].get("ten_god_labels") or [])],
+            ]
+            payload["source_labels"] = list(dict.fromkeys([item for item in source_labels if item]))[:4]
+    return payload
+
+
+def _annual_section_verdict_from_metrics(
+    metrics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    numeric_metrics = [
+        metric
+        for metric in metrics
+        if isinstance(metric, dict)
+        and isinstance(metric.get("score"), int)
+        and str(metric.get("label") or "").strip()
+    ]
+    if not numeric_metrics:
+        return {
+            "score_label": "연간 종합 점수",
+            "strong_caption": "강점",
+            "strong_label": "연간 상승도",
+            "strong_score": None,
+            "strong_level": "",
+            "watch_caption": "보완 지표",
+            "watch_label": "주의 필요도",
+            "watch_score": None,
+            "watch_level": "",
+        }
+    strongest = max(
+        numeric_metrics,
+        key=lambda metric: _public_metric_quality_score(metric)
+        if isinstance(_public_metric_quality_score(metric), int)
+        else -1,
+    )
+    weakest = min(
+        numeric_metrics,
+        key=lambda metric: _public_metric_quality_score(metric)
+        if isinstance(_public_metric_quality_score(metric), int)
+        else 101,
+    )
+    strong_score = int(strongest["score"])
+    watch_score = int(weakest["score"])
+    strong_quality_score = _public_metric_quality_score(strongest)
+    watch_quality_score = _public_metric_quality_score(weakest)
+    return {
+        "score_label": "연간 종합 점수",
+        "strong_caption": "강점",
+        "strong_label": str(strongest.get("label") or "연간 상승도").strip(),
+        "strong_score": strong_score,
+        "strong_level": _contract_level_from_score(strong_quality_score),
+        "watch_caption": "보완 지표",
+        "watch_label": str(weakest.get("label") or "주의 필요도").strip(),
+        "watch_score": watch_score,
+        "watch_level": _contract_level_from_score(watch_quality_score),
+    }
+
+
+def _annual_metric_group_total_score(group: dict[str, Any]) -> int | None:
+    items = [
+        item
+        for item in list(group.get("items") or [])
+        if isinstance(item, dict) and isinstance(item.get("score"), int)
+    ]
+    if not items:
+        return None
+    group_key = str(group.get("key") or "")
+    indicator_labels = set(ANNUAL_GROUP_TOTAL_INDICATORS.get(group_key, ()))
+    selected_items = [
+        item
+        for item in items
+        if not indicator_labels
+        or str(item.get("source_label") or item.get("label") or "") in indicator_labels
+    ]
+    oriented_scores = [
+        quality_score
+        for item in selected_items
+        if isinstance((quality_score := _public_metric_quality_score(item)), int)
+    ]
+    if not oriented_scores:
+        return None
+    # Individual annual metrics already include their exact natal capacities.
+    # Adding the broad natal domain total here counted the natal chart twice.
+    # The overview therefore averages only its declared outcome and defense
+    # indicators; the remaining cards retain their diagnostic detail below.
+    return _downside_preserving_quality_total(
+        oriented_scores,
+        lower_bound=18,
+        upper_bound=98,
+    )
+
+
+def _annual_section_total_score(metric_groups: list[dict[str, Any]], all_metrics: list[dict[str, Any]]) -> int:
+    """Summarize annual fortune by domain groups, not by raw item count."""
+    group_scores = [
+        score
+        for score in (_annual_metric_group_total_score(group) for group in metric_groups)
+        if isinstance(score, int)
+    ]
+    if group_scores:
+        total = _downside_preserving_quality_total(
+            group_scores,
+            lower_bound=18,
+            upper_bound=98,
+        )
+        if isinstance(total, int):
+            return total
+    scores = [
+        quality_score
+        for metric in all_metrics
+        if isinstance(metric, dict)
+        and isinstance((quality_score := _public_metric_quality_score(metric)), int)
+    ]
+    if scores:
+        total = _downside_preserving_quality_total(
+            scores,
+            lower_bound=18,
+            upper_bound=98,
+        )
+        if isinstance(total, int):
+            return total
+    return 62
+
+
+def _build_annual_report_sections(
+    sections: list[dict[str, Any]],
+    chart_summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not sections:
+        return []
+    domain_scores = _annual_section_scores_by_domain(sections)
+    metric_scores_by_domain = _annual_section_metric_scores_by_domain(sections)
+    basis = chart_summary.get("basis") if isinstance(chart_summary.get("basis"), dict) else {}
+    gender = str(basis.get("gender") or "unknown")
+    if gender not in SUPPORTED_GENDERS:
+        gender = "unknown"
+    annual_sections: list[dict[str, Any]] = []
+    for year_meta in ANNUAL_REPORT_YEARS:
+        year = int(year_meta["year"])
+        row = _annual_row_for_year(chart_summary, year)
+        metric_groups: list[dict[str, Any]] = []
+        all_metrics: list[dict[str, Any]] = []
+        for group in ANNUAL_METRIC_GROUPS:
+            group_key = str(group["key"])
+            anchor = str(group.get("anchor") or "overall")
+            anchor_score = _annual_anchor_score(domain_scores, anchor, row)
+            items: list[dict[str, Any]] = []
+            for index, (label, description, polarity) in enumerate(group["items"]):
+                signal_context = _annual_metric_signal_context(row, polarity, anchor=anchor, group_key=group_key)
+                annual_signal_diagnostics = _annual_metric_signal_diagnostics(
+                    label=label,
+                    polarity=polarity,
+                    row=row,
+                    activation_keywords=signal_context["activation_keywords"],
+                    basis_codes=signal_context["basis_codes"],
+                    counter_signals=signal_context["counter_signals"],
+                    branch_relations=signal_context["branch_relations"],
+                    ten_god_labels=signal_context["ten_god_labels"],
+                    component_keywords=signal_context["component_keywords"],
+                )
+                evidence = _annual_metric_evidence_payload(
+                    label=label,
+                    group_key=group_key,
+                    polarity=polarity,
+                    anchor_score=anchor_score,
+                    row=row,
+                    anchor=anchor,
+                    annual_signal_diagnostics=annual_signal_diagnostics,
+                    metric_scores_by_domain=metric_scores_by_domain,
+                    gender=gender,
+                )
+                score_components = evidence.get("score_components")
+                score = int(
+                    (score_components or {}).get("final_score", anchor_score)
+                    if isinstance(score_components, dict)
+                    else anchor_score
+                )
+                metric = _annual_metric_payload(
+                    domain=str(year_meta["domain"]),
+                    group_key=group_key,
+                    label=label,
+                    description=description,
+                    polarity=polarity,
+                    score=score,
+                    index=index,
+                    evidence=evidence,
+                )
+                items.append(metric)
+                all_metrics.append(metric)
+            group_total_score = _annual_metric_group_total_score(
+                {"key": group_key, "items": items, "anchor_score": anchor_score}
+            )
+            group_total_level = (
+                _contract_level_from_score(group_total_score)
+                if isinstance(group_total_score, int)
+                else ""
+            )
+            metric_groups.append(
+                {
+                    "key": group_key,
+                    "title": str(group["title"]),
+                    "score": group_total_score,
+                    "total_score": group_total_score,
+                    "level": group_total_level,
+                    "total_level": group_total_level,
+                    "anchor_score": anchor_score,
+                    "total_score_method": "annual_declared_core_indicators_downside_preserving_total",
+                    "total_indicator_labels": list(
+                        ANNUAL_GROUP_TOTAL_INDICATORS.get(group_key, ())
+                    ),
+                    "items": items,
+                }
+            )
+        annual_overview_labels = {
+            "overall": "종합 흐름",
+            "career": "직업",
+            "money": "재물",
+            "social": "대인관계",
+            "love": "연애",
+            "marriage": "가정",
+            "honor": "명예·평판",
+            "condition": "건강·컨디션",
+        }
+        representative_metrics = [
+            {
+                "key": f"annual_overview_{group.get('key')}",
+                "label": annual_overview_labels.get(
+                    str(group.get("key") or ""),
+                    str(group.get("title") or "").removesuffix(" 지표"),
+                ),
+                "title": annual_overview_labels.get(
+                    str(group.get("key") or ""),
+                    str(group.get("title") or "").removesuffix(" 지표"),
+                ),
+                "score": group.get("total_score"),
+                "display_score": group.get("total_score"),
+                "positive_score": group.get("total_score"),
+                "level": group.get("total_level"),
+                "polarity": "positive",
+                "score_direction": "higher_is_better",
+                "source": "annual_group_total",
+            }
+            for group in metric_groups
+            if isinstance(group.get("total_score"), int)
+        ]
+        total_score = _annual_section_total_score(metric_groups, all_metrics)
+        total_level = _contract_level_from_score(total_score)
+        annual_verdict = _annual_section_verdict_from_metrics(all_metrics)
+        title = str(year_meta["title"])
+        ganji = str(year_meta["ganji"])
+        annual_sections.append(
+            {
+                "domain": str(year_meta["domain"]),
+                "domain_label": title,
+                "title": title,
+                "heading": title,
+                "lead": f"{year}년 {ganji}에 강하게 드러나는 흐름을 지표로 정리합니다.",
+                "summary": f"{year}년 {ganji} 운세 지표입니다.",
+                "year": year,
+                "ganji": ganji,
+                "icon": str(year_meta["icon"]),
+                "score": total_score,
+                "total_score": total_score,
+                "strength_score": total_score,
+                "level": total_level,
+                "total_level": total_level,
+                "section_verdict": {
+                    "score": total_score,
+                    "level": total_level,
+                    **annual_verdict,
+                },
+                "representative_metrics": representative_metrics,
+                "feature_axes": all_metrics,
+                "metric_groups": metric_groups,
+            }
+        )
+    return annual_sections
+
+
+def _dedupe_product_metrics_by_label(metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for metric in metrics:
+        if not isinstance(metric, dict):
+            continue
+        label = str(metric.get("label") or "").strip()
+        key = _compact_match_key(label)
+        if not label or not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(dict(metric))
+    return deduped
+
+
+def _sync_detail_blocks_with_metrics(
+    blocks: list[dict[str, Any]],
+    metrics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not blocks or not metrics:
+        return blocks
+    metric_by_key = {
+        _compact_match_key(metric.get("label")): metric
+        for metric in metrics
+        if isinstance(metric, dict) and _compact_match_key(metric.get("label"))
+    }
+    synced: list[dict[str, Any]] = []
+    for block in blocks:
+        next_block = dict(block)
+        has_existing_score = isinstance(next_block.get("score"), int) and str(next_block.get("level") or "")
+        title = str(next_block.get("title") or "").strip()
+        metric_label = str(next_block.get("metric_label") or "").strip()
+        candidates = [
+            title,
+            metric_label,
+            DETAIL_METRIC_TITLE_ALIASES.get(title, ""),
+            _premium_display_title(title),
+            _premium_display_title(metric_label),
+        ]
+        metric = None
+        for candidate in candidates:
+            key = _compact_match_key(candidate)
+            if key and key in metric_by_key:
+                metric = metric_by_key[key]
+                break
+        if metric:
+            score = metric.get("score")
+            level = metric.get("level") or (_contract_level_from_score(score) if isinstance(score, int) else "")
+            if isinstance(score, int) and not has_existing_score:
+                next_block["score"] = score
+                next_block["level"] = str(level or "")
+                next_block["value"] = str(level or "")
+            next_block["metric_key"] = str(metric.get("key") or next_block.get("metric_key") or "")
+            next_block["metric_label"] = str(metric.get("label") or metric_label or title)
+            for component_key in (
+                "score_components",
+                "judgment_components",
+                "gyeokguk_action_sources",
+                "cycle_tags",
+                "principle_tags",
+            ):
+                component_value = metric.get(component_key)
+                if component_value in (None, "", []):
+                    continue
+                if isinstance(component_value, dict):
+                    next_block[component_key] = dict(component_value)
+                elif isinstance(component_value, list):
+                    next_block[component_key] = list(component_value)
+                else:
+                    next_block[component_key] = component_value
+        synced.append(next_block)
+    return synced
+
+
+def _public_feature_axis_limit(domain: str) -> int:
+    if domain in PRODUCT_DOMAIN_METRIC_SPECS:
+        return len(PRODUCT_DOMAIN_METRIC_SPECS[domain])
+    if domain in {"money", "career", "love", "marriage"}:
+        return 14
+    if domain in {"personality", "timing"}:
+        return 8
+    return 6
+
+
+def _ensure_public_section_contract(section: dict[str, Any]) -> dict[str, Any]:
+    # Capture the engine judgment before any public-contract normalization.
+    # This is still raw analysis data; it is not a product-display correction.
+    engine_section_score = _bounded_metric_score(section.get("strength_score"))
+    metrics = _public_contract_metrics_from_section(section)
+    normalized = dict(section)
+    if normalized.get("detail_blocks"):
+        normalized["detail_blocks"] = _enrich_detail_block_actions(
+            _domain_key(normalized),
+            [dict(block) for block in normalized.get("detail_blocks") or [] if isinstance(block, dict)],
+        )
+    if not metrics:
+        return normalized
+    score = _representative_score_from_public_metrics(section, metrics)
+    if score is not None:
+        normalized["score"] = score
+        if _domain_key(normalized) in PRODUCT_DOMAIN_METRIC_SPECS:
+            # The visible total is the direction-aligned mean of the visible
+            # metrics. Do not blend the retired section score back into it.
+            normalized["strength_score"] = score
+        elif not isinstance(normalized.get("strength_score"), int):
+            normalized["strength_score"] = score
+        normalized["level"] = _contract_level_from_score(score)
+        normalized["score_label"] = normalized["level"]
+    section_verdict = _section_verdict_from_public_metrics(normalized, metrics, score)
+    if section_verdict:
+        normalized["section_verdict"] = section_verdict
+        verdict_score = section_verdict.get("score")
+        if isinstance(verdict_score, int):
+            verdict_level = str(section_verdict.get("level") or _contract_level_from_score(verdict_score))
+            normalized["total_score"] = verdict_score
+            normalized["total_level"] = verdict_level
+            normalized["total_score_label"] = verdict_level
+        normalized["strong_metric_label"] = section_verdict.get("strong_label") or ""
+        normalized["watch_metric_label"] = section_verdict.get("watch_label") or ""
+    feature_axis_limit = _public_feature_axis_limit(_domain_key(normalized))
+    if not normalized.get("feature_axes"):
+        normalized["feature_axes"] = _dedupe_public_metrics_by_label(metrics, limit=feature_axis_limit)
+    else:
+        axes: list[dict[str, Any]] = []
+        for index, axis in enumerate(list(normalized.get("feature_axes") or [])):
+            if not isinstance(axis, dict):
+                continue
+            source_axis_key = str(axis.get("source_axis_key") or axis.get("key") or "").strip()
+            metric = _public_contract_metric(axis, index=index, source="feature", domain=_domain_key(normalized))
+            if metric:
+                next_axis = {**dict(axis), **metric}
+                if source_axis_key:
+                    next_axis["source_axis_key"] = source_axis_key
+                axes.append(next_axis)
+        adjusted_axes = axes or metrics
+        normalized["feature_axes"] = _dedupe_public_metrics_by_label(adjusted_axes, limit=feature_axis_limit)
+    metric_by_key = {
+        _compact_match_key(metric.get("label")): metric
+        for metric in metrics
+        if _compact_match_key(metric.get("label"))
+    }
+    cleaned_topics: list[dict[str, Any]] = []
+    seen_topic_keys: set[str] = set()
+    for index, item in enumerate(list(section.get("topic_items") or [])):
+        if not isinstance(item, dict):
+            continue
+        title = _premium_display_title(str(item.get("title") or item.get("label") or "").strip())
+        topic_key = _compact_match_key(title)
+        if not title or not topic_key or topic_key in seen_topic_keys:
+            continue
+        metric = metric_by_key.get(topic_key)
+        score = item.get("score")
+        if not isinstance(score, int) and isinstance((metric or {}).get("score"), int):
+            score = int(metric["score"])
+        if not isinstance(score, int):
+            continue
+        seen_topic_keys.add(topic_key)
+        body = str(
+            item.get("body")
+            or item.get("caption")
+            or item.get("result")
+            or (metric or {}).get("summary")
+            or ""
+        ).strip()
+        definition = str(item.get("definition") or item.get("focus") or body or (metric or {}).get("meaning") or "").strip()
+        display_title = title
+        display_score = score
+        if _domain_key(normalized) == "timing" and title in TIMING_CAUTION_POSITIVE_AXIS_LABELS:
+            display_title = TIMING_CAUTION_POSITIVE_AXIS_LABELS[title]
+            display_score = _timing_positive_axis_score(score)
+        level = _contract_level_from_score(score)
+        display_level = _contract_level_from_score(display_score)
+        cleaned_topics.append(
+            {
+                "title": display_title,
+                "source_title": title,
+                "body": _replace_premium_display_terms(body),
+                "definition": _replace_premium_display_terms(definition),
+                "score": display_score,
+                "value": _score_value(display_score),
+                "level": display_level,
+                "score_label": display_level,
+                "tone": _topic_tone_from_score(display_score),
+            }
+        )
+    if cleaned_topics:
+        normalized["topic_items"] = cleaned_topics[:8]
+    if _domain_key(normalized) == "timing" and isinstance(normalized.get("visual_profile"), dict):
+        visual_profile = dict(normalized.get("visual_profile") or {})
+        visual_items: list[dict[str, Any]] = []
+        for item in list(visual_profile.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            next_item = dict(item)
+            label = str(next_item.get("label") or "").strip()
+            score = next_item.get("score")
+            if label in TIMING_CAUTION_POSITIVE_AXIS_LABELS and isinstance(score, int):
+                display_score = _timing_positive_axis_score(score)
+                next_item["source_label"] = label
+                next_item["label"] = TIMING_CAUTION_POSITIVE_AXIS_LABELS[label]
+                next_item["score"] = display_score
+                next_item["value"] = _score_value(display_score)
+                next_item["tone"] = _topic_tone_from_score(display_score)
+            visual_items.append(next_item)
+        visual_profile["items"] = visual_items
+        normalized["visual_profile"] = visual_profile
+    product_metrics = _build_product_domain_metrics(normalized)
+    if product_metrics:
+        product_metrics = _dedupe_product_metrics_by_label(product_metrics)
+        normalized["judgment_axes"] = [
+            {
+                "key": metric.get("key"),
+                "label": metric.get("label"),
+                "score": metric.get("score"),
+                "display_score": metric.get("display_score"),
+                "quality_score": metric.get("quality_score"),
+                "polarity": metric.get("polarity"),
+                "display_axis": metric.get("display_axis"),
+                "score_direction": metric.get("score_direction"),
+                "level": metric.get("level"),
+                "value": metric.get("value"),
+                "summary": metric.get("summary"),
+                "meaning": metric.get("meaning"),
+                "source": metric.get("source"),
+                "source_labels": list(metric.get("source_labels") or []),
+                "basis_codes": list(metric.get("basis_codes") or []),
+                "basis_keywords": list(metric.get("basis_keywords") or []),
+                "score_components": dict(metric.get("score_components") or {}),
+                "judgment_components": dict(metric.get("judgment_components") or {}),
+                "gyeokguk_action_sources": list(metric.get("gyeokguk_action_sources") or []),
+            }
+            for metric in product_metrics
+            if isinstance(metric, dict)
+        ]
+        normalized["feature_axes"] = product_metrics
+        metrics = product_metrics
+        metric_profile_score = _representative_score_from_public_metrics(normalized, metrics)
+        score = _integrated_product_section_score(
+            metric_profile_score,
+            engine_section_score,
+        )
+        judgment_score_components = {
+            "score_method": "original_structural_and_metric_profile",
+            "metric_profile_score": metric_profile_score,
+            "structural_engine_score": engine_section_score,
+            "metric_profile_weight": 0.60,
+            "structural_engine_weight": 0.40,
+            "presentation_adjustment_applied": False,
+        }
+        normalized["judgment_score_components"] = judgment_score_components
+        if isinstance(score, int):
+            normalized["score"] = score
+            normalized["strength_score"] = score
+            normalized["level"] = _contract_level_from_score(score)
+            normalized["score_label"] = normalized["level"]
+        section_verdict = _section_verdict_from_public_metrics(normalized, metrics, score)
+        if section_verdict:
+            section_verdict["score_components"] = dict(judgment_score_components)
+            normalized["section_verdict"] = section_verdict
+            verdict_score = section_verdict.get("score")
+            if isinstance(verdict_score, int):
+                verdict_level = str(section_verdict.get("level") or _contract_level_from_score(verdict_score))
+                normalized["total_score"] = verdict_score
+                normalized["total_level"] = verdict_level
+                normalized["total_score_label"] = verdict_level
+            normalized["strong_metric_label"] = section_verdict.get("strong_label") or ""
+            normalized["watch_metric_label"] = section_verdict.get("watch_label") or ""
+        normalized["representative_metrics"] = product_metrics
+        normalized["metric_count"] = len(product_metrics)
+    elif _domain_key(normalized) == "timing":
+        normalized["representative_metrics"] = _representative_timing_public_metrics(metrics, limit=6)
+    else:
+        normalized["representative_metrics"] = _dedupe_public_metrics_by_label(
+            _representative_public_metrics(
+                metrics,
+                limit=8,
+                domain=_domain_key(normalized),
+            ),
+            limit=6,
+        )
+    normalized["metric_count"] = len(metrics)
+    if normalized.get("detail_blocks"):
+        normalized["detail_blocks"] = _enrich_detail_block_actions(
+            _domain_key(normalized),
+            _sync_detail_blocks_with_metrics(
+                [dict(block) for block in normalized.get("detail_blocks") or [] if isinstance(block, dict)],
+                metrics,
+            ),
+        )
+    return normalized
 
 
 def _sync_topic_items_with_judgment_axes(
@@ -4652,6 +12857,31 @@ def _premium_detail_blocks_for_card(
         asset = _feature_value(product_item, "asset_retention")
         spending = _feature_value(product_item, "spending_control")
         deal = _combined_stability_value(product_item, "deal_selection", "loss_avoidance")
+        income_metric = _detail_metric_from_features(
+            product_item,
+            ("income_expansion", "income_creation", "reward_claim_strength", "liquidity_stability"),
+            label="수입 창출력",
+            fallback_score=_engine_score(product_item, "opportunity_score"),
+        )
+        asset_metric = _detail_metric_from_features(
+            product_item,
+            ("asset_retention", "wealth_formation", "cashflow_stability"),
+            label="자산화 능력",
+        )
+        loss_metric = _detail_metric_from_features(
+            product_item,
+            (
+                "contract_stability",
+                "deal_selection",
+                "loss_avoidance",
+                "shared_asset_stability",
+                "financial_defense",
+                "spending_control",
+            ),
+            label="계약·명의 안정성",
+            fallback_score=_positive_control_score_from_risk(_engine_score(product_item, "risk_score")),
+            strongest=False,
+        )
         income_body = (
             "성과가 보수, 계약금, 매출처럼 금액으로 환산되는 선이 분명합니다."
             if _grade_strength(income) >= 3
@@ -4677,13 +12907,15 @@ def _premium_detail_blocks_for_card(
                 "수익 발생 지점",
                 income_body,
                 ["직업 성과가 숫자로 확인되는 일에서 보수 기준이 올라갑니다.", "계약 기준이 분명해야 받을 금액도 분명해집니다."],
+                metric=income_metric,
             ),
             _detail_block(
                 "자산화 방식",
                 asset_body,
                 ["등기처럼 이름이 남는 자산에 강합니다.", "지출 기준이 느슨하면 수입이 늘어도 재산으로 남는 몫은 늦게 보입니다."],
+                metric=asset_metric,
             ),
-            _detail_block("권리와 정산이 예민한 자리", loss_body, loss_bullets, tone="risk"),
+            _detail_block("권리와 정산이 예민한 자리", loss_body, loss_bullets, tone="risk", metric=loss_metric),
         ]
     if domain == "career":
         achievement = _feature_value(product_item, "career_achievement")
@@ -4691,6 +12923,24 @@ def _premium_detail_blocks_for_card(
         expertise = _feature_value(product_item, "academic_expertise")
         authority = _risk_control_value(_engine_score(product_item, "risk_score"))
         authority_score = _section_value_strength(authority)
+        achievement_metric = _detail_metric_from_features(
+            product_item,
+            ("career_achievement", "expertise", "academic_expertise"),
+            label="성취 축적력",
+            fallback_score=_engine_score(product_item, "opportunity_score"),
+        )
+        recognition_metric = _detail_metric_from_features(
+            product_item,
+            ("reputation_maintenance", "recognition", "promotion_title_readiness"),
+            label="평가·명예 전환력",
+        )
+        authority_metric = _detail_metric_from_features(
+            product_item,
+            ("responsibility_authority_balance", "authority_balance", "organization_adaptability", "responsibility_capacity"),
+            label="권한 확보력",
+            fallback_score=_positive_control_score_from_risk(_engine_score(product_item, "risk_score")),
+            strongest=False,
+        )
         risk_title, risk_body, risk_bullets = _career_risk_block(
             achievement=achievement,
             recognition=recognition,
@@ -4714,19 +12964,38 @@ def _premium_detail_blocks_for_card(
                 "성과가 자기 이름으로 남는 자리",
                 achievement_body,
                 ["담당 범위가 결과물로 확인되는 자리에서 강합니다.", "일의 끝이 실적, 문서, 평판으로 남을수록 다음 직책이 가까워집니다."],
+                metric=achievement_metric,
             ),
             _detail_block(
                 "평가받는 방식",
                 recognition_body,
                 ["전문성이 드러나는 자리에서 직업적 신뢰가 생깁니다.", "추천, 심사, 공식 책임을 통해 평가가 분명해집니다."],
+                metric=recognition_metric,
             ),
-            _detail_block(risk_title, risk_body, risk_bullets, tone="risk"),
+            _detail_block(risk_title, risk_body, risk_bullets, tone="risk", metric=authority_metric),
         ]
     if domain == "love":
         opening = _feature_value(product_item, "interpersonal_influence")
         expression = _feature_value(product_item, "communication_expression")
         stability = _feature_value(product_item, "relationship_stability")
         recovery = _feature_value(product_item, "conflict_recovery")
+        opening_metric = _detail_metric_from_features(
+            product_item,
+            ("interpersonal_influence", "relationship_opening", "relationship_progress"),
+            label="인연 형성력",
+            fallback_score=_engine_score(product_item, "opportunity_score"),
+        )
+        expression_metric = _detail_metric_from_features(
+            product_item,
+            ("communication_expression", "expression", "relationship_agency"),
+            label="애정 표현성",
+        )
+        stability_metric = _detail_metric_from_features(
+            product_item,
+            ("relationship_stability", "conflict_recovery", "misunderstanding_prevention", "contact_distance_stability"),
+            label="관계 지속력",
+            strongest=False,
+        )
         if "거리" in caution or "표현" in caution:
             risk_body = "마음이 깊어도 표현이 늦으면 상대는 애정보다 불확실함을 먼저 느낍니다."
         else:
@@ -4742,14 +13011,31 @@ def _premium_detail_blocks_for_card(
             else "마음이 있어도 표현이 늦으면 상대가 확신을 갖기 어렵습니다."
         )
         return [
-            _detail_block("사랑을 시작하는 방식", opening_body, [f"인연 형성력: {opening}"]),
-            _detail_block("애정 표현 방식", expression_body, [f"애정 표현성: {expression}"]),
-            _detail_block("관계가 흔들리는 지점", risk_body, [f"관계 지속력: {stability}", f"재회 가능성: {recovery}"], tone="risk"),
+            _detail_block("사랑을 시작하는 방식", opening_body, [f"인연 형성력: {opening}"], metric=opening_metric),
+            _detail_block("애정 표현 방식", expression_body, [f"애정 표현성: {expression}"], metric=expression_metric),
+            _detail_block("관계가 흔들리는 지점", risk_body, [f"관계 지속력: {stability}", f"재회 가능성: {recovery}"], tone="risk", metric=stability_metric),
         ]
     if domain == "marriage":
         stability = _feature_value(product_item, "marriage_stability")
         practical = _feature_value(product_item, "practical_planning")
         family = _feature_value(product_item, "family_responsibility")
+        stability_metric = _detail_metric_from_features(
+            product_item,
+            ("marriage_stability", "marriage_realization", "decision_consistency"),
+            label="혼인 성향",
+            fallback_score=_engine_score(product_item, "opportunity_score"),
+        )
+        practical_metric = _detail_metric_from_features(
+            product_item,
+            ("practical_planning", "life_stability", "housing_life_design", "household_operation"),
+            label="생활 안정",
+        )
+        family_metric = _detail_metric_from_features(
+            product_item,
+            ("family_responsibility", "family_risk", "spouse_family_boundary", "couple_conflict_adjustment"),
+            label="가족 책임 경계력",
+            strongest=False,
+        )
         if "주거" in caution or "가족" in caution or "생활" in caution:
             risk_body = "결혼에서는 감정보다 생활 기준이 더 크게 떠오릅니다."
         else:
@@ -4765,9 +13051,9 @@ def _premium_detail_blocks_for_card(
             else "생활 기준이 흔들리면 결혼 결정이 늦어집니다."
         )
         return [
-            _detail_block("결혼이 안정되는 방식", stability_body, [f"혼인 성향: {stability}"]),
-            _detail_block("생활 기준", practical_body, [f"생활 안정: {practical}"]),
-            _detail_block("충돌이 생기는 자리", risk_body, [f"가족 책임 경계력: {family}", "생활 기준은 결혼 전에 먼저 정리하는 편이 안전합니다."], tone="risk"),
+            _detail_block("결혼이 안정되는 방식", stability_body, [f"혼인 성향: {stability}"], metric=stability_metric),
+            _detail_block("생활 기준", practical_body, [f"생활 안정: {practical}"], metric=practical_metric),
+            _detail_block("충돌이 생기는 자리", risk_body, [f"가족 책임 경계력: {family}", "생활 기준은 결혼 전에 먼저 정리하는 편이 안전합니다."], tone="risk", metric=family_metric),
         ]
     return []
 
@@ -4808,7 +13094,7 @@ def _axis_by_keys_excluding(
 def _axis_label_value(axis: dict[str, str] | None, fallback: str = "") -> str:
     if not axis:
         return fallback
-    label = str(axis.get("label") or "").strip()
+    label = _premium_display_title(str(axis.get("label") or "").strip())
     value = str(axis.get("value") or "").strip()
     if label and value:
         return f"{label} {value}"
@@ -4838,7 +13124,7 @@ def _axis_product_body(
     copy: dict[str, dict[str, tuple[str, str, str]]] = {
         "money": {
             "wealth_formation": (
-                "돈이 생기는 자리가 분명합니다. 처음부터 큰 자산으로 시작하기보다 직업, 거래, 역할의 대가가 반복되면서 재물이 형성됩니다.",
+                "재물이 형성되는 경로가 분명합니다. 처음부터 큰 자산으로 시작하기보다 직업, 거래, 역할의 대가가 반복되면서 재물이 형성됩니다.",
                 "재물은 한 번에 크게 튀기보다 반복 수입과 거래 경험을 통해 만들어집니다.",
                 "재물 기회가 있어도 돈의 출처와 권리 형태가 불분명하면 실제 몫이 작아집니다.",
             ),
@@ -4926,7 +13212,7 @@ def _axis_product_body(
             ),
             "social_ascent": (
                 "사회적 도약성이 높습니다. 직업 성취가 평판, 제안, 더 큰 자리로 이어질 수 있습니다.",
-                "직업 성취가 지위와 영향력으로 커집니다.",
+                "직업 성취가 직책과 평판으로 이어집니다.",
                 "겉으로 커 보이는 자리라도 실권이 없으면 도약보다 부담이 큽니다.",
             ),
             "authority_balance": (
@@ -5101,7 +13387,7 @@ def _axis_product_body(
             "marriage_durability": (
                 "결혼 지속력은 좋습니다. 생활 기준을 세운 뒤에는 쉽게 흔들리지 않습니다.",
                 "결혼은 기준이 맞으면 오래 갑니다.",
-                "반복 갈등을 방치하면 결혼의 피로가 누적됩니다.",
+                "반복 갈등을 오래 넘기면 결혼의 피로가 누적됩니다.",
             ),
         },
     }
@@ -5217,6 +13503,41 @@ def _payload_event_display_topic(event: dict[str, Any]) -> str:
     return ""
 
 
+def _timing_event_verdict_label(event: dict[str, Any], fallback: str) -> str:
+    if not isinstance(event, dict):
+        return fallback
+    year = str(event.get("year") or "").strip()
+    topic = _payload_event_display_topic(event)
+    if not topic:
+        topic = re.sub(
+            r"\s+",
+            " ",
+            str(event.get("summary") or event.get("keywords") or event.get("focusLine") or "").strip(),
+        )
+    domain = str(event.get("domainLabel") or "").strip()
+    domain = domain[:-1] if domain.endswith("운") and len(domain) > 1 else domain
+    generic_topics = {
+        "권한 불균형",
+        "책임 과중",
+        "직무 변동",
+        "계약 손실",
+        "정산 손실",
+        "공동자금 손실",
+        "보증·채무 손실",
+        "관계 마찰",
+        "감정 오해",
+        "가족 개입",
+    }
+    if domain and topic in generic_topics and domain not in topic:
+        topic = f"{domain} {topic}"
+    parts = []
+    if year:
+        parts.append(f"{year}년")
+    if topic:
+        parts.append(topic)
+    return " ".join(parts).strip() or fallback
+
+
 def _payload_event_value_series(
     events: list[dict[str, Any]],
     fallback: str,
@@ -5329,7 +13650,7 @@ def _premium_product_story_for_card(
         return {
             "kicker": "재물 요약",
             "headline": headline,
-            "lead": "이 재물운은 현금 유입보다 소유권과 회수 가능한 권리에서 값이 커집니다. 수입이 들어와도 명의, 지분, 계약 단위로 굳어질 때 재물의 격이 올라갑니다.",
+            "lead": "이 재물운은 현금 유입보다 소유권과 회수 가능한 권리에서 강합니다. 수입이 들어와도 명의, 지분, 계약 단위로 굳어질 때 재물의 격이 올라갑니다.",
             "items": [
                 _axis_product_item(
                     domain,
@@ -5551,7 +13872,7 @@ def _premium_product_story_for_card(
         return {
             "kicker": "시기 요약",
             "headline": timing_headline,
-            "lead": "20세부터 79세까지의 주요 연도를 압축했습니다. 상승 연도에는 성과와 자산이 남고, 주의 연도에는 계약, 권한, 가족 문제가 실제 부담으로 올라옵니다.",
+            "lead": "좋은 시기와 조심할 시기를 연도별로 압축했습니다. 좋은 시기에는 성과와 자산이 남고, 조심할 시기에는 계약, 권한, 가족 문제가 실제 부담으로 올라옵니다.",
             "items": [
                 {
                     "role": "strong",
@@ -5677,7 +13998,7 @@ def _premium_product_story_for_card(
         }
 
     return {
-        "kicker": "핵심 요약",
+        "kicker": "종합 기준",
         "headline": headline,
         "lead": summary,
         "items": [],
@@ -5708,16 +14029,84 @@ def _attach_premium_product_stories(sections: list[dict[str, Any]]) -> list[dict
     return enriched
 
 
+def _attach_contextual_variations_to_sections(
+    sections: list[dict[str, Any]],
+    contextual: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(contextual, dict):
+        return sections
+    variation = contextual.get("pattern_variation")
+    if not isinstance(variation, dict) or not variation.get("variation_key"):
+        return sections
+    enriched: list[dict[str, Any]] = []
+    for section in sections:
+        next_section = dict(section)
+        domain = _domain_key(next_section)
+        payload = _contextual_variation_payload_for_domain(domain, variation)
+        if not payload:
+            enriched.append(next_section)
+            continue
+        next_section["contextual_variation"] = payload
+        next_section["domain_variation"] = payload
+        next_section = _apply_contextual_variation_score_to_section(next_section, payload)
+
+        detail_blocks = [
+            dict(block)
+            for block in list(next_section.get("detail_blocks") or [])
+            if isinstance(block, dict)
+        ]
+        if not any(str(block.get("title") or "") == payload["label"] for block in detail_blocks):
+            variation_tags = [
+                item
+                for item in (
+                    str(payload.get("value") or "").strip(),
+                    str(payload.get("materiality_label") or "").strip(),
+                )
+                if item
+            ]
+            detail_blocks.append(
+                _detail_block(
+                    payload["label"],
+                    payload["body"],
+                    variation_tags,
+                    tone=str(payload.get("tone") or ""),
+                    action=str(payload.get("action") or ""),
+                )
+            )
+            next_section["detail_blocks"] = detail_blocks
+
+        profile = next_section.get("section_profile")
+        if isinstance(profile, dict):
+            next_profile = dict(profile)
+            insights = [
+                dict(item)
+                for item in list(next_profile.get("insights") or [])
+                if isinstance(item, dict)
+            ]
+            if not any(str(item.get("label") or "") == payload["label"] for item in insights):
+                insights.append(
+                    {
+                        "label": payload["label"],
+                        "value": payload["value"],
+                        "body": payload["body"],
+                        "tone": payload["tone"],
+                    }
+                )
+            next_profile["insights"] = insights
+            next_section["section_profile"] = next_profile
+        enriched.append(next_section)
+    return enriched
+
+
 def _normalize_premium_section(
     section: dict[str, Any],
     product_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = dict(section)
     domain_label = str(section.get("domain_label") or "운세")
-    detail_label = domain_label.removesuffix("운") if domain_label != "운세" else domain_label
     lead = _headline_for_card(section, product_item)
     summary = _summary_for_card(section, product_item)
-    title = f"{detail_label} 세부 운세"
+    title = domain_label or "운세"
     normalized["title"] = title
     normalized["heading"] = title
     normalized["lead"] = lead
@@ -5732,7 +14121,10 @@ def _normalize_premium_section(
     normalized["timing_windows"] = []
     normalized["checkpoints"] = _premium_checkpoints(section, product_item)
     judgment_axes = _judgment_axes_for_card(section, product_item)
-    detail_blocks = _premium_detail_blocks_for_card(section, product_item)
+    detail_blocks = _enrich_detail_block_actions(
+        _domain_key(section),
+        _premium_detail_blocks_for_card(section, product_item),
+    )
     normalized["judgment_axes"] = judgment_axes
     normalized["detail_blocks"] = detail_blocks
     normalized["product_story"] = _premium_product_story_for_card(section, product_item, judgment_axes, detail_blocks)
@@ -5741,6 +14133,9 @@ def _normalize_premium_section(
         judgment_axes,
     )
     normalized["feature_axes"] = list((product_item or {}).get("feature_axes") or [])
+    expert_projection = (product_item or {}).get("expert_projection_summary")
+    if isinstance(expert_projection, dict) and expert_projection:
+        normalized["expert_projection_summary"] = dict(expert_projection)
     normalized["engine_scores"] = _engine_score_payload(product_item)
     normalized["strength_score"] = _domain_strength_score(_domain_key(section), product_item)
     normalized["action_label"] = _action_for_card(section, product_item)
@@ -6400,6 +14795,12 @@ def _clean_personality_type_label(value: str) -> str:
     return text.strip(" ·")
 
 
+def _source_month_day_archetype_title(trait: dict[str, Any]) -> str:
+    if str(trait.get("source_type") or "") != "month_branch_day_pillar":
+        return _clean_personality_type_label(str(trait.get("compression_type") or trait.get("title") or ""))
+    return str(trait.get("compression_type") or trait.get("title") or "").strip()
+
+
 def _personality_type_sentence(title: str) -> str:
     text = _clean_personality_type_label(title)
     if not text:
@@ -6467,6 +14868,11 @@ def _personality_profile_display_title(title: str, primary_axis: str, support_ax
     text = _clean_personality_type_label(title)
     if not text:
         return _personality_type_title(primary_axis, support_axis)
+    parts = [part.strip() for part in re.split(r"\s*·\s*", text) if part.strip()]
+    if len(parts) >= 2 and all("형" in part for part in parts[:2]):
+        return text
+    if "·" not in text and text.endswith("형"):
+        return text
     if "원칙" in text and "계산" in text:
         return "원칙이 강하고 손익 계산이 빠른 성격"
     if "원칙" in text:
@@ -6481,17 +14887,21 @@ def _personality_profile_display_title(title: str, primary_axis: str, support_ax
         return "책임과 관리 의식이 강한 성격"
     if "개척" in text or "선도" in text:
         return "앞에서 방향을 여는 성격"
-    parts = [part.strip().replace("형", "") for part in re.split(r"\s*·\s*", text) if part.strip()]
-    if parts:
-        return f"{parts[0]} 성향"
+    display_parts = [part.strip().replace("형", "") for part in re.split(r"\s*·\s*", text) if part.strip()]
+    if display_parts:
+        return f"{display_parts[0]} 성향"
     return _personality_type_title(primary_axis, support_axis)
 
 
 def _source_personality_lead(source_profile: dict[str, Any], fallback: str) -> str:
+    combined = _source_personality_trait(source_profile, "month_day_pillar_profile")
     day = _source_personality_trait(source_profile, "day_pillar_profile")
     month = _source_personality_trait(source_profile, "month_branch_profile")
+    combined_type = _source_month_day_archetype_title(combined)
     day_type = _clean_personality_type_label(str(day.get("compression_type") or ""))
     month_type = _clean_personality_type_label(str(month.get("compression_type") or ""))
+    if combined_type:
+        return f"당신은 {combined_type}에 가깝습니다."
     if day_type and month_type:
         return _personality_type_sentence(f"{day_type} · {month_type}")
     if day_type:
@@ -6505,14 +14915,19 @@ def _source_personality_narrative(
     source_profile: dict[str, Any],
     fallback: str,
 ) -> str:
+    combined = _source_personality_trait(source_profile, "month_day_pillar_profile")
     day = _source_personality_trait(source_profile, "day_pillar_profile")
     month = _source_personality_trait(source_profile, "month_branch_profile")
     core = _source_personality_phrase(_source_personality_list(source_profile, "trait_keywords", 3))
     strengths = _source_personality_phrase(_source_personality_list(source_profile, "strength_keywords", 3))
     shadows = _source_personality_phrase(_source_personality_list(source_profile, "shadow_keywords", 2))
+    combined_inner = _source_personality_phrase(_source_personality_list(combined, "inner_traits", 1))
+    combined_outer = _source_personality_phrase(_source_personality_list(combined, "outer_traits", 1))
     day_outer = _source_personality_phrase(_source_personality_list(day, "outer_traits", 2))
     month_inner = _source_personality_phrase(_source_personality_list(month, "inner_traits", 2))
     sentences: list[str] = []
+    if combined_inner and combined_outer:
+        sentences.append(f"타고난 바탕은 {combined_inner}이고, 실제 행동에서는 {_with_subject_particle(combined_outer)} 두드러집니다.")
     if core:
         sentences.append(f"성격의 중심은 {core}입니다.")
     if day_outer:
@@ -6529,6 +14944,7 @@ def _source_personality_narrative(
 def _source_personality_points(source_profile: dict[str, Any], fallback_points: list[str]) -> list[str]:
     if not source_profile:
         return fallback_points
+    combined = _source_personality_trait(source_profile, "month_day_pillar_profile")
     day = _source_personality_trait(source_profile, "day_pillar_profile")
     month = _source_personality_trait(source_profile, "month_branch_profile")
     core = _source_personality_phrase(_source_personality_list(source_profile, "trait_keywords", 3))
@@ -6536,11 +14952,16 @@ def _source_personality_points(source_profile: dict[str, Any], fallback_points: 
     shadows = _source_personality_phrase(_source_personality_list(source_profile, "shadow_keywords", 3))
     outer = _source_personality_phrase(_source_personality_list(day, "outer_traits", 2))
     inner = _source_personality_phrase(_source_personality_list(month, "inner_traits", 2))
+    combined_type = _source_month_day_archetype_title(combined)
+    combined_inner = _source_personality_phrase(_source_personality_list(combined, "inner_traits", 1))
+    combined_outer = _source_personality_phrase(_source_personality_list(combined, "outer_traits", 1))
     day_type = _clean_personality_type_label(str(day.get("compression_type") or ""))
     month_type = _clean_personality_type_label(str(month.get("compression_type") or ""))
-    title = " · ".join(value for value in (day_type, month_type) if value)
+    title = combined_type or " · ".join(value for value in (day_type, month_type) if value)
     points = [
         f"성격 결론: {title}" if title else "",
+        f"기질의 바탕: {combined_inner}" if combined_inner else "",
+        f"행동으로 드러나는 모습: {combined_outer}" if combined_outer else "",
         f"기본 성정: {core}" if core else "",
         f"겉으로 보이는 태도: {outer}" if outer else "",
         f"속기질: {inner}" if inner else "",
@@ -7186,7 +15607,7 @@ TIMING_DOMAIN_LABELS: dict[str, str] = {
 TIMING_GOOD_PHRASES: dict[str, str] = {
     "money": "자산 형성",
     "career": "직업 상승",
-    "love": "인연 성립",
+    "love": "새 만남",
     "marriage": "혼인 성사",
 }
 
@@ -7266,7 +15687,7 @@ TIMING_GOOD_CARD_CLAUSES: dict[str, str] = {
     "결정권 확보": "결정권을 확보합니다",
     "직책 확보": "직책과 권한을 확보합니다",
     "평가 상승": "평가가 올라갑니다",
-    "인연 성립": "인연이 성립됩니다",
+    "인연 성립": "새 만남이 시작됩니다",
     "관계 확정": "관계가 확정됩니다",
     "관계 공식화": "관계가 공식화됩니다",
     "인연 진전": "인연이 실제 관계로 넘어갑니다",
@@ -7297,7 +15718,7 @@ TIMING_CAUTION_CARD_CLAUSES: dict[str, str] = {
     "주거 부담": "주거 부담이 올라옵니다",
     "혼인 지연": "혼인 결정이 늦어집니다",
     "결혼 준비 지연": "결혼 준비가 지연됩니다",
-    "가족 책임 증가": "가족 책임이 늘어납니다",
+    "가족 책임 증가": "결혼 현실 부담이 올라옵니다",
 }
 
 
@@ -7350,10 +15771,10 @@ TIMING_GOOD_VARIANTS: dict[str, dict[str, dict[str, str]]] = {
     },
     "love": {
         "new_connection": {
-            "title": "인연 성립",
-            "phrase": "인연 성립",
-            "focusLine": "인연 성립",
-            "decisionLine": "새로운 인연이 실제 만남으로 이어지는 연도",
+            "title": "새 만남",
+            "phrase": "새 인연",
+            "focusLine": "새 인연",
+            "decisionLine": "새로운 만남이 실제 약속으로 이어지는 연도",
             "productLine": "소개와 만남이 늘고, 호감이 실제 약속으로 이어집니다.",
         },
         "relationship_formalization": {
@@ -7369,6 +15790,13 @@ TIMING_GOOD_VARIANTS: dict[str, dict[str, dict[str, str]]] = {
             "focusLine": "강한 인연",
             "decisionLine": "서로의 마음이 빠르게 확인되는 연도",
             "productLine": "호감이 빠르게 확인되고 관계의 속도가 붙습니다.",
+        },
+        "social_support": {
+            "title": "귀인 인연",
+            "phrase": "소개·도움·협력 인연",
+            "focusLine": "귀인·협력",
+            "decisionLine": "사회적 인연과 조력자가 들어오는 연도",
+            "productLine": "일과 생활에서 도움을 주는 사람이 들어오고, 소개와 협력이 길을 넓힙니다.",
         },
     },
     "marriage": {
@@ -7422,6 +15850,34 @@ TIMING_CAUTION_VARIANTS: dict[str, dict[str, dict[str, str]]] = {
         },
     },
     "career": {
+        "role_collision": {
+            "title": "역할 충돌",
+            "phrase": "역할 충돌",
+            "focusLine": "역할 충돌",
+            "decisionLine": "내가 맡은 일과 타인의 책임선이 부딪히는 연도",
+            "productLine": "일의 경계가 흐려져 평가와 책임이 함께 흔들리기 쉽습니다.",
+        },
+        "standard_conflict": {
+            "title": "업무 기준 충돌",
+            "phrase": "업무 기준 충돌",
+            "focusLine": "업무 기준 충돌",
+            "decisionLine": "기준과 책임 범위가 맞지 않아 업무가 막히는 연도",
+            "productLine": "절차, 자료, 승인 기준이 맞지 않아 일의 속도가 늦어집니다.",
+        },
+        "performance_pressure": {
+            "title": "성과 압박",
+            "phrase": "성과 압박",
+            "focusLine": "성과 압박",
+            "decisionLine": "결과와 보상 요구가 동시에 강해지는 연도",
+            "productLine": "성과를 요구받는 강도가 커지고 결과에 대한 계산이 엄격해집니다.",
+        },
+        "peer_competition": {
+            "title": "조직 경쟁",
+            "phrase": "조직 경쟁",
+            "focusLine": "조직 경쟁",
+            "decisionLine": "동료나 경쟁자와 역할이 겹치기 쉬운 연도",
+            "productLine": "같은 일을 두고 경쟁이 생기며 책임과 공로가 예민해집니다.",
+        },
         "authority_gap": {
             "title": "권한 불균형",
             "phrase": "권한 불균형",
@@ -7466,6 +15922,13 @@ TIMING_CAUTION_VARIANTS: dict[str, dict[str, dict[str, str]]] = {
             "decisionLine": "연락과 만남이 눈에 띄게 줄어드는 연도",
             "productLine": "연락과 만남이 줄며 마음도 식습니다.",
         },
+        "social_reputation_guard": {
+            "title": "관계 구설",
+            "phrase": "말·체면·구설",
+            "focusLine": "대인 구설",
+            "decisionLine": "사회적 관계에서 말과 체면 문제가 커지기 쉬운 연도",
+            "productLine": "가까운 관계나 사회적 인연에서 말과 체면 문제가 커지기 쉽습니다.",
+        },
     },
     "marriage": {
         "household_cost": {
@@ -7490,9 +15953,9 @@ TIMING_CAUTION_VARIANTS: dict[str, dict[str, dict[str, str]]] = {
             "productLine": "결혼 약속과 일정이 늦어지고 관계의 피로가 남습니다.",
         },
         "family_burden": {
-            "title": "가족 책임 증가",
-            "phrase": "가족 책임 증가",
-            "focusLine": "가족 책임 증가",
+            "title": "가정 책임",
+            "phrase": "가족·주거·생활비",
+            "focusLine": "가정 책임",
             "decisionLine": "가족과 주거 책임이 늘어나는 연도",
             "productLine": "가족 책임과 주거 비용이 한꺼번에 들어옵니다.",
         },
@@ -7521,21 +15984,19 @@ def _annual_domain_scores(row: dict[str, Any], domain: str) -> dict[str, Any]:
 
 
 def _year_good_score(row: dict[str, Any], domain: str, base_strength: int) -> float:
-    scores = _annual_domain_scores(row, domain)
-    opportunity = _number_value(scores.get("opportunity"))
-    probability = _number_value(scores.get("probability"))
-    change = _number_value(scores.get("change"))
-    risk = _number_value(scores.get("risk"))
-    return opportunity * 0.42 + probability * 0.34 + change * 0.08 + base_strength * 0.18 - risk * 0.22
+    _ = base_strength
+    return timing_base_score(
+        _timing_score_parts(row, domain),
+        "good",
+    ) + timing_activation_modifier(row.get("activationContext"), "good")
 
 
 def _year_caution_score(row: dict[str, Any], domain: str, base_strength: int) -> float:
-    scores = _annual_domain_scores(row, domain)
-    opportunity = _number_value(scores.get("opportunity"))
-    probability = _number_value(scores.get("probability"))
-    change = _number_value(scores.get("change"))
-    risk = _number_value(scores.get("risk"))
-    return risk * 0.58 + change * 0.16 + max(0, base_strength - 68) * 0.08 - opportunity * 0.13 - probability * 0.06
+    _ = base_strength
+    return timing_base_score(
+        _timing_score_parts(row, domain),
+        "caution",
+    ) + timing_activation_modifier(row.get("activationContext"), "caution")
 
 
 def _timing_score_parts(row: dict[str, Any], domain: str) -> dict[str, float]:
@@ -7572,7 +16033,7 @@ def _timing_activation_keywords(row: dict[str, Any], kind: str = "") -> list[str
         keywords.append("부담 오행 발동")
     if int(context.get("phase_hit_count") or 0):
         keywords.append("월령 지장간 발동")
-    relation_hits = context.get("relation_hits") if isinstance(context.get("relation_hits"), list) else []
+    relation_hits = event_relation_hits(context)
     relation_labels = [
         TIMING_RELATION_LABELS.get(str(item.get("relation_type") or ""), "")
         for item in relation_hits
@@ -7611,6 +16072,16 @@ def _timing_age_from_row(row: dict[str, Any]) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _timing_row_ten_gods(row: dict[str, Any]) -> list[str]:
+    gods = [
+        str(row.get("daeunStemTenGod") or ""),
+        str(row.get("daeunBranchTenGod") or ""),
+        str(row.get("stemTenGod") or ""),
+        str(row.get("branchTenGod") or ""),
+    ]
+    return [god for god in gods if god]
+
+
 def _timing_variant_key(row: dict[str, Any], domain: str, kind: str) -> str:
     parts = _timing_score_parts(row, domain)
     opportunity = parts["opportunity"]
@@ -7618,6 +16089,19 @@ def _timing_variant_key(row: dict[str, Any], domain: str, kind: str) -> str:
     change = parts["change"]
     risk = parts["risk"]
     age = _timing_age_from_row(row)
+    gods = _timing_row_ten_gods(row)
+    output_gods = {"sik_sin", "sang_gwan"}
+    wealth_gods = {"jeong_jae", "pyeon_jae"}
+    officer_gods = {"jeong_gwan", "pyeon_gwan"}
+    resource_gods = {"jeong_in", "pyeon_in"}
+    peer_gods = {"bi_gyeon", "geob_jae"}
+    has_output = any(god in output_gods for god in gods)
+    has_wealth = any(god in wealth_gods for god in gods)
+    has_officer = any(god in officer_gods for god in gods)
+    has_resource = any(god in resource_gods for god in gods)
+    has_peer = any(god in peer_gods for god in gods)
+    peer_count = sum(1 for god in gods if god in peer_gods)
+    robbery_count = sum(1 for god in gods if god == "geob_jae")
 
     if kind == "good":
         if domain == "money":
@@ -7633,6 +16117,8 @@ def _timing_variant_key(row: dict[str, Any], domain: str, kind: str) -> str:
                 return "authority_expansion"
             return "recognition"
         if domain == "love":
+            if age and age >= 45:
+                return "social_support"
             if change >= 50:
                 return "relationship_formalization"
             if probability >= 76:
@@ -7652,12 +16138,26 @@ def _timing_variant_key(row: dict[str, Any], domain: str, kind: str) -> str:
             return "financial_liability"
         return "shared_money"
     if domain == "career":
+        if has_output and has_peer:
+            return "role_collision"
+        if robbery_count >= 2:
+            return "peer_competition"
+        if has_resource and has_peer:
+            return "standard_conflict"
+        if has_output and has_officer:
+            return "reputation_test"
+        if has_output and has_wealth:
+            return "performance_pressure"
+        if peer_count >= 2:
+            return "peer_competition"
         if risk >= 74 and change >= 55:
             return "authority_gap"
         if risk >= 74:
             return "reputation_test"
         return "role_overload"
     if domain == "love":
+        if age and age >= 45:
+            return "social_reputation_guard"
         if risk >= 66 and change >= 45:
             return "separation"
         if risk >= 60:
@@ -7677,6 +16177,67 @@ def _timing_variant_key(row: dict[str, Any], domain: str, kind: str) -> str:
 def _timing_variant_data(domain: str, kind: str, variant: str) -> dict[str, str]:
     table = TIMING_GOOD_VARIANTS if kind == "good" else TIMING_CAUTION_VARIANTS
     return table.get(domain, {}).get(variant, {})
+
+
+def _timing_display_domain_label(domain: str, kind: str, age: int | None) -> str:
+    if domain == "love" and age and age >= 45:
+        return "대인·귀인" if kind == "good" else "대인관계"
+    if domain == "marriage" and age and age >= 45:
+        return "배우자·가정"
+    if domain == "marriage":
+        return "혼인·배우자"
+    if domain == "love":
+        return "연애·인연"
+    return TIMING_DOMAIN_LABELS.get(domain, "운세")
+
+
+def _timing_lifecycle_display_override(candidate: dict[str, Any], age: int | None) -> dict[str, str]:
+    domain = str(candidate.get("domain") or "").strip()
+    kind = str(candidate.get("kind") or "").strip()
+    variant = str(candidate.get("variant") or candidate.get("eventKey") or "").strip()
+    title = str(candidate.get("title") or "").strip()
+    if domain == "love" and age and age >= 45:
+        if kind == "good":
+            return {
+                "title": "귀인 인연",
+                "phrase": "소개·도움·협력 인연",
+                "focusLine": "귀인·협력",
+                "decisionLine": "사회적 인연과 조력자가 들어오는 연도",
+                "productLine": "일과 생활에서 도움을 주는 사람이 들어오고, 소개와 협력이 길을 넓힙니다.",
+            }
+        return {
+            "title": "관계 구설",
+            "phrase": "말·체면·구설",
+            "focusLine": "대인 구설",
+            "decisionLine": "사회적 관계에서 말과 체면 문제가 커지기 쉬운 연도",
+            "productLine": "가까운 관계나 사회적 인연에서 말과 체면 문제가 커지기 쉽습니다.",
+        }
+    if domain == "marriage" and age and age >= 45:
+        if kind == "good":
+            return {
+                "title": "가정 안정",
+                "phrase": "배우자·가정 안정",
+                "focusLine": "배우자·가정",
+                "decisionLine": "배우자와 가정의 생활 기반이 안정되는 연도",
+                "productLine": "배우자, 가족, 주거 기준이 정리되며 생활 기반이 안정됩니다.",
+            }
+        return {
+            "title": "가정 책임",
+            "phrase": "배우자·가족·주거 책임",
+            "focusLine": "가정 책임",
+            "decisionLine": "배우자, 가족, 주거 책임을 살펴야 하는 연도",
+            "productLine": "배우자, 가족, 주거, 생활비 문제가 현실 부담으로 커질 수 있습니다.",
+        }
+    if domain == "marriage" and kind != "good" and (not age or age < 45):
+        if variant in {"child_rearing_year", "family_burden"} or "가족 책임" in title:
+            return {
+                "title": "결혼 현실 부담",
+                "phrase": "가족·주거·생활비",
+                "focusLine": "결혼 현실 부담",
+                "decisionLine": "결혼과 생활 조건을 분명히 해야 하는 연도",
+                "productLine": "감정이 있어도 가족, 주거, 생활비 문제가 결정의 부담으로 올라올 수 있습니다.",
+            }
+    return {}
 
 
 def _timing_source_path(row: dict[str, Any], domain: str, kind: str) -> str:
@@ -7728,12 +16289,14 @@ def _year_candidate(
     *,
     kind: str,
 ) -> dict[str, Any]:
+    age = _timing_age_from_row(row)
     variant = _timing_variant_key(row, domain, kind)
     variant_data = _timing_variant_data(domain, kind, variant)
     return {
         "year": int(row.get("year") or 0),
         "domain": domain,
-        "domainLabel": TIMING_DOMAIN_LABELS.get(domain, "운세"),
+        "domainLabel": _timing_display_domain_label(domain, kind, age),
+        "sourceDomainLabel": TIMING_DOMAIN_LABELS.get(domain, "운세"),
         "score": round(score, 2),
         "scoreParts": _timing_score_parts(row, domain),
         "variant": variant,
@@ -7756,6 +16319,46 @@ def _year_candidate(
     }
 
 
+def _year_direction_candidates(
+    row: dict[str, Any],
+    strengths: dict[str, int],
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    good_ranked: list[dict[str, Any]] = []
+    caution_ranked: list[dict[str, Any]] = []
+    for domain in TIMING_DOMAIN_LABELS:
+        base_strength = strengths.get(domain, 0)
+        good_ranked.append(
+            _year_candidate(
+                row,
+                domain,
+                _year_good_score(row, domain, base_strength),
+                kind="good",
+            )
+        )
+        caution_ranked.append(
+            _year_candidate(
+                row,
+                domain,
+                _year_caution_score(row, domain, base_strength),
+                kind="caution",
+            )
+        )
+    best_good = max(
+        good_ranked,
+        key=lambda item: (float(item.get("score") or 0), str(item.get("domain") or "")),
+    )
+    best_caution = max(
+        caution_ranked,
+        key=lambda item: (float(item.get("score") or 0), str(item.get("domain") or "")),
+    )
+    direction = (
+        "caution"
+        if float(best_caution.get("score") or 0) > float(best_good.get("score") or 0)
+        else "good"
+    )
+    return best_good, best_caution, direction
+
+
 def _select_year_candidates(
     rows: list[dict[str, Any]],
     sections: list[dict[str, Any]],
@@ -7768,16 +16371,11 @@ def _select_year_candidates(
     for row in rows:
         if not row.get("year"):
             continue
-        good_ranked: list[tuple[float, str]] = []
-        caution_ranked: list[tuple[float, str]] = []
-        for domain in TIMING_DOMAIN_LABELS:
-            base_strength = strengths.get(domain, 0)
-            good_ranked.append((_year_good_score(row, domain, base_strength), domain))
-            caution_ranked.append((_year_caution_score(row, domain, base_strength), domain))
-        good_score, good_domain = max(good_ranked, key=lambda item: item[0])
-        caution_score, caution_domain = max(caution_ranked, key=lambda item: item[0])
-        good_candidates.append(_year_candidate(row, good_domain, good_score, kind="good"))
-        caution_candidates.append(_year_candidate(row, caution_domain, caution_score, kind="caution"))
+        best_good, best_caution, direction = _year_direction_candidates(row, strengths)
+        if direction == "good":
+            good_candidates.append(best_good)
+        else:
+            caution_candidates.append(best_caution)
 
     selected_good = _select_bucketed_years(good_candidates, limit=limit)
     selected_good_years = {int(candidate["year"]) for candidate in selected_good}
@@ -7860,13 +16458,16 @@ def _select_bucketed_years(
         bucket = max(0, (year - start_year) // 10)
         buckets.setdefault(bucket, []).append(candidate)
 
-    selected: list[dict[str, Any]] = []
+    bucket_winners: list[dict[str, Any]] = []
     for bucket in sorted(buckets):
         ranked = sorted(buckets[bucket], key=lambda item: (-item["score"], item["year"]))
         if ranked:
-            selected.append(ranked[0])
-        if len(selected) >= limit:
-            break
+            bucket_winners.append(ranked[0])
+
+    selected = sorted(
+        bucket_winners,
+        key=lambda item: (-float(item.get("score") or 0), int(item.get("year") or 0)),
+    )[:limit]
 
     if len(selected) < limit:
         selected_years = {int(candidate["year"]) for candidate in selected}
@@ -8071,6 +16672,39 @@ def _best_year_candidate_for_rows(
     return max(ranked, key=lambda item: (item["score"], -int(item["year"])))
 
 
+def _best_year_candidates_for_rows(
+    rows: list[dict[str, Any]],
+    strengths: dict[str, int],
+    *,
+    kind: str,
+    limit: int = 2,
+    excluded_years: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    excluded_years = excluded_years or set()
+    yearly_best: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+    for row in rows:
+        year = int(row.get("year") or 0)
+        if not year or year in excluded_years:
+            continue
+        best_good, best_caution, direction = _year_direction_candidates(row, strengths)
+        candidate = best_good if kind == "good" else best_caution
+        fallback.append(candidate)
+        if direction == kind:
+            yearly_best.append(candidate)
+    if not yearly_best:
+        yearly_best = fallback
+    selected = sorted(
+        yearly_best,
+        key=lambda item: (
+            -float(item.get("score") or 0),
+            int(item.get("year") or 0),
+            str(item.get("domain") or ""),
+        ),
+    )[: max(1, limit)]
+    return sorted(selected, key=lambda item: int(item.get("year") or 0))
+
+
 def _timing_decade_groups(
     rows: list[dict[str, Any]],
     sections: list[dict[str, Any]],
@@ -8082,8 +16716,8 @@ def _timing_decade_groups(
         return []
     strengths = _section_strength_by_domain(sections)
     groups: list[dict[str, Any]] = []
-    for start_age in range(20, 80, 10):
-        end_age = start_age + 9
+    for start_age in range(1, 81, 10):
+        end_age = min(start_age + 9, 80)
         decade_rows = [
             row
             for row in rows
@@ -8091,22 +16725,44 @@ def _timing_decade_groups(
         ]
         if not decade_rows:
             continue
-        good = _best_year_candidate_for_rows(decade_rows, strengths, kind="good")
-        caution = _best_year_candidate_for_rows(
+        good_candidates = _best_year_candidates_for_rows(
+            decade_rows,
+            strengths,
+            kind="good",
+            limit=2,
+        )
+        good_years = {int(candidate.get("year") or 0) for candidate in good_candidates}
+        caution_candidates = _best_year_candidates_for_rows(
             decade_rows,
             strengths,
             kind="caution",
-            excluded_years={int(good["year"])} if good else set(),
+            limit=2,
+            excluded_years=good_years,
         )
+        if not caution_candidates:
+            caution_candidates = _best_year_candidates_for_rows(
+                decade_rows,
+                strengths,
+                kind="caution",
+                limit=2,
+            )
         first_year = min(int(row.get("year") or 0) for row in decade_rows if row.get("year"))
         last_year = max(int(row.get("year") or 0) for row in decade_rows if row.get("year"))
         groups.append(
             {
-                "label": f"{start_age}대",
+                "label": f"{start_age}~{end_age}세",
                 "ageRange": f"{start_age}~{end_age}세",
                 "yearRange": f"{first_year}~{last_year}년",
-                "good": _timing_event_payload(good, birth_year, current_year=current_year) if good else None,
-                "caution": _timing_event_payload(caution, birth_year, current_year=current_year) if caution else None,
+                "good": _timing_event_payloads(
+                    good_candidates,
+                    birth_year,
+                    current_year=current_year,
+                ),
+                "caution": _timing_event_payloads(
+                    caution_candidates,
+                    birth_year,
+                    current_year=current_year,
+                ),
             }
         )
     return groups
@@ -8114,6 +16770,28 @@ def _timing_decade_groups(
 
 def _candidate_years(candidates: list[dict[str, Any]], fallback: str) -> str:
     years = [f"{candidate['year']}년" for candidate in candidates if candidate.get("year")]
+    return " · ".join(years) if years else fallback
+
+
+def _candidate_year_only_list(
+    candidates: list[dict[str, Any]],
+    fallback: str,
+    *,
+    limit: int = 6,
+) -> str:
+    years: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        year = str(candidate.get("year") or "").strip()
+        if not year:
+            continue
+        label = year if year.endswith("년") else f"{year}년"
+        if label in seen:
+            continue
+        seen.add(label)
+        years.append(label)
+        if len(years) >= limit:
+            break
     return " · ".join(years) if years else fallback
 
 
@@ -8300,6 +16978,42 @@ def _candidate_average_score(candidates: list[dict[str, Any]]) -> int | None:
     return int(round(max(28, min(98, sum(scores) / len(scores)))))
 
 
+def _timing_candidate_metric_score(
+    candidates: list[dict[str, Any]],
+    *,
+    tone: str,
+) -> int | None:
+    """Convert annual candidate strength into a visible product metric.
+
+    Timing candidates are already the strongest/riskiest years in a 1-80 age
+    range. A plain average therefore makes many charts look nearly identical.
+    This score keeps the engine value but adds spread and event confidence so
+    the card reflects how sharply the chart's timing actually separates.
+    """
+    scores = [_number_value(candidate.get("score"), -1) for candidate in candidates]
+    scores = [score for score in scores if score >= 0]
+    if not scores:
+        return None
+    top = max(scores)
+    avg = sum(scores) / len(scores)
+    spread = max(scores) - min(scores) if len(scores) > 1 else 0
+    strong_count = sum(1 for score in scores if score >= 72)
+    weak_count = sum(1 for score in scores if score < 58)
+    confidence = min(10, strong_count * 3 + spread * 0.18)
+    if tone == "watch":
+        # Caution cards stay on the same visual rule as the rest of the product:
+        # low score means risk is difficult to manage, high score means the
+        # caution can be handled with less damage.
+        risk_pressure = top * 0.64 + avg * 0.28 + spread * 0.08
+        control_score = 100 - risk_pressure + weak_count * 1.5
+        # Keep the engine's distinction between severe and moderate pressure.
+        # A 28-point floor collapsed materially different charts into the same
+        # visible result even when their source risk scores differed sharply.
+        return int(round(max(10, min(82, control_score))))
+    display_score = avg * 0.52 + top * 0.33 + confidence
+    return int(round(max(38, min(98, display_score))))
+
+
 def _candidate_domain_summary(candidates: list[dict[str, Any]], fallback: str) -> str:
     counts: dict[str, int] = {}
     labels: dict[str, str] = {}
@@ -8343,29 +17057,52 @@ def _timing_domain_rank_items(candidates: list[dict[str, Any]]) -> list[dict[str
     ]
 
 
+def _timing_primary_domain_summary(candidates: list[dict[str, Any]], fallback: str) -> str:
+    ranked = _timing_domain_rank_items(candidates)
+    if ranked:
+        return str(ranked[0].get("label") or fallback).strip() or fallback
+    return fallback
+
+
+def _timing_top_event_domain_summary(candidates: list[dict[str, Any]], fallback: str) -> str:
+    ranked = _timing_ranked_candidates(candidates, limit=1) if candidates else []
+    candidate = ranked[0] if ranked else {}
+    domain = str(candidate.get("domain") or "")
+    label = str(candidate.get("domainLabel") or TIMING_DOMAIN_LABELS.get(domain, "")).strip()
+    return label or fallback
+
+
+def _timing_domain_rank_items_with_top_event_first(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items = _timing_domain_rank_items(candidates)
+    ranked = _timing_ranked_candidates(candidates, limit=1) if candidates else []
+    top_domain = str(ranked[0].get("domain") or "") if ranked else ""
+    if not top_domain:
+        return items
+    return sorted(items, key=lambda item: (0 if str(item.get("domain") or "") == top_domain else 1))
+
+
 def _timing_calendar_profile(
     good_years: list[dict[str, Any]],
     caution_years: list[dict[str, Any]],
     timing_decades: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    good_domains = _timing_domain_rank_items(good_years)
-    caution_domains = _timing_domain_rank_items(caution_years)
+    good_domains = _timing_domain_rank_items_with_top_event_first(good_years)
+    caution_domains = _timing_domain_rank_items_with_top_event_first(caution_years)
     decisive_ages = [
         str(group.get("label") or "")
         for group in timing_decades
         if group.get("good") and group.get("caution")
     ]
     return {
-        "range": "20세~79세",
-        "goodFocus": (good_domains[0]["label"] if good_domains else "좋은 분야"),
-        "cautionFocus": (caution_domains[0]["label"] if caution_domains else "주의 분야"),
+        "range": "주요 연도",
+        "goodFocus": _timing_top_event_domain_summary(good_years, "좋은 분야"),
+        "cautionFocus": _timing_top_event_domain_summary(caution_years, "주의 분야"),
         "decisiveAgeBands": " · ".join(decisive_ages[:4]) or "주요 연령대",
         "goodDomainItems": good_domains[:3],
         "cautionDomainItems": caution_domains[:3],
         "summary": (
-            f"좋은 분야는 {_candidate_domain_summary(good_years, '좋은 분야')}입니다. "
-            f"주의 분야는 {_candidate_domain_summary(caution_years, '주의 분야')}입니다. "
-            f"확인 구간은 {' · '.join(decisive_ages[:4]) or '20대~70대'}입니다."
+            f"좋은 분야는 {_timing_top_event_domain_summary(good_years, '좋은 분야')}입니다. "
+            f"주의 분야는 {_timing_top_event_domain_summary(caution_years, '주의 분야')}입니다."
         ),
     }
 
@@ -8387,7 +17124,9 @@ def _timing_topic_item(
         "tone": tone,
         "evidence": evidence,
     }
-    score = _candidate_average_score(candidates)
+    score = _timing_candidate_metric_score(candidates, tone=tone)
+    if score is None:
+        score = _candidate_average_score(candidates)
     if score is not None:
         item["score"] = score
     return item
@@ -8401,24 +17140,25 @@ def _timing_topic_items(
     *,
     birth_year: int,
 ) -> list[dict[str, Any]]:
-    checked_range = "20세~79세 전체 구간"
-    all_candidates = good_years + caution_years
+    ranked_good = _timing_ranked_candidates(good_years, limit=3)
+    ranked_caution = _timing_ranked_candidates(caution_years, limit=3)
+    all_candidates = _timing_ranked_candidates(good_years + caution_years, limit=6)
     items = [
         _timing_topic_item(
-            "상승 연도",
-            _candidate_value_list(good_years, "뚜렷한 연도 없음", birth_year=birth_year),
-            _candidate_keyword_list(good_years, "성과 · 계약"),
-            candidates=good_years,
+            "좋은 시기",
+            _candidate_year_only_list(ranked_good, "뚜렷한 연도 없음"),
+            _candidate_keyword_list(ranked_good, "성과 · 계약"),
+            candidates=ranked_good,
             tone="strong",
-            evidence=f"{checked_range}에서 계약, 성과, 역할 확대가 가장 뚜렷한 해입니다.",
+            evidence="계약, 성과, 역할 확대가 가장 뚜렷하게 잡히는 해입니다.",
         ),
         _timing_topic_item(
-            "주의 연도",
-            _candidate_value_list(caution_years, "뚜렷한 연도 없음", birth_year=birth_year),
-            _candidate_keyword_list(caution_years, "책임 · 계약"),
-            candidates=caution_years,
+            "조심할 시기",
+            _candidate_year_only_list(ranked_caution, "뚜렷한 연도 없음"),
+            _candidate_keyword_list(ranked_caution, "책임 · 계약"),
+            candidates=ranked_caution,
             tone="watch",
-            evidence=f"{checked_range}에서 책임, 손실, 평판 문제가 크게 드러나는 해입니다.",
+            evidence="책임, 손실, 평판 문제가 크게 드러나는 해입니다.",
         ),
         _timing_topic_item(
             "두드러지는 영역",
@@ -8440,6 +17180,18 @@ def _timing_topic_items(
                 tone="neutral",
                 evidence="지나온 연도와 맞춰보면 이후의 상승 연도와 주의 연도가 더 분명해집니다.",
             )
+        )
+    else:
+        items.append(
+            {
+                "title": "지나온 연도",
+                "value": "과거 대조 연도 없음",
+                "body": "별도로 대조할 만한 과거 연도가 뚜렷하지 않습니다.",
+                "definition": "별도로 대조할 만한 과거 연도가 뚜렷하지 않습니다.",
+                "tone": "neutral",
+                "evidence": "지나온 연도가 약하게 잡히는 경우에는 좋은 시기와 조심할 시기를 중심으로 봅니다.",
+                "score": 50,
+            }
         )
     return items
 
@@ -8473,18 +17225,18 @@ def _timing_detail_blocks(
     good_topics = _candidate_topic_series(good_years, "성과, 계약", birth_year=birth_year)
     caution_topics = _candidate_topic_series(caution_years, "책임, 계약", birth_year=birth_year)
     good_body = (
-        f"상승 연도에는 {good_topics} 부문에서 실제 성과가 드러납니다. 대표 연도는 {good_values}입니다."
+        f"좋은 시기에는 {good_topics} 부문에서 실제 성과가 드러납니다. 대표 연도는 {good_values}입니다."
         if good_years
-        else "20세~79세 구간에서 특별히 강한 상승 연도는 선명하지 않습니다."
+        else "특별히 강한 좋은 시기는 선명하지 않습니다."
     )
     caution_body = (
-        f"주의 연도에는 {caution_topics} 부문에서 손실과 책임 문제가 커집니다. 대표 연도는 {caution_values}입니다."
+        f"조심할 시기에는 {caution_topics} 부문에서 손실과 책임 문제가 커집니다. 대표 연도는 {caution_values}입니다."
         if caution_years
-        else "20세~79세 구간에서 특별히 강한 주의 연도는 선명하지 않습니다."
+        else "특별히 강한 조심할 시기는 선명하지 않습니다."
     )
     blocks = [
-        _detail_block("상승 연도", good_body, bullets(good_years, "성과·계약·평가")),
-        _detail_block("주의 연도", caution_body, bullets(caution_years, "손실·책임·관계 부담"), tone="risk"),
+        _detail_block("좋은 시기", good_body, bullets(good_years, "성과·계약·평가")),
+        _detail_block("조심할 시기", caution_body, bullets(caution_years, "손실·책임·관계 부담"), tone="risk"),
     ]
     past_candidates = past_good + past_caution
     if past_candidates:
@@ -8524,28 +17276,125 @@ def _timing_summary_cards(
     *,
     birth_year: int,
 ) -> list[dict[str, Any]]:
+    ranked_good = _timing_ranked_candidates(good_years, limit=3)
+    ranked_caution = _timing_ranked_candidates(caution_years, limit=3)
     return [
         {
-            "label": "상승 연도",
-            "title": _candidate_domain_summary(good_years, "상승 분야"),
-            "value": _candidate_value_list(good_years, "뚜렷한 연도 없음", birth_year=birth_year),
-            "keywords": _candidate_keyword_list(good_years, "성과 · 계약"),
+            "label": "좋은 시기",
+            "title": _timing_top_event_domain_summary(ranked_good, "상승 분야"),
+            "value": _candidate_year_only_list(ranked_good, "뚜렷한 연도 없음"),
+            "keywords": _candidate_keyword_list(ranked_good, "성과 · 계약"),
             "tone": "good",
         },
         {
-            "label": "주의 연도",
-            "title": _candidate_domain_summary(caution_years, "주의 분야"),
-            "value": _candidate_value_list(caution_years, "뚜렷한 연도 없음", birth_year=birth_year),
-            "keywords": _candidate_keyword_list(caution_years, "책임 · 계약"),
+            "label": "조심할 시기",
+            "title": _timing_top_event_domain_summary(ranked_caution, "주의 분야"),
+            "value": _candidate_year_only_list(ranked_caution, "뚜렷한 연도 없음"),
+            "keywords": _candidate_keyword_list(ranked_caution, "책임 · 계약"),
             "tone": "risk",
         },
-        {
-            "label": "확인 구간",
-            "title": _timing_decisive_age_labels(timing_decades),
-            "value": "20세~79세",
-            "keywords": "20대 · 30대 · 40대 · 50대 · 60대 · 70대",
-            "tone": "neutral",
-        },
+    ]
+
+
+def _timing_candidate_age(candidate: dict[str, Any], birth_year: int | None) -> int | None:
+    year = int(candidate.get("year") or 0)
+    if not year or not birth_year:
+        return None
+    return year - birth_year + 1
+
+
+def _timing_decade_highlight_groups(
+    good_years: list[dict[str, Any]],
+    caution_years: list[dict[str, Any]],
+    *,
+    birth_year: int,
+    current_year: int | None,
+) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for start_age in range(1, 81, 10):
+        end_age = min(start_age + 9, 80)
+
+        def in_band(candidate: dict[str, Any]) -> bool:
+            age = _timing_candidate_age(candidate, birth_year)
+            return bool(age and start_age <= age <= end_age)
+
+        band_good = _timing_ranked_candidates(
+            [candidate for candidate in good_years if in_band(candidate)],
+            limit=2,
+        )
+        band_caution = _timing_ranked_candidates(
+            [candidate for candidate in caution_years if in_band(candidate)],
+            limit=2,
+        )
+        groups.append(
+            {
+                "label": f"{start_age}~{end_age}세",
+                "startAge": start_age,
+                "endAge": end_age,
+                "good": _timing_event_payloads(
+                    band_good,
+                    birth_year,
+                    current_year=current_year,
+                ),
+                "caution": _timing_event_payloads(
+                    band_caution,
+                    birth_year,
+                    current_year=current_year,
+                ),
+            }
+        )
+    return groups
+
+
+def _timing_public_summary_cards(
+    good_years: list[dict[str, Any]],
+    caution_years: list[dict[str, Any]],
+    timing_decades: list[dict[str, Any]],
+    *,
+    birth_year: int,
+    current_year: int | None,
+) -> list[dict[str, Any]]:
+    def event_card(label: str, event: dict[str, Any] | None, tone: str, fallback_title: str) -> dict[str, Any]:
+        if not event:
+            return {
+                "label": label,
+                "title": fallback_title,
+                "yearAge": "확인 필요",
+                "value": "뚜렷한 연도 없음",
+                "body": "뚜렷하게 잡히는 연도가 없습니다.",
+                "keywords": [],
+                "tone": tone,
+            }
+        payload = _timing_event_payload(event, birth_year, current_year=current_year)
+        year_age = " · ".join(
+            part
+            for part in (
+                f"{payload.get('year')}년" if payload.get("year") else "",
+                str(payload.get("ageLabel") or ""),
+            )
+            if part
+        )
+        domain = str(payload.get("domainLabel") or "").strip()
+        title = str(payload.get("title") or fallback_title).strip()
+        return {
+            "label": label,
+            "title": title,
+            "yearAge": year_age or "확인 필요",
+            "value": " · ".join(part for part in (domain, title) if part),
+            "body": str(payload.get("productLine") or payload.get("decisionLine") or payload.get("summary") or "").strip(),
+            "keywords": list(payload.get("keywordItems") or [])[:4],
+            "structureKeywords": list(payload.get("structureKeywords") or [])[:4],
+            "activationLabel": str(payload.get("activationLabel") or "").strip(),
+            "daeunPillar": str(payload.get("daeunPillar") or "").strip(),
+            "yearPillar": str(payload.get("yearPillar") or "").strip(),
+            "tone": tone,
+        }
+
+    ranked_good = _timing_ranked_candidates(good_years, limit=1)
+    ranked_caution = _timing_ranked_candidates(caution_years, limit=1)
+    return [
+        event_card("좋은 시기", ranked_good[0] if ranked_good else None, "good", "좋은 시기"),
+        event_card("조심할 시기", ranked_caution[0] if ranked_caution else None, "risk", "조심할 시기"),
     ]
 
 
@@ -8568,21 +17417,28 @@ def _timing_map_payload(
     top_caution = _timing_ranked_candidates(caution_years, limit=1) or caution_years[:1]
     good_anchor = _candidate_event_label_list(top_good, "확인 필요", birth_year=birth_year, limit=1)
     caution_anchor = _candidate_event_label_list(top_caution, "확인 필요", birth_year=birth_year, limit=1)
-    good_domains = _candidate_domain_summary(good_years, "상승 분야")
-    caution_domains = _candidate_domain_summary(caution_years, "주의 분야")
+    good_domains = _timing_top_event_domain_summary(good_years, "상승 분야")
+    caution_domains = _timing_top_event_domain_summary(caution_years, "주의 분야")
     return {
-        "rangeLabel": "20세~79세",
-        "headline": "상승 연도와 주의 연도",
-        "boardLeadShort": "20세~79세 전체 기준입니다.",
+        "rangeLabel": "주요 연도",
+        "headline": "좋은 시기와 조심할 시기",
+        "boardLeadShort": "",
         "boardLead": (
-            f"상승 연도: {good_anchor}. "
-            f"주의 연도: {caution_anchor}."
+            f"좋은 시기: {good_anchor}. "
+            f"조심할 시기: {caution_anchor}."
         ),
         "summaryCards": _timing_summary_cards(
             good_years,
             caution_years,
             timing_decades,
             birth_year=birth_year,
+        ),
+        "publicSummaryCards": _timing_public_summary_cards(
+            good_years,
+            caution_years,
+            timing_decades,
+            birth_year=birth_year,
+            current_year=current_year,
         ),
         "goodHighlights": _timing_event_payloads(
             _timing_ranked_candidates(good_years, limit=3),
@@ -8592,6 +17448,13 @@ def _timing_map_payload(
         "cautionHighlights": _timing_event_payloads(
             _timing_ranked_candidates(caution_years, limit=3),
             birth_year,
+            current_year=current_year,
+        ),
+        "decadeHighlights": timing_decades
+        or _timing_decade_highlight_groups(
+            good_years,
+            caution_years,
+            birth_year=birth_year,
             current_year=current_year,
         ),
         "pastCheck": _timing_event_payloads(
@@ -8697,6 +17560,13 @@ def _timing_event_payload(
     year = int(candidate.get("year") or 0)
     age = year - birth_year + 1 if year and birth_year else None
     is_past = bool(current_year and year and year < current_year)
+    lifecycle_override = _timing_lifecycle_display_override(candidate, age)
+    if lifecycle_override:
+        candidate = {**candidate, **lifecycle_override}
+    category_label = timing_lifecycle_category({**candidate, "age": age, "ageLabel": f"{age}세" if age else ""}, kind=str(candidate.get("kind") or "good"))
+    display_domain = str(candidate.get("domainLabel") or "").strip()
+    if category_label and category_label not in {"재물", "직업", "명예"}:
+        display_domain = category_label
     return {
         "year": year,
         "age": age,
@@ -8704,7 +17574,9 @@ def _timing_event_payload(
         "isPast": is_past,
         "periodLabel": "지난 연도" if is_past else "다가올 연도",
         "domain": str(candidate.get("domain") or ""),
-        "domainLabel": str(candidate.get("domainLabel") or ""),
+        "domainLabel": display_domain,
+        "categoryLabel": category_label or display_domain,
+        "sourceDomainLabel": str(candidate.get("sourceDomainLabel") or TIMING_DOMAIN_LABELS.get(str(candidate.get("domain") or ""), "")),
         "kind": str(candidate.get("kind") or ""),
         "variant": str(candidate.get("variant") or ""),
         "eventKey": str(candidate.get("eventKey") or candidate.get("variant") or ""),
@@ -8723,12 +17595,16 @@ def _timing_event_payload(
         ][:5],
         "daeunPillar": str(candidate.get("daeunPillar") or ""),
         "daeunStemTenGod": str(candidate.get("daeunStemTenGod") or ""),
+        "daeunStemTenGodLabel": _ten_god_label(candidate.get("daeunStemTenGod")),
         "daeunBranchTenGod": str(candidate.get("daeunBranchTenGod") or ""),
+        "daeunBranchTenGodLabel": _ten_god_label(candidate.get("daeunBranchTenGod")),
         "yearPillar": str(candidate.get("yearPillar") or ""),
         "yearStemTenGod": str(candidate.get("yearStemTenGod") or ""),
+        "yearStemTenGodLabel": _ten_god_label(candidate.get("yearStemTenGod")),
         "yearBranchTenGod": str(candidate.get("yearBranchTenGod") or ""),
+        "yearBranchTenGodLabel": _ten_god_label(candidate.get("yearBranchTenGod")),
         "activationContext": candidate.get("activationContext") if isinstance(candidate.get("activationContext"), dict) else {},
-        "kindLabel": "상승 연도" if str(candidate.get("kind") or "") == "good" else "주의 연도",
+        "kindLabel": "좋은 시기" if str(candidate.get("kind") or "") == "good" else "조심할 시기",
         "keywordItems": [
             item.strip()
             for item in re.split(r"[·,/]+", _timing_event_keywords(candidate, age))
@@ -8817,11 +17693,11 @@ TIMING_DECISION_EVENT_DISPLAY: dict[str, dict[str, str]] = {
         "productLine": "관계의 확신이 생활비와 자산 기준으로 옮겨갑니다.",
     },
     "child_rearing_year": {
-        "title": "양육 책임",
-        "phrase": "자녀·돌봄·교육비",
-        "focusLine": "자녀와 양육 책임이 커지는 해",
-        "decisionLine": "돌봄과 교육비 문제가 생활 안으로 들어오는 연도",
-        "productLine": "자녀, 돌봄, 교육비, 가족 지원 문제가 부부 생활의 실제 과제가 됩니다.",
+        "title": "가족 책임",
+        "phrase": "가족 책임·돌봄·생활비",
+        "focusLine": "가족 책임과 생활비 부담이 커지는 해",
+        "decisionLine": "가족 지원과 생활비 기준을 분명히 해야 하는 연도",
+        "productLine": "가족 안의 책임이 생활비와 시간 배분 문제로 올라옵니다.",
     },
 }
 
@@ -8914,6 +17790,178 @@ def _merge_timing_event_payloads(
     return merged
 
 
+def _rank_timing_event_payloads(events: list[dict[str, Any]], *, limit: int = 6) -> list[dict[str, Any]]:
+    ranked = sorted(
+        [event for event in events if isinstance(event, dict) and event.get("year")],
+        key=lambda item: (
+            -float(item.get("score") or 0),
+            int(item.get("year") or 9999),
+            str(item.get("domain") or ""),
+            str(item.get("title") or ""),
+        ),
+    )
+    return ranked[:limit]
+
+
+def _timing_payload_keyword_items(event: dict[str, Any] | None, *, limit: int = 4) -> list[str]:
+    if not isinstance(event, dict):
+        return []
+    explicit = [
+        str(item).strip()
+        for item in list(event.get("keywordItems") or [])
+        if str(item).strip()
+    ]
+    if explicit:
+        return explicit[:limit]
+    text = str(event.get("keywords") or event.get("summary") or event.get("title") or "").strip()
+    return [
+        item.strip()
+        for item in re.split(r"[·,/]+", text)
+        if item.strip()
+    ][:limit]
+
+
+def _timing_payload_activation_label(event: dict[str, Any] | None) -> str:
+    if not isinstance(event, dict):
+        return ""
+    explicit = str(event.get("activationLabel") or "").strip()
+    kind = str(event.get("kind") or "").strip()
+    if kind and kind != "good" and explicit:
+        caution_terms = ("부담", "주의", "문제", "손실", "흔들", "교차", "충돌", "정리")
+        if not any(term in explicit for term in caution_terms):
+            return "주의 요소가 해당 연도에 뚜렷해지는 연도"
+    if explicit:
+        return explicit
+    daeun = str(event.get("daeunPillar") or "").strip()
+    year = str(event.get("yearPillar") or "").strip()
+    parts: list[str] = []
+    if daeun:
+        parts.append(f"{daeun} 대운")
+    if year:
+        parts.append(f"{year} 세운")
+    return " · ".join(parts)
+
+
+def _timing_payload_structure_items(event: dict[str, Any] | None, *, limit: int = 4) -> list[str]:
+    if not isinstance(event, dict):
+        return []
+    values: list[str] = []
+    for item in list(event.get("structureKeywords") or []):
+        text = str(item).strip()
+        if text and text not in values:
+            values.append(text)
+    for item in _timing_payload_keyword_items(event, limit=limit):
+        text = str(item).strip()
+        if text and text not in values:
+            values.append(text)
+    for item in (
+        str(event.get("domainLabel") or "").strip(),
+        _timing_payload_activation_label(event),
+        str(event.get("yearPillar") or "").strip(),
+        str(event.get("daeunPillar") or "").strip(),
+    ):
+        if item and item not in values:
+            values.append(item)
+    return values[:limit]
+
+
+def _timing_event_label_from_payload(event: dict[str, Any] | None) -> str:
+    if not isinstance(event, dict):
+        return ""
+    year = f"{event.get('year')}년" if event.get("year") else ""
+    age = str(event.get("ageLabel") or "").strip()
+    title = str(event.get("title") or event.get("summary") or "").strip()
+    year_age = "(".join(part for part in (year, age) if part)
+    if year and age:
+        year_age = f"{year}({age})"
+    return " ".join(part for part in (year_age, title) if part).strip()
+
+
+def _timing_public_summary_cards_from_payloads(
+    good_events: list[dict[str, Any]],
+    caution_events: list[dict[str, Any]],
+    timing_decades: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    def event_card(label: str, event: dict[str, Any] | None, tone: str, fallback_title: str) -> dict[str, Any]:
+        if not isinstance(event, dict):
+            return {
+                "label": label,
+                "title": fallback_title,
+                "yearAge": "확인 필요",
+                "value": "뚜렷한 연도 없음",
+                "body": "뚜렷하게 잡히는 연도가 없습니다.",
+                "keywords": [],
+                "tone": tone,
+            }
+        year_age = " · ".join(
+            part
+            for part in (
+                f"{event.get('year')}년" if event.get("year") else "",
+                str(event.get("ageLabel") or "").strip(),
+            )
+            if part
+        )
+        title = str(event.get("title") or event.get("summary") or fallback_title).strip() or fallback_title
+        domain = str(event.get("domainLabel") or "").strip()
+        return {
+            "label": label,
+            "title": title,
+            "yearAge": year_age or "확인 필요",
+            "value": " · ".join(part for part in (domain, title) if part),
+            "body": str(event.get("productLine") or event.get("decisionLine") or event.get("summary") or "").strip(),
+            "keywords": _timing_payload_keyword_items(event),
+            "structureKeywords": _timing_payload_structure_items(event),
+            "activationLabel": _timing_payload_activation_label(event),
+            "daeunPillar": str(event.get("daeunPillar") or "").strip(),
+            "yearPillar": str(event.get("yearPillar") or "").strip(),
+            "tone": tone,
+        }
+
+    ranked_good = _rank_timing_event_payloads(good_events, limit=1)
+    ranked_caution = _rank_timing_event_payloads(caution_events, limit=1)
+    return [
+        event_card("좋은 시기", ranked_good[0] if ranked_good else None, "good", "좋은 시기"),
+        event_card("조심할 시기", ranked_caution[0] if ranked_caution else None, "risk", "조심할 시기"),
+    ]
+
+
+def _timing_payload_top_domain(events: list[dict[str, Any]], fallback: str) -> str:
+    ranked = _rank_timing_event_payloads(events, limit=1)
+    if not ranked:
+        return fallback
+    return str(ranked[0].get("domainLabel") or fallback).strip() or fallback
+
+
+def _timing_payload_keyword_summary(events: list[dict[str, Any]], fallback: str) -> str:
+    ranked = _rank_timing_event_payloads(events, limit=1)
+    if not ranked:
+        return fallback
+    keywords = _timing_payload_keyword_items(ranked[0], limit=1)
+    return keywords[0] if keywords else str(ranked[0].get("title") or fallback).strip() or fallback
+
+
+def _timing_payload_period_lists(
+    good_events: list[dict[str, Any]],
+    caution_events: list[dict[str, Any]],
+    *,
+    current_year: int | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    combined = _rank_timing_event_payloads(good_events + caution_events, limit=12)
+    if not current_year:
+        return [], combined[:4]
+    past = [
+        event
+        for event in combined
+        if int(event.get("year") or 0) < current_year
+    ][:4]
+    future = [
+        event
+        for event in combined
+        if int(event.get("year") or 0) >= current_year
+    ][:4]
+    return sorted(past, key=lambda item: int(item.get("year") or 0)), sorted(future, key=lambda item: int(item.get("year") or 0))
+
+
 def _timing_domain_year_payloads(
     domain_year_candidates: dict[str, dict[str, Any | None]],
     birth_year: int,
@@ -8957,8 +18005,8 @@ def _premium_timing_section(
     )
     past_good, future_good = _split_timing_candidates(good_years, current_year)
     past_caution, future_caution = _split_timing_candidates(caution_years, current_year)
-    good_label = _candidate_short_list(good_years, "뚜렷한 연도 없음", birth_year=birth_year)
-    caution_label = _candidate_short_list(caution_years, "뚜렷한 연도 없음", birth_year=birth_year)
+    good_label = _candidate_year_only_list(good_years, "뚜렷한 연도 없음")
+    caution_label = _candidate_year_only_list(caution_years, "뚜렷한 연도 없음")
     past_good_label = _candidate_short_list(past_good, "해당 없음", birth_year=birth_year)
     past_caution_label = _candidate_short_list(past_caution, "해당 없음", birth_year=birth_year)
     good_year_age_label = _candidate_year_age_list(good_years, "뚜렷한 연도 없음", birth_year=birth_year)
@@ -8970,18 +18018,18 @@ def _premium_timing_section(
         caution_years[0] if caution_years else None,
         fallback_caution,
     )
-    good_domain_summary = _candidate_domain_summary(good_years, "성과와 기회")
-    caution_domain_summary = _candidate_domain_summary(caution_years, "책임과 손실")
+    good_domain_summary = _timing_top_event_domain_summary(good_years, "성과와 기회")
+    caution_domain_summary = _timing_top_event_domain_summary(caution_years, "책임과 손실")
     top_good_years = _timing_ranked_candidates(good_years, limit=1) or good_years[:1]
     top_caution_years = _timing_ranked_candidates(caution_years, limit=1) or caution_years[:1]
     good_anchor = _candidate_event_label_list(top_good_years, "뚜렷한 연도 없음", birth_year=birth_year, limit=1)
     caution_anchor = _candidate_event_label_list(top_caution_years, "뚜렷한 연도 없음", birth_year=birth_year, limit=1)
     if good_domain_summary == caution_domain_summary:
-        lead = f"20세~79세 전체에서 {good_domain_summary}의 상승 연도와 주의 연도가 모두 뚜렷합니다. 대표 상승은 {good_anchor}, 대표 주의는 {caution_anchor}입니다."
+        lead = f"{good_domain_summary}에서 좋은 시기와 조심할 시기가 모두 뚜렷합니다. 좋은 시기는 {good_label}, 조심할 시기는 {caution_label}입니다."
     else:
         lead = (
-            f"20세~79세 전체에서 상승 연도는 {good_domain_summary}, 주의 연도는 {caution_domain_summary}에서 뚜렷합니다. "
-            f"대표 상승은 {good_anchor}, 대표 주의는 {caution_anchor}입니다."
+            f"좋은 시기는 {good_domain_summary}에서 뚜렷합니다. "
+            f"조심할 시기는 {caution_domain_summary}에서 강하게 잡힙니다."
         )
     timing_events = _timing_event_payloads(
         good_years + caution_years,
@@ -9010,24 +18058,21 @@ def _premium_timing_section(
     good_keyword_text = _candidate_phrase_sentence(good_years, good_phrase)
     caution_keyword_text = _candidate_phrase_sentence(caution_years, caution_phrase)
     timing_narrative = (
-        f"상승 연도 {_candidate_event_label_list(good_years, good_year_age_label, birth_year=birth_year)}. "
-        f"주의 연도 {_candidate_event_label_list(caution_years, caution_year_age_label, birth_year=birth_year)}. "
-        f"상승 쪽은 {good_keyword_text}, 주의 쪽은 {_with_subject_particle(caution_keyword_text)} 핵심입니다."
+        f"좋은 시기 {good_label}. "
+        f"조심할 시기 {caution_label}. "
+        f"좋은 쪽은 {good_keyword_text}, 조심할 쪽은 {_with_subject_particle(caution_keyword_text)} 핵심입니다."
     )
     checkpoints = [
-        f"상승 연도: {good_label}",
-        f"주의 연도: {caution_label}",
-        f"대표 사건: {good_focus}",
-        f"주의 사건: {caution_focus}",
+        f"좋은 시기: {good_label}",
+        f"조심할 시기: {caution_label}",
     ]
     if past_good:
-        checkpoints.insert(2, f"과거 상승 연도: {past_good_label}")
+        checkpoints.append(f"지나온 좋은 시기: {past_good_label}")
     if past_caution:
-        insert_at = 3 if past_good else 2
-        checkpoints.insert(insert_at, f"과거 주의 연도: {past_caution_label}")
+        checkpoints.append(f"지나온 조심할 시기: {past_caution_label}")
     summary_items = [
-        {"label": "상승 연도", "value": good_label},
-        {"label": "주의 연도", "value": caution_label},
+        {"label": "좋은 시기", "value": good_label},
+        {"label": "조심할 시기", "value": caution_label},
     ]
     if past_good or past_caution:
         summary_items.append({"label": "과거 확인", "value": past_good_label if past_good else past_caution_label})
@@ -9035,8 +18080,8 @@ def _premium_timing_section(
     section = _premium_section(
         "premium-good-timing",
         domain="timing",
-        domain_label="인생 주요 연도",
-        heading="인생 주요 연도",
+        domain_label="시기운",
+        heading="시기운",
         lead=lead,
         narrative=timing_narrative,
         checkpoints=checkpoints,
@@ -9057,11 +18102,11 @@ def _premium_timing_section(
             birth_year=birth_year,
         ),
     )
-    section["headline"] = f"상승 연도: {good_anchor}. 주의 연도: {caution_anchor}."
+    section["headline"] = f"좋은 시기: {good_label}. 조심할 시기: {caution_label}."
     section["judgment_axes"] = [
-        {"key": "good_years", "label": "상승 연도", "value": good_label},
-        {"key": "caution_years", "label": "주의 연도", "value": caution_label},
-        {"key": "good_domains", "label": "상승 분야", "value": good_domain_summary},
+        {"key": "good_years", "label": "좋은 시기", "value": good_label},
+        {"key": "caution_years", "label": "조심할 시기", "value": caution_label},
+        {"key": "good_domains", "label": "좋은 분야", "value": good_domain_summary},
         {"key": "caution_domains", "label": "주의 분야", "value": caution_domain_summary},
     ]
     section["timing_decades"] = timing_decades
@@ -9154,10 +18199,30 @@ def _life_topic_items_from_sections(*sections: dict[str, Any] | None) -> list[di
         item,
         ("asset_retention", "reputation_maintenance", "marriage_stability", "family_responsibility"),
     )
-    transition_score = _average_feature_score(
+    transition_score = _sensitive_feature_score(
+        item,
+        (
+            ("change_adaptability", 0.42),
+            ("crisis_recovery", 0.32),
+            ("responsibility_capacity", 0.12),
+            ("decision_consistency", 0.08),
+            ("self_direction", 0.06),
+        ),
+        support_keys=("change_adaptability", "crisis_recovery", "decision_consistency"),
+        floor=56,
+        penalty_weight=0.55,
+        peak_keys=("change_adaptability", "crisis_recovery"),
+        peak_weight=0.05,
+        cap=96,
+    ) or _average_feature_score(
         item,
         ("change_adaptability", "crisis_recovery", "responsibility_capacity"),
     )
+    if isinstance(transition_score, int):
+        if transition_score < 58:
+            transition_score = max(36, transition_score - 3)
+        elif transition_score >= 72:
+            transition_score = min(96, transition_score + 1)
     return [
         _topic_payload(
             "life",
@@ -9282,8 +18347,8 @@ def _dynamic_life_stage_section(
     return _premium_section(
         "premium-life-stages",
         domain="life",
-        domain_label="초년·중년·말년",
-        heading="초년·중년·말년",
+        domain_label="인생 구간",
+        heading="인생 구간",
         lead=lead,
         narrative=narrative,
         checkpoints=[
@@ -9329,16 +18394,65 @@ def _dynamic_life_stage_section(
 
 def _honor_topic_items(career: dict[str, Any] | None) -> list[dict[str, Any]]:
     item = _feature_item_from_sections(career)
-    recognition_score = _average_feature_score(
+    recognition_score = _sensitive_feature_score(
         item,
-        ("honor_recognition", "social_success_potential", "career_achievement"),
-    )
-    reputation_score = _average_feature_score(item, ("reputation_maintenance", "responsibility_capacity"))
-    formal_score = _average_feature_score(
+        (
+            ("honor_recognition", 0.38),
+            ("social_success_potential", 0.28),
+            ("promotion_visibility", 0.18),
+            ("reputation_maintenance", 0.16),
+        ),
+        support_keys=("reputation_maintenance", "role_authority_alignment"),
+        floor=54,
+        penalty_weight=0.22,
+        peak_keys=("honor_recognition", "social_success_potential"),
+        peak_weight=0.06,
+        cap=96,
+    ) or _average_feature_score(item, ("honor_recognition", "social_success_potential"))
+    reputation_score = _balanced_feature_score(
         item,
-        ("responsibility_capacity", "organization_adaptability", "leadership_potential"),
-    )
-    management_score = _average_feature_score(item, ("reputation_maintenance", "loss_avoidance", "practical_planning"))
+        (
+            ("reputation_maintenance", 0.42),
+            ("responsibility_capacity", 0.20),
+            ("practical_planning", 0.18),
+            ("loss_avoidance", 0.12),
+            ("academic_expertise", 0.08),
+        ),
+        support_keys=("reputation_maintenance", "loss_avoidance"),
+        cap=95,
+    ) or _average_feature_score(item, ("reputation_maintenance", "responsibility_capacity"))
+    formal_score = _sensitive_feature_score(
+        item,
+        (
+            ("responsibility_capacity", 0.28),
+            ("role_authority_alignment", 0.24),
+            ("promotion_visibility", 0.20),
+            ("organization_adaptability", 0.16),
+            ("leadership_potential", 0.12),
+        ),
+        support_keys=("role_authority_alignment", "organization_adaptability"),
+        floor=56,
+        penalty_weight=0.26,
+        peak_keys=("promotion_visibility", "responsibility_capacity"),
+        peak_weight=0.08,
+        cap=96,
+    ) or _average_feature_score(item, ("responsibility_capacity", "organization_adaptability", "leadership_potential"))
+    management_score = _sensitive_feature_score(
+        item,
+        (
+            ("reputation_maintenance", 0.28),
+            ("loss_avoidance", 0.26),
+            ("practical_planning", 0.22),
+            ("role_authority_alignment", 0.14),
+            ("deal_selection", 0.10),
+        ),
+        support_keys=("loss_avoidance", "practical_planning"),
+        floor=58,
+        penalty_weight=0.38,
+        peak_keys=("loss_avoidance", "reputation_maintenance"),
+        peak_weight=0.04,
+        cap=94,
+    ) or _average_feature_score(item, ("reputation_maintenance", "loss_avoidance", "practical_planning"))
     return [
         _topic_payload(
             "honor",
@@ -9355,7 +18469,7 @@ def _honor_topic_items(career: dict[str, Any] | None) -> list[dict[str, Any]]:
         ),
         _topic_payload(
             "honor",
-            "평판이 오래 남는 힘",
+            "평판 지속력",
             reputation_score,
             _scored_body(
                 reputation_score,
@@ -9368,7 +18482,7 @@ def _honor_topic_items(career: dict[str, Any] | None) -> list[dict[str, Any]]:
         ),
         _topic_payload(
             "honor",
-            "공식 책임을 맡는 힘",
+            "공식 책임 수행력",
             formal_score,
             _scored_body(
                 formal_score,
@@ -9414,7 +18528,7 @@ def _social_topic_items(
     return [
         _topic_payload(
             "social",
-            "사람을 얻는 힘",
+            "인맥 형성력",
             people_score,
             _scored_body(
                 people_score,
@@ -9440,7 +18554,7 @@ def _social_topic_items(
         ),
         _topic_payload(
             "social",
-            "관계가 오래 남는 힘",
+            "관계 지속력",
             sustain_score,
             _scored_body(
                 sustain_score,
@@ -9499,8 +18613,8 @@ def _dynamic_honor_section(career: dict[str, Any] | None) -> dict[str, Any]:
     topic_items = _honor_topic_items(career)
     topics = _topic_lookup_by_title(topic_items)
     honor_topic = topics.get("공적 인정 기반", {}) or topics.get("사회적 인정이 붙는 자리", {}) or topics.get("사회적 인정도", {})
-    reputation_topic = topics.get("평판이 오래 남는 힘", {}) or topics.get("평판 유지력", {})
-    formal_topic = topics.get("공식 책임을 맡는 힘", {}) or topics.get("공식 책임", {})
+    reputation_topic = topics.get("평판 지속력", {}) or topics.get("평판 유지력", {}) or topics.get("평판이 오래 남는 힘", {})
+    formal_topic = topics.get("공식 책임 수행력", {}) or topics.get("공식 책임", {}) or topics.get("공식 책임을 맡는 힘", {})
     management_topic = topics.get("명예를 지켜내는 기준", {}) or topics.get("명예 관리", {})
     lead_label, lead_value = _best_section_axis(
         career,
@@ -9520,9 +18634,9 @@ def _dynamic_honor_section(career: dict[str, Any] | None) -> dict[str, Any]:
     strongest_title = str(strongest.get("title") or "")
     if strongest_title in {"공적 인정 기반", "사회적 인정도", "사회적 인정이 붙는 자리"}:
         main_sentence = "당신은 이름이 기록되는 책임 자리에서 명예가 올라가는 사주입니다."
-    elif strongest_title in {"평판 유지력", "평판이 오래 남는 힘"}:
+    elif strongest_title in {"평판 지속력", "평판 유지력", "평판이 오래 남는 힘"}:
         main_sentence = "당신의 명예운은 오래 쌓은 신뢰가 다음 제안으로 돌아오는 쪽입니다."
-    elif strongest_title in {"공식 책임", "공식 책임을 맡는 힘"}:
+    elif strongest_title in {"공식 책임 수행력", "공식 책임", "공식 책임을 맡는 힘"}:
         main_sentence = "당신은 책임자 위치에 설 때 이름과 평판이 함께 올라갑니다."
     else:
         main_sentence = "당신의 명예운은 평판을 지키면서 책임의 크기를 키워가는 쪽입니다."
@@ -9548,18 +18662,18 @@ def _dynamic_honor_section(career: dict[str, Any] | None) -> dict[str, Any]:
         ],
         detail_blocks=[
             _detail_block(
-                "인정받는 방식",
+                "공적 인정 기반",
                 str(honor_topic.get("body") or support_sentence),
                 ["공개 평가처럼 이름이 기록되는 자리에서 강합니다.", "전문성이 검증되는 자리일수록 책임도 함께 붙습니다."],
             ),
             _detail_block(
-                "직함이 붙는 자리",
+                "직책 상승 가능성",
                 str(formal_topic.get("body") or "책임자처럼 역할이 기록되는 자리에서 평판이 강해집니다."),
                 ["권한이 붙은 책임 자리에서 명예가 붙습니다.", "권한 없이 책임만 맡는 자리는 평판보다 소모가 남습니다."],
                 tone="strong" if int(formal_topic.get("score") or 0) >= 76 else "",
             ),
             _detail_block(
-                "평판이 남는 방식",
+                "평판 지속 방식",
                 str(reputation_topic.get("body") or "꾸준한 이력이 평판을 지켜줍니다."),
                 ["말로 한 약속보다 기록이 평판을 지킵니다."],
             ),
@@ -9582,7 +18696,7 @@ def _dynamic_social_section(
 ) -> dict[str, Any]:
     topic_items = _social_topic_items(love, marriage, money)
     topics = _topic_lookup_by_title(topic_items)
-    people_topic = topics.get("사람을 얻는 힘", {}) or topics.get("사람을 얻는 방식", {})
+    people_topic = topics.get("인맥 형성력", {}) or topics.get("사람을 얻는 방식", {}) or topics.get("사람을 얻는 힘", {})
     support_topic = topics.get("도움으로 이어지는 인연", {}) or topics.get("도움이 되는 사람", {})
     sustain_topic = topics.get("관계가 오래 남는 힘", {}) or topics.get("관계 지속력", {})
     boundary_topic = topics.get("부탁과 책임의 경계", {}) or topics.get("부탁과 책임", {})
@@ -9613,8 +18727,8 @@ def _dynamic_social_section(
         main_sentence = "당신은 넓은 인맥보다 오래 남는 사람을 통해 운이 열리는 사주입니다."
     elif strongest_title in {"도움이 되는 사람", "도움으로 이어지는 인연"}:
         main_sentence = "당신의 대인관계운은 말뿐인 친분보다 실제 제안으로 들어오는 인연이 강합니다."
-    elif strongest_title in {"사람을 얻는 방식", "사람을 얻는 힘"}:
-        main_sentence = "당신은 필요한 사람을 알아보고 오래 곁에 남기는 힘이 있습니다."
+    elif strongest_title in {"인맥 형성력", "사람을 얻는 방식", "사람을 얻는 힘"}:
+        main_sentence = "당신은 필요한 사람을 알아보고 오래 남는 관계로 만드는 능력이 있습니다."
     else:
         main_sentence = "당신의 대인관계는 부탁과 책임의 선을 분명히 할수록 오래 갑니다."
     support_sentence = str(strongest.get("body") or "").strip()
@@ -9655,7 +18769,7 @@ def _dynamic_social_section(
                 ["조언보다 실제 소개를 해주는 사람이 귀합니다.", "오래 본 관계에서 결정적인 소개가 들어옵니다."],
             ),
             _detail_block(
-                "관계가 오래 남는 지점",
+                "관계 지속 방식",
                 str(sustain_topic.get("body") or "검증된 관계는 오래 남습니다."),
                 ["서로의 역할과 거리가 분명할수록 관계가 오래 갑니다."],
             ),
@@ -9699,6 +18813,41 @@ def _premium_detail_domains_for_section(section: dict[str, Any]) -> tuple[str, .
     return (domain,) if domain else ()
 
 
+def _polish_premium_detail_judgment(domain: str, title: str, judgment: str) -> str:
+    text = " ".join(str(judgment or "").split())
+    exact_replacements = {
+        "기술과 결과물이 매출의 근거가 됩니다.": "기술과 결과물이 단가를 얻으면서 수입의 근거가 됩니다.",
+        "큰 수익을 노린 투자는 손실 폭이 크게 벌어집니다.": "수익률만 보고 들어간 거래는 회수 단계에서 크게 흔들릴 수 있습니다.",
+        "계약서를 남기지 않은 돈은 회수 과정에서 손실이 납니다.": "서류 없이 움직인 돈은 회수 단계에서 불리하게 남습니다.",
+        "재산이 커질수록 배우자나 가족이 권리를 주장합니다.": "재산이 커질수록 가족이나 배우자와 명의, 몫의 문제가 예민해집니다.",
+        "전문성으로 이름을 얻는 직업운입니다.": "전문성이 직업적 신뢰와 단가로 이어지는 운입니다.",
+        "여러 이해관계가 얽힌 일을 정리해 조직의 방향을 잡는 자리에서 강합니다.": "여러 이해관계가 얽힌 일을 정리하고 운영 기준을 세우는 자리에서 강합니다.",
+        "처음에는 좋은 조건처럼 보이지만 손실이 납니다.": "처음에는 유리해 보여도 회수 조건이 약하면 손실로 남습니다.",
+        "마음이 있어도 결혼 결정은 늦게 굳어집니다.": "마음이 있어도 주거와 가족 문제가 걸리면 결혼 결정이 늦어집니다.",
+        "결혼운은 감정이 생활 계획으로 넘어갈 때 강해집니다.": "결혼운은 감정이 집, 돈, 일정의 문제로 넘어갈 때 현실화됩니다.",
+        "생활 기준이 분명해지면 결혼 이야기가 빠르게 구체화됩니다.": "생활 기준이 분명해지면 결혼은 말보다 절차로 빨리 움직입니다.",
+        "전문성으로 이름을 얻는 직업운입니다": "전문성이 직업적 신뢰와 단가로 이어지는 운입니다.",
+    }
+    if text in exact_replacements:
+        return exact_replacements[text]
+    replacements = (
+        ("이름을 얻는 직업운입니다", "직업적 신뢰와 단가로 이어지는 운입니다"),
+        ("매출의 근거가 됩니다", "수입의 근거가 됩니다"),
+        ("권리를 주장합니다", "명의와 몫의 문제가 예민해집니다"),
+        ("회수 과정에서 손실이 납니다", "회수 단계에서 불리하게 남습니다"),
+        ("손실 폭이 크게 벌어집니다", "회수 단계에서 크게 흔들릴 수 있습니다"),
+        ("마음은 깊지만 표현이 늦으면", "마음이 깊어도 표현이 늦으면"),
+        ("일상과 돈까지 흔들립니다", "일상과 금전 감각까지 흔들립니다"),
+        ("결혼 생활이 오래 어렵습니다", "결혼 생활의 안정이 오래 흔들립니다"),
+        ("결정권을 놓고 강하게 부딪힙니다", "결정권 문제로 정면 충돌할 수 있습니다"),
+    )
+    for before, after in replacements:
+        text = text.replace(before, after)
+    if domain == "money" and title and text == title:
+        return "금전 운세에서 실제 손익을 결정하는 기준입니다."
+    return text
+
+
 def _normalize_premium_detail(detail: dict[str, Any]) -> dict[str, Any]:
     def clean_detail_text(value: Any) -> str:
         return (
@@ -9714,8 +18863,13 @@ def _normalize_premium_detail(detail: dict[str, Any]) -> dict[str, Any]:
             .replace("손실 지점", "주의점")
         )
 
+    domain_text = str(detail.get("domain") or "")
     title = clean_detail_text(detail.get("title"))
-    judgment = clean_detail_text(detail.get("judgment"))
+    judgment = _polish_premium_detail_judgment(
+        domain_text,
+        title,
+        clean_detail_text(detail.get("judgment")),
+    )
     scenes = [
         clean_detail_text(scene)
         for scene in detail.get("event_scenes", [])
@@ -9738,7 +18892,7 @@ def _normalize_premium_detail(detail: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "entry_key": str(detail.get("entry_key") or ""),
-        "domain": str(detail.get("domain") or ""),
+        "domain": domain_text,
         "title": title,
         "score": int(detail.get("score") or 0),
         "level": level,
@@ -9857,6 +19011,160 @@ def _premium_detail_conflicts_with_section(detail: dict[str, Any], section: dict
     return False
 
 
+def _premium_detail_display_metric(title: str, domain: str, level: str, raw_score: Any) -> dict[str, Any]:
+    if not isinstance(raw_score, int):
+        return {}
+    display_score = max(0, min(100, raw_score))
+    metric_label = title
+    if level in {"watch", "risk", "caution"}:
+        display_score = max(28, min(62, round(100 - display_score * 0.7)))
+        text = f"{domain} {title}"
+        if domain == "marriage" and any(marker in text for marker in ("결혼", "생활", "주거", "부부", "배우자", "가족")):
+            metric_label = "생활 조율력"
+        elif any(marker in text for marker in ("계약", "문서", "약속", "정산", "회수")):
+            metric_label = "계약·문서 안정성"
+        elif any(marker in text for marker in ("투자", "변동", "손실", "보증", "채무")):
+            metric_label = "투자·거래 안정성"
+        elif any(marker in text for marker in ("공동", "가족", "배우자", "명의", "지분")):
+            metric_label = "공동 자금 운영력"
+        elif any(marker in text for marker in ("권한", "결정권", "책임", "조직")):
+            metric_label = "권한 확보력"
+        elif any(marker in text for marker in ("표현", "연락", "서운", "감정", "거리")):
+            metric_label = "관계 조율력"
+    level_label = _contract_level_from_score(display_score)
+    return {
+        "metric_key": _compact_match_key(title),
+        "metric_label": metric_label,
+        "score": display_score,
+        "level": level_label,
+        "value": level_label,
+    }
+
+
+def _section_metric_match_pool(section: dict[str, Any]) -> list[dict[str, Any]]:
+    pool: list[dict[str, Any]] = []
+    for source in ("representative_metrics", "feature_axes", "topic_items"):
+        for item in section.get(source) or []:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("title") or "").strip()
+            if not label:
+                continue
+            score = item.get("score")
+            next_item = {
+                "label": label,
+                "key": str(item.get("key") or item.get("metric_key") or "").strip(),
+                "source": source,
+                "score": score if isinstance(score, int) else _score_from_axis_value(item.get("value")),
+                "text": " ".join(
+                    str(value)
+                    for value in (
+                        label,
+                        item.get("key"),
+                        item.get("metric_key"),
+                        item.get("source_title"),
+                        item.get("body"),
+                        item.get("definition"),
+                    )
+                    if value
+                ),
+            }
+            components = item.get("judgment_components")
+            if isinstance(components, dict):
+                extra_terms: list[str] = []
+                for component_key in (
+                    "engine_metric_label",
+                    "engine_metric_key",
+                    "cycle_tags",
+                    "principle_tags",
+                    "gyeokguk_action_titles",
+                    "layer_coverage",
+                ):
+                    value = components.get(component_key)
+                    if isinstance(value, list):
+                        extra_terms.extend(str(entry) for entry in value if entry)
+                    elif value:
+                        extra_terms.append(str(value))
+                if extra_terms:
+                    next_item["text"] = f"{next_item['text']} {' '.join(extra_terms)}"
+            pool.append(next_item)
+    return pool
+
+
+def _premium_detail_section_match_score(detail: dict[str, Any], section: dict[str, Any]) -> float:
+    title = str(detail.get("title") or "").strip()
+    domain = str(detail.get("domain") or _domain_key(section) or "").strip()
+    level = str(detail.get("level") or "").strip()
+    raw_score = detail.get("score")
+    display_metric = _premium_detail_display_metric(title, domain, level, raw_score)
+    display_label = str(display_metric.get("metric_label") or title).strip()
+    detail_text = " ".join(
+        str(value)
+        for value in (
+            title,
+            display_label,
+            detail.get("judgment"),
+            " ".join(str(item) for item in detail.get("event_scenes") or [] if item),
+            " ".join(str(item) for item in detail.get("premium_notes") or [] if item),
+            " ".join(str(item) for item in detail.get("caution_targets") or [] if item),
+        )
+        if value
+    )
+    detail_key = _compact_match_key(detail_text)
+    display_key = _compact_match_key(display_label)
+    title_key = _compact_match_key(title)
+    match_pool = _section_metric_match_pool(section)
+    score = min(36.0, max(0, float(raw_score or 0)) * 0.36)
+
+    strong_label = _compact_match_key(section.get("strong_metric_label"))
+    watch_label = _compact_match_key(section.get("watch_metric_label"))
+    is_watch = level in {"watch", "risk", "caution"}
+
+    for metric in match_pool:
+        metric_label = str(metric.get("label") or "")
+        metric_key = _compact_match_key(metric_label)
+        metric_text_key = _compact_match_key(metric.get("text"))
+        metric_score = metric.get("score")
+        if not isinstance(metric_score, int):
+            metric_score = 58
+        direct = bool(
+            (display_key and metric_key and (display_key == metric_key or display_key in metric_key or metric_key in display_key))
+            or (title_key and metric_key and (title_key == metric_key or title_key in metric_key or metric_key in title_key))
+        )
+        contextual = bool(
+            detail_key
+            and metric_text_key
+            and (
+                detail_key in metric_text_key
+                or metric_text_key in detail_key
+                or any(
+                    len(token) >= 3 and token in metric_text_key
+                    for token in re.split(r"[\s·ㆍ,\./]+", detail_text)
+                )
+            )
+        )
+        if not direct and not contextual:
+            continue
+        if is_watch:
+            score += max(0, 76 - metric_score) * (0.95 if direct else 0.42)
+            if metric_key and metric_key == watch_label:
+                score += 28
+        else:
+            score += max(0, metric_score - 48) * (0.82 if direct else 0.34)
+            if metric_key and metric_key == strong_label:
+                score += 24
+        if metric.get("source") == "representative_metrics":
+            score += 10
+        elif metric.get("source") == "feature_axes":
+            score += 6
+
+    if is_watch and watch_label and (watch_label in display_key or display_key in watch_label or watch_label in title_key):
+        score += 18
+    if not is_watch and strong_label and (strong_label in display_key or display_key in strong_label or strong_label in title_key):
+        score += 16
+    return score
+
+
 def _attach_premium_detail_sections(
     section: dict[str, Any],
     premium_detail_sections: list[dict[str, Any]],
@@ -9879,7 +19187,14 @@ def _attach_premium_detail_sections(
     detail_limit = 3
     if domains == {"money"} or domains == {"career"}:
         detail_limit = 4
-    details = sorted(details, key=lambda item: (-int(item.get("score") or 0), str(item.get("title") or "")))[:detail_limit]
+    details = sorted(
+        details,
+        key=lambda item: (
+            -_premium_detail_section_match_score(item, section),
+            -int(item.get("score") or 0),
+            str(item.get("title") or ""),
+        ),
+    )[:detail_limit]
     if not details:
         return section
     enriched = dict(section)
@@ -9895,7 +19210,19 @@ def _attach_premium_detail_sections(
         ][:3]
         if not title or not judgment:
             return None
-        return _detail_block(title, judgment, scenes, tone=str(detail.get("level") or ""))
+        score = detail.get("score")
+        return _detail_block(
+            title,
+            judgment,
+            scenes,
+            tone=str(detail.get("level") or ""),
+            metric=_premium_detail_display_metric(
+                title,
+                str(detail.get("domain") or ""),
+                str(detail.get("level") or ""),
+                score,
+            ),
+        )
 
     detail_blocks = [
         block
@@ -9919,7 +19246,10 @@ def _attach_premium_detail_sections(
             seen_titles.add(key)
         deduped_blocks.append(block)
     if deduped_blocks:
-        enriched["detail_blocks"] = deduped_blocks
+        enriched["detail_blocks"] = _enrich_detail_block_actions(
+            next(iter(domains)) if len(domains) == 1 else _domain_key(enriched),
+            deduped_blocks,
+        )
     existing = list(enriched.get("checkpoints") or [])
     for detail in details[:2]:
         title = str(detail.get("title") or "")
@@ -9975,8 +19305,215 @@ def _premium_visual_profile(section: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+PREMIUM_SCREEN_ITEM_CONTRACT_SCHEMA_VERSION = "premium_screen_item_contract_v1"
+
+
+def _premium_screen_contract_text(value: Any) -> str:
+    return _replace_premium_display_terms(str(value or "").strip())
+
+
+def _premium_screen_score_payload(score: Any) -> dict[str, Any]:
+    if not isinstance(score, int):
+        return {}
+    return {
+        "score": score,
+        "level": _contract_level_from_score(score),
+        "value": _score_value(score),
+        "tone": _topic_tone_from_score(score),
+    }
+
+
+def _premium_screen_item_contract(section: dict[str, Any]) -> dict[str, Any]:
+    """Expose expert judgments as a screen-consumable category contract.
+
+    The analysis engine can keep growing in depth, but the product screen needs
+    a stable contract: what to show first, which judgment each slot represents,
+    and which engine basis supports it. This function is intentionally
+    renderer-neutral so mobile, web, and later app surfaces can consume the same
+    structure.
+    """
+
+    domain = _domain_key(section)
+    category_contract = (
+        section.get("category_contract")
+        if isinstance(section.get("category_contract"), dict)
+        else {}
+    )
+    visual_profile = (
+        section.get("visual_profile")
+        if isinstance(section.get("visual_profile"), dict)
+        else _premium_visual_profile(section)
+    )
+    section_verdict = (
+        section.get("section_verdict")
+        if isinstance(section.get("section_verdict"), dict)
+        else {}
+    )
+    if not category_contract and not visual_profile and not section_verdict:
+        return {}
+
+    summary_slots: list[dict[str, Any]] = []
+    verdict_score = section.get("total_score")
+    if not isinstance(verdict_score, int):
+        verdict_score = section_verdict.get("score")
+    verdict_slot: dict[str, Any] = {
+        "slot": "domain_verdict",
+        "label": "전체 결론",
+        "title": _premium_screen_contract_text(section.get("title") or category_contract.get("section_label")),
+        "body": _premium_screen_contract_text(
+            section_verdict.get("interpretation")
+            or section.get("summary")
+            or section.get("lead")
+        ),
+        "target": "domain-verdict",
+        "source": "section_verdict",
+    }
+    verdict_slot.update(_premium_screen_score_payload(verdict_score))
+    if verdict_slot.get("title") or verdict_slot.get("body") or verdict_slot.get("score") is not None:
+        summary_slots.append(verdict_slot)
+
+    for index, item in enumerate(list((visual_profile or {}).get("items") or []), start=1):
+        if not isinstance(item, dict):
+            continue
+        label = _premium_screen_contract_text(item.get("label"))
+        if not label:
+            continue
+        next_item: dict[str, Any] = {
+            "slot": f"visual_{index}",
+            "label": label,
+            "title": label,
+            "body": _premium_screen_contract_text(item.get("caption")),
+            "target": "domain-core-metrics" if index <= 2 else "domain-detail-metrics",
+            "source": "visual_profile",
+            "source_title": _premium_screen_contract_text(item.get("source_title")),
+        }
+        value = _premium_screen_contract_text(item.get("value"))
+        if value:
+            next_item["value"] = value
+        next_item.update(_premium_screen_score_payload(item.get("score")))
+        summary_slots.append(next_item)
+
+    target_by_slot = {
+        "opening": "domain-verdict",
+        "primary_profile": "domain-core-metrics",
+        "behavior_scene": "domain-interpretation",
+        "strength_metric": "domain-core-metrics",
+        "management_metric": "domain-detail-metrics",
+        "timing_or_transition": "domain-interpretation",
+    }
+    screen_items: list[dict[str, Any]] = []
+    for item in list(category_contract.get("content_plan") or []):
+        if not isinstance(item, dict):
+            continue
+        slot = _premium_screen_contract_text(item.get("slot"))
+        label = _premium_screen_contract_text(item.get("label"))
+        if not slot or not label:
+            continue
+        next_item = {
+            "slot": slot,
+            "label": label,
+            "purpose": _premium_screen_contract_text(item.get("purpose")),
+            "result": _premium_screen_contract_text(item.get("result") or item.get("purpose")),
+            "source": _premium_screen_contract_text(item.get("source")),
+            "visual_role": _premium_screen_contract_text(item.get("visual_role")),
+            "linked_topic": _premium_screen_contract_text(item.get("linked_topic")),
+            "target": target_by_slot.get(slot, "domain-interpretation"),
+        }
+        value = _premium_screen_contract_text(item.get("value"))
+        if value:
+            next_item["value"] = value
+        evidence = _premium_screen_contract_text(item.get("evidence"))
+        if evidence:
+            next_item["evidence"] = evidence
+        next_item.update(_premium_screen_score_payload(item.get("score")))
+        screen_items.append(next_item)
+
+    if not screen_items:
+        for index, unit in enumerate(list(category_contract.get("reading_units") or [])[:6], start=1):
+            if not isinstance(unit, dict):
+                continue
+            label = _premium_screen_contract_text(unit.get("display_label") or unit.get("label"))
+            if not label:
+                continue
+            next_item = {
+                "slot": f"reading_{index}",
+                "label": label,
+                "purpose": _premium_screen_contract_text(unit.get("focus")),
+                "result": _premium_screen_contract_text(unit.get("result") or unit.get("focus")),
+                "source": "reading_units",
+                "linked_topic": _premium_screen_contract_text(unit.get("topic")),
+                "target": "domain-core-metrics" if index <= 3 else "domain-detail-metrics",
+            }
+            value = _premium_screen_contract_text(unit.get("value"))
+            if value:
+                next_item["value"] = value
+            next_item.update(_premium_screen_score_payload(unit.get("score")))
+            screen_items.append(next_item)
+
+    expert_axes: list[dict[str, Any]] = []
+    for raw_axis in list(category_contract.get("judgment_axes") or [])[:10]:
+        if not isinstance(raw_axis, dict):
+            continue
+        title = _premium_screen_contract_text(raw_axis.get("title") or raw_axis.get("label"))
+        if not title:
+            continue
+        expert_axes.append(
+            {
+                "key": _premium_screen_contract_text(raw_axis.get("key") or _compact_match_key(title)),
+                "title": title,
+                "customer_question": _premium_screen_contract_text(raw_axis.get("customer_question")),
+                "verdict_axis": _premium_screen_contract_text(raw_axis.get("verdict_axis")),
+                "engine_basis": _premium_screen_contract_text(raw_axis.get("engine_basis")),
+                "premium_output": _premium_screen_contract_text(raw_axis.get("premium_output")),
+            }
+        )
+    if not expert_axes:
+        for raw_unit in list(category_contract.get("reading_units") or [])[:10]:
+            if not isinstance(raw_unit, dict):
+                continue
+            title = _premium_screen_contract_text(raw_unit.get("display_label") or raw_unit.get("label"))
+            focus = _premium_screen_contract_text(raw_unit.get("focus"))
+            if not title:
+                continue
+            expert_axes.append(
+                {
+                    "key": _premium_screen_contract_text(raw_unit.get("topic") or _compact_match_key(title)),
+                    "title": title,
+                    "customer_question": focus,
+                    "verdict_axis": focus,
+                    "engine_basis": "격국, 월령, 오행, 십신, 위치 작용을 기준으로 산출한 화면 항목입니다.",
+                    "premium_output": _premium_screen_contract_text(raw_unit.get("result") or focus),
+                }
+            )
+
+    return {
+        "schema_version": PREMIUM_SCREEN_ITEM_CONTRACT_SCHEMA_VERSION,
+        "domain": domain,
+        "section_label": _premium_screen_contract_text(category_contract.get("section_label") or section.get("domain_label")),
+        "headline": _premium_screen_contract_text((visual_profile or {}).get("headline") or section.get("lead")),
+        "reading_order": [
+            _premium_screen_contract_text(item)
+            for item in list(category_contract.get("reading_order") or [])
+            if _premium_screen_contract_text(item)
+        ],
+        "summary_slots": summary_slots[:4],
+        "screen_items": screen_items[:8],
+        "expert_axes": expert_axes,
+        "evidence_layers": [
+            _premium_screen_contract_text(item)
+            for item in list(category_contract.get("evidence_layers") or [])
+            if _premium_screen_contract_text(item)
+        ],
+    }
+
+
+@lru_cache(maxsize=65536)
+def _compact_match_key_cached(text: str) -> str:
+    return re.sub(r"[\s·ㆍ\-\(\)]+", "", text)
+
+
 def _compact_match_key(value: Any) -> str:
-    return re.sub(r"[\s·ㆍ\-\(\)]+", "", str(value or "").strip())
+    return _compact_match_key_cached(str(value or "").strip())
 
 
 def _premium_topic_lookup(section: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -10240,6 +19777,7 @@ PREMIUM_PROFILE_SECONDARY_UNIT_LABELS: dict[str, set[str]] = {
         "가족 변수",
         "배우자 가족 경계",
         "자녀·양육 책임",
+        "결혼 시기성",
     },
 }
 
@@ -10572,18 +20110,18 @@ def _premium_sentence_axis_label(label: Any) -> str:
         "사회적 인정이 붙는 자리": "공적 인정 기반",
         "평가가 직함으로 이어지는 자리": "직책 상승력",
         "권한이 붙을수록 커지는 평판": "권한 기반 평판",
-        "평판 유지": "평판이 오래 남는 힘",
-        "평판 유지력": "평판이 오래 남는 힘",
-        "평판 지속력": "평판이 오래 남는 힘",
-        "공식 역할": "공식 책임을 맡는 힘",
-        "공식 역할 수용력": "공식 책임을 맡는 힘",
-        "공식 책임 수행력": "공식 책임을 맡는 힘",
+        "평판 유지": "평판 지속력",
+        "평판 유지력": "평판 지속력",
+        "평판 지속력": "평판 지속력",
+        "공식 역할": "공식 책임 수행력",
+        "공식 역할 수용력": "공식 책임 수행력",
+        "공식 책임 수행력": "공식 책임 수행력",
         "명예 관리": "명예를 지켜내는 기준",
         "평판 관리": "명예를 지켜내는 기준",
         "명예 관리력": "명예를 지켜내는 기준",
-        "사람을 얻는 방식": "사람을 얻는 힘",
-        "인맥 형성": "사람을 얻는 힘",
-        "인맥 형성력": "사람을 얻는 힘",
+        "사람을 얻는 방식": "인맥 형성력",
+        "인맥 형성": "인맥 형성력",
+        "인맥 형성력": "인맥 형성력",
         "도움이 되는 사람": "도움으로 이어지는 인연",
         "조력자 인연": "도움으로 이어지는 인연",
         "부탁과 책임": "부탁과 책임의 경계",
@@ -10953,15 +20491,15 @@ def _timing_topic_card_body(topic: str, good_keyword: str, caution_keyword: str)
     topic_text = str(topic or "").strip() or "주요 영역"
     good_clause = _timing_event_clause(good_keyword, kind="good")
     caution_clause = _timing_event_clause(caution_keyword, kind="watch")
-    sentences = [f"연도별 사건은 {topic_text}에서 가장 선명합니다."]
+    sentences = [f"연도별 흐름은 {topic_text}에서 가장 선명합니다."]
     if good_clause and caution_clause:
         sentences.append(
-            f"상승 연도에는 {_timing_event_connective_clause(good_clause)}, 주의 연도에는 {caution_clause}."
+            f"좋은 시기에는 {_timing_event_connective_clause(good_clause)}, 조심할 시기에는 {caution_clause}."
         )
     elif good_clause:
-        sentences.append(f"상승 연도에는 {good_clause}.")
+        sentences.append(f"좋은 시기에는 {good_clause}.")
     elif caution_clause:
-        sentences.append(f"주의 연도에는 {caution_clause}.")
+        sentences.append(f"조심할 시기에는 {caution_clause}.")
     return " ".join(sentences)
 
 
@@ -10975,8 +20513,8 @@ def _premium_section_profile(section: dict[str, Any]) -> dict[str, Any]:
         timing_map = section.get("timing_map") if isinstance(section.get("timing_map"), dict) else {}
         highlight_good = next((item for item in timing_map.get("goodHighlights") or [] if isinstance(item, dict)), {})
         highlight_caution = next((item for item in timing_map.get("cautionHighlights") or [] if isinstance(item, dict)), {})
-        good = next((unit for unit in units if unit.get("label") == "좋은 연도"), units[0])
-        caution = next((unit for unit in units if unit.get("label") == "주의 연도"), units[-1])
+        good = next((unit for unit in units if unit.get("label") in {"좋은 시기", "좋은 연도", "상승 연도"}), units[0])
+        caution = next((unit for unit in units if unit.get("label") in {"조심할 시기", "주의 연도"}), units[-1])
         topic = next((unit for unit in units if unit.get("label") == "사건 주제"), {})
         past = next((unit for unit in units if unit.get("label") == "과거 대조"), {})
 
@@ -10985,10 +20523,7 @@ def _premium_section_profile(section: dict[str, Any]) -> dict[str, Any]:
 
         def event_value(event: dict[str, Any]) -> str:
             year = f"{event.get('year')}년" if event.get("year") else ""
-            age = str(event.get("ageLabel") or "").strip()
-            title = str(event.get("title") or "").strip()
-            prefix = f"{year}({age})" if year and age else year
-            return " ".join(part for part in (prefix, title) if part)
+            return year
 
         def event_keywords(event: dict[str, Any]) -> str:
             items = [str(item).strip() for item in event.get("keywordItems") or [] if str(item).strip()]
@@ -11009,34 +20544,34 @@ def _premium_section_profile(section: dict[str, Any]) -> dict[str, Any]:
         topic_text = _timing_topic_card_body(topic_value, good_text, caution_text)
         if good_focus == caution_focus:
             summary = (
-                f"20세~79세 전체에서 {good_focus}의 상승 연도와 주의 연도가 모두 뚜렷합니다. "
-                f"대표 상승은 {good_value}, 대표 주의는 {caution_value}입니다."
+                f"{good_focus}에서 좋은 시기와 조심할 시기가 모두 뚜렷합니다. "
+                f"좋은 시기는 {good_value}, 조심할 시기는 {caution_value}입니다."
             )
         else:
             summary = (
-                f"20세~79세 전체에서 상승 연도는 {good_focus}, 주의 연도는 {caution_focus}에서 뚜렷합니다. "
-                f"대표 상승은 {good_value}, 대표 주의는 {caution_value}입니다."
+                f"좋은 시기는 {good_focus}에서 뚜렷합니다. "
+                f"조심할 시기는 {caution_focus}에서 강하게 잡힙니다."
             )
         return {
             "label": "핵심 유형",
-            "type": "상승 연도와 주의 연도가 뚜렷한 사주",
+            "type": "좋은 시기와 조심할 시기가 뚜렷한 사주",
             "summary": summary,
             "insights": [
                 {
                     "label": "연도 결론",
-                    "value": "상승 연도와 주의 연도가 뚜렷한 사주",
+                    "value": "좋은 시기와 조심할 시기가 뚜렷한 사주",
                     "body": summary,
                     "tone": "strong",
                 },
                 {
-                    "label": "상승 연도",
-                    "value": good_value or str(good.get("display_label") or "상승 연도"),
+                    "label": "좋은 시기",
+                    "value": good_value or str(good.get("display_label") or "좋은 시기"),
                     "body": good_body,
                     "tone": "strong",
                 },
                 {
-                    "label": "주의 연도",
-                    "value": caution_value or str(caution.get("display_label") or "주의 연도"),
+                    "label": "조심할 시기",
+                    "value": caution_value or str(caution.get("display_label") or "조심할 시기"),
                     "body": caution_body,
                     "tone": "watch",
                 },
@@ -11052,8 +20587,8 @@ def _premium_section_profile(section: dict[str, Any]) -> dict[str, Any]:
                 },
             ],
             "items": [
-                {"label": "상승 연도", "value": good_value, "text": good_text, "body": good_body},
-                {"label": "주의 연도", "value": caution_value, "text": caution_text, "body": caution_body, "tone": "watch"},
+                {"label": "좋은 시기", "value": good_value, "text": good_text, "body": good_body},
+                {"label": "조심할 시기", "value": caution_value, "text": caution_text, "body": caution_body, "tone": "watch"},
                 {"label": "사건 주제", "value": topic_value, "text": topic_text},
             ],
         }
@@ -11189,27 +20724,68 @@ def _attach_premium_category_contract(section: dict[str, Any]) -> dict[str, Any]
             ],
         )
     display_labels = contract.get("display_labels") if isinstance(contract.get("display_labels"), dict) else {}
+    score_by_topic_key: dict[str, int] = {}
+    for source_item in (
+        list(section.get("representative_metrics") or [])
+        + list(section.get("feature_axes") or [])
+        + list(section.get("judgment_axes") or [])
+    ):
+        if not isinstance(source_item, dict):
+            continue
+        source_title = _premium_display_title(
+            str(source_item.get("label") or source_item.get("title") or "").strip()
+        )
+        source_score = source_item.get("score")
+        source_key = _compact_match_key(source_title)
+        if source_key and isinstance(source_score, int):
+            score_by_topic_key[source_key] = source_score
+
+    def finalize_topic_item(raw_item: dict[str, Any], title: str) -> dict[str, Any]:
+        next_item = dict(raw_item)
+        next_item["title"] = title
+        topic_key = _compact_match_key(title)
+        score = next_item.get("score")
+        if not isinstance(score, int):
+            score = score_by_topic_key.get(topic_key)
+            if isinstance(score, int):
+                next_item["score"] = score
+        if isinstance(score, int):
+            if not str(next_item.get("value") or "").strip():
+                next_item["value"] = _score_value(score)
+            next_item["level"] = _contract_level_from_score(score)
+            next_item["score_label"] = next_item["level"]
+            next_item["tone"] = _topic_tone_from_score(score)
+        for text_key in ("body", "definition"):
+            if text_key in next_item:
+                next_item[text_key] = _replace_premium_display_terms(next_item.get(text_key))
+        if "evidence" in next_item:
+            next_item["evidence"] = _replace_premium_display_terms(
+                _web_topic_evidence_text(next_item.get("evidence"))
+            )
+        return next_item
+
     synced_topic_items: list[dict[str, Any]] = []
+    topic_keys: set[str] = set()
     for item in section.get("topic_items") or []:
         if not isinstance(item, dict):
             continue
-        next_item = dict(item)
-        source_title = str(next_item.get("title") or "").strip()
-        display_title = str(display_labels.get(source_title, source_title)).strip()
-        if display_title and display_title != source_title:
+        source_title = str(item.get("title") or item.get("label") or "").strip()
+        display_title = _premium_display_title(str(display_labels.get(source_title, source_title)).strip())
+        if not display_title:
+            continue
+        topic_key = _compact_match_key(display_title)
+        if topic_key and topic_key in topic_keys:
+            continue
+        next_item = finalize_topic_item(item, display_title)
+        if display_title != source_title:
             next_item["source_title"] = source_title
-            next_item["title"] = display_title
+        topic_keys.add(topic_key)
         synced_topic_items.append(next_item)
-    topic_keys = {
-        _compact_match_key(item.get("title") or item.get("label") or "")
-        for item in synced_topic_items
-        if str(item.get("title") or item.get("label") or "").strip()
-    }
     if domain_key != "timing":
         for unit in reading_units:
             if not isinstance(unit, dict):
                 continue
-            title = str(unit.get("display_label") or unit.get("label") or "").strip()
+            title = _premium_display_title(str(unit.get("display_label") or unit.get("label") or "").strip())
             if not title:
                 continue
             key = _compact_match_key(title)
@@ -11220,15 +20796,18 @@ def _attach_premium_category_contract(section: dict[str, Any]) -> dict[str, Any]
                 continue
             topic_keys.add(key)
             synced_topic_items.append(
-                {
-                    "title": title,
-                    "body": result,
-                    "definition": str(unit.get("focus") or result),
-                    "value": str(unit.get("value") or "").strip(),
-                    "score": unit.get("score"),
-                    "tone": str(unit.get("tone") or "neutral"),
-                    "evidence": str(unit.get("evidence") or ""),
-                }
+                finalize_topic_item(
+                    {
+                        "title": title,
+                        "body": result,
+                        "definition": str(unit.get("focus") or result),
+                        "value": str(unit.get("value") or "").strip(),
+                        "score": unit.get("score"),
+                        "tone": str(unit.get("tone") or "neutral"),
+                        "evidence": str(unit.get("evidence") or ""),
+                    },
+                    title,
+                )
             )
     exposed = {
         "schema_version": contract.get("schema_version") or "",
@@ -11256,6 +20835,14 @@ def _attach_premium_category_contract(section: dict[str, Any]) -> dict[str, Any]
             for item in content_plan
             if isinstance(item, dict) and str(item.get("slot") or "").strip()
         ],
+        "visual_label": contract.get("visual_label") or "",
+        "visual_headline": contract.get("visual_headline") or "",
+        "visual_slots": [
+            str(item or "").strip()
+            for item in list(contract.get("visual_slots") or [])
+            if str(item or "").strip()
+        ],
+        "display_labels": dict(display_labels),
     }
     enriched = dict(section)
     if synced_topic_items:
@@ -11433,8 +21020,8 @@ def _premium_profile_lead_label(value: str) -> str:
         "중년 성취도": "중년에 굳어지는 성취",
         "말년 안정도": "말년에 남는 안정",
         "전환기 대응력": "운이 바뀌는 전환기",
-        "공식 역할 수용력": "공식 책임을 맡는 힘",
-        "공식 책임 수행력": "공식 책임을 맡는 힘",
+        "공식 역할 수용력": "공식 책임 수행력",
+        "공식 책임 수행력": "공식 책임 수행력",
         "명예 관리력": "명예를 지켜내는 기준",
         "사회적 인정도": "공적 인정 기반",
         "사회적 인정이 붙는 자리": "공적 인정 기반",
@@ -11443,7 +21030,7 @@ def _premium_profile_lead_label(value: str) -> str:
         "관계 조절력": "관계 조절",
         "조력자 인연": "도움으로 이어지는 인연",
         "책임 경계력": "부탁과 책임의 경계",
-        "인맥 형성력": "사람을 얻는 힘",
+        "인맥 형성력": "인맥 형성력",
     }
     return replacements.get(cleaned, cleaned)
 
@@ -11466,7 +21053,7 @@ def _premium_domain_lead_opening(domain: str, strong_value: str) -> str:
             "계약·명의 안정성": "당신의 재물운은 계약과 명의가 분명할수록 손실이 줄어듭니다.",
             "계약·문서 안정성": "당신의 재물운은 계약과 명의가 분명할수록 손실이 줄어듭니다.",
         }
-        return openings.get(axis, "당신의 재물운은 수입이 들어오는 자리와 재산으로 굳어지는 자리가 따로 움직입니다.")
+        return openings.get(axis, "당신의 재물운은 벌어들이는 능력과 재산으로 남기는 능력이 따로 작용합니다.")
     if domain == "career":
         openings = {
             "전문성": "당신의 직업운은 전문성이 경력의 단가를 만드는 사주입니다.",
@@ -11514,27 +21101,26 @@ def _premium_domain_lead_opening(domain: str, strong_value: str) -> str:
             "운이 바뀌는 전환기": "대운이 바뀌는 시기에 삶의 무대가 크게 달라집니다.",
             "대운 전환": "대운이 바뀌는 시기에 삶의 무대가 크게 달라집니다.",
         }
-        return openings.get(axis, "생애 구간마다 강하게 드러나는 영역이 다릅니다.")
+        return openings.get(axis, "생애 구간마다 강하게 드러나는 분야가 다릅니다.")
     if domain == "honor":
         openings = {
-            "공식 책임을 맡는 힘": "당신은 이름이 기록되는 책임 자리에서 명예가 올라가는 사주입니다.",
-            "공식 역할 수용력": "당신은 이름이 기록되는 책임 자리에서 명예가 올라가는 사주입니다.",
-            "평판이 오래 남는 힘": "당신의 명예운은 오래 쌓은 평판이 다음 제안으로 이어지는 쪽입니다.",
+            "공식 책임 수행력": "당신은 공식 책임이 주어질 때 명예가 올라가는 사주입니다.",
+            "공식 역할 수용력": "당신은 공식 책임이 주어질 때 명예가 올라가는 사주입니다.",
+            "평판 지속력": "당신의 명예운은 오래 쌓은 평판이 다음 제안으로 이어지는 쪽입니다.",
             "평판 유지력": "당신의 명예운은 오래 쌓은 평판이 다음 제안으로 이어지는 쪽입니다.",
             "공적 인정 기반": "당신은 공식 평가를 통해 직책과 역할을 얻는 사주입니다.",
             "사회적 인정이 붙는 자리": "당신은 공식 평가를 통해 직책과 역할을 얻는 사주입니다.",
             "사회적 인정도": "당신은 공식 평가를 통해 직함과 역할을 얻는 사주입니다.",
             "명예를 지켜내는 기준": "당신의 명예운은 얻은 이름을 오래 지키는 힘에서 갈립니다.",
         }
-        return openings.get(axis, "당신은 책임 있는 자리에서 평가와 이름을 남기는 사주입니다.")
+        return openings.get(axis, "당신은 책임 있는 역할에서 평가와 이름을 남기는 사주입니다.")
     if domain == "social":
         openings = {
-            "관계가 오래 남는 힘": "당신은 넓은 인맥보다 오래 남는 사람을 통해 운이 열리는 사주입니다.",
+            "관계 지속력": "당신은 넓은 인맥보다 오래 남는 사람을 통해 운이 열리는 사주입니다.",
             "관계 지속력": "당신은 넓은 인맥보다 오래 남는 사람을 통해 운이 열리는 사주입니다.",
             "도움으로 이어지는 인연": "당신의 대인관계운은 말뿐인 친분보다 실제 제안으로 들어오는 인연이 강합니다.",
             "조력자 인연": "당신의 대인관계운은 말뿐인 친분보다 실제 제안으로 들어오는 인연이 강합니다.",
-            "사람을 얻는 힘": "당신은 필요한 사람을 알아보고 오래 곁에 남기는 힘이 있습니다.",
-            "인맥 형성력": "당신은 필요한 사람을 알아보고 오래 곁에 남기는 힘이 있습니다.",
+            "인맥 형성력": "당신은 필요한 사람을 알아보고 오래 남는 관계로 만드는 능력이 있습니다.",
             "부탁과 책임의 경계": "당신의 대인관계는 부탁과 책임의 선을 분명히 할수록 오래 갑니다.",
             "책임 경계력": "당신의 대인관계는 부탁과 책임의 선을 분명히 할수록 오래 갑니다.",
         }
@@ -11559,7 +21145,7 @@ def _premium_profile_compact_lead(
     if support_axis and support_axis != strong_axis:
         support_sentences = {
             "money": f"{support_axis}까지 받쳐 재물의 폭이 넓습니다.",
-            "career": f"{support_axis}까지 받쳐 경력의 설득력이 커집니다.",
+            "career": f"{support_axis}까지 받쳐 직업적 신뢰가 더 분명해집니다.",
             "love": f"{support_axis}까지 갖춰 관계의 지속성이 강합니다.",
             "marriage": f"{support_axis}까지 갖춰 결혼 생활이 오래 갑니다.",
             "life": _premium_life_support_sentence(support_axis),
@@ -11708,11 +21294,11 @@ def _premium_section_profile_lead(domain: str, profile: dict[str, Any], *, headl
             (
                 item
                 for item in items
-                if str(item.get("label") or "") in {"상승 연도", "좋은 연도"}
+                if str(item.get("label") or "") in {"상승 연도", "좋은 연도", "좋은 시기"}
             ),
             {},
         )
-        caution = next((item for item in items if str(item.get("label") or "") == "주의 연도"), {})
+        caution = next((item for item in items if str(item.get("label") or "") in {"주의 연도", "조심할 시기"}), {})
         good_value = str(good.get("value") or "").strip()
         caution_value = str(caution.get("value") or "").strip()
         good_text = str(good.get("text") or "").strip()
@@ -11722,12 +21308,12 @@ def _premium_section_profile_lead(domain: str, profile: dict[str, Any], *, headl
             good_anchor = good_value.split("/")[0].strip()
             caution_anchor = caution_value.split("/")[0].strip()
             anchor_sentence = (
-                f"상승 연도: {good_anchor}. 주의 연도: {caution_anchor}."
+                f"좋은 시기: {good_anchor}. 조심할 시기: {caution_anchor}."
                 if good_anchor and caution_anchor
                 else ""
             )
-            return summary or anchor_sentence or "20세부터 79세까지 주요 연도를 정리합니다."
-        return "20세부터 79세까지 주요 상승 연도와 주의 연도를 정리합니다."
+            return summary or anchor_sentence or "좋은 시기와 조심할 시기를 연도로 정리합니다."
+        return "좋은 시기와 조심할 시기를 연도로 정리합니다."
     if domain == "life":
         return _premium_profile_compact_lead(domain, strong_value, support_value, watch_value)
     if domain == "honor":
@@ -11808,7 +21394,7 @@ PREMIUM_STORY_CONTEXT_SENTENCES: dict[str, str] = {
     "운영을 장악하는 직업 성취": "운영 기준을 잡을 때 핵심 역할로 인정받습니다.",
     "재주 수익화": "기술, 콘텐츠, 서비스처럼 값을 매길 수 있는 산출물이 있을 때 수입이 붙습니다.",
     "독립 사업의 승부수": "고객층, 단가, 고정비 구조가 맞아야 회사 밖에서 자기 몫이 분명해집니다.",
-    "권한 없이 책임지는 자리": "결정권이 빠진 책임은 성과보다 경력의 흠으로 남습니다.",
+    "권한 없이 책임지는 자리": "결정권이 빠진 책임은 성과보다 경력상 불리한 기록으로 남습니다.",
     "기준 없는 조직에서의 소모": "규정이 없는 곳에서는 실력보다 소모가 먼저 누적됩니다.",
     "결혼 현실화": "감정이 깊어지면 일정, 주거, 가족 협의가 곧바로 결혼 의제가 됩니다.",
     "관계가 공식화되는 연애": "말로만 이어지는 관계보다 공개된 약속이 있을 때 결혼 이야기가 현실로 옮겨집니다.",
@@ -12045,26 +21631,26 @@ def _premium_story_watch_title(title: str) -> str:
         "재산으로 굳어지는 힘": "자산화 주의",
         "자산화 능력": "자산화 주의",
         "공식 책임을 맡는 힘": "권한 없는 공식 책임",
-        "공적 인정 기반": "공적 인정이 늦게 따라오는 자리",
-        "사회적 인정이 붙는 자리": "공적 인정이 늦게 따라오는 자리",
-        "직책 상승력": "직책 상승이 늦어지는 자리",
-        "권한 기반 평판": "권한이 평판 부담으로 바뀌는 자리",
-        "직업적 성취의 그릇": "성과가 남지 않는 자리",
-        "성취 축적력": "성과가 남지 않는 자리",
-        "독립 사업의 승부수": "공로가 남지 않는 성과",
-        "운영을 장악하는 직업 성취": "운영 책임이 과해지는 자리",
-        "전문성으로 남는 힘": "전문성이 흩어지는 자리",
-        "전문 자산화": "전문성이 흩어지는 자리",
-        "도움으로 이어지는 인연": "늦게 들어오는 조력",
-        "관계가 오래 남는 힘": "관계가 오래 남기 어려운 자리",
-        "관계 지속력": "관계가 오래 남기 어려운 자리",
-        "인연이 들어오는 길": "늦게 들어오는 인연",
-        "인연 형성력": "늦게 들어오는 인연",
-        "갈등 관리력": "감정 기복이 큰 상대와의 손상 관리",
-        "결혼으로 이어지는 현실성": "결혼 결정이 늦어지는 자리",
-        "결혼 연결력": "결혼 결정이 늦어지는 자리",
-            "중년에 커지는 성취": "중년에 굳어지는 책임",
-            "중년에 굳어지는 성취": "중년에 굳어지는 책임",
+            "공적 인정 기반": "공적 인정 지연",
+            "사회적 인정이 붙는 자리": "공적 인정 지연",
+            "직책 상승력": "직책 상승 지연",
+            "권한 기반 평판": "권한 평판 부담",
+            "직업적 성취의 그릇": "성과 귀속 약화",
+            "성취 축적력": "성과 귀속 약화",
+            "독립 사업의 승부수": "공로가 남지 않는 성과",
+            "운영을 장악하는 직업 성취": "운영 책임 과부하",
+            "전문성으로 남는 힘": "전문성 분산",
+            "전문 자산화": "전문성 분산",
+            "도움으로 이어지는 인연": "늦게 들어오는 조력",
+            "관계가 오래 남는 힘": "관계 지속 약화",
+            "관계 지속력": "관계 지속 약화",
+            "인연이 들어오는 길": "늦게 들어오는 인연",
+            "인연 형성력": "늦게 들어오는 인연",
+            "갈등 관리력": "감정 기복이 큰 상대와의 손상 관리",
+            "결혼으로 이어지는 현실성": "결혼 결정 지연",
+            "결혼 연결력": "결혼 결정 지연",
+            "중년에 커지는 성취": "중년 책임 누적",
+            "중년에 굳어지는 성취": "중년 책임 누적",
         "운이 바뀌는 전환기": "전환기의 선택 손실",
     }
     return replacements.get(title, title)
@@ -12326,8 +21912,8 @@ def _premium_timing_story_cards(profile: dict[str, Any]) -> list[dict[str, Any]]
             return f"{text}{_subject_particle(text)} 손실이나 부담으로 남기 쉬운 해입니다."
         return f"핵심: {text}."
 
-    good = by_label("상승 연도") or by_label("좋은 연도")
-    caution = by_label("주의 연도")
+    good = by_label("좋은 시기") or by_label("상승 연도") or by_label("좋은 연도")
+    caution = by_label("조심할 시기") or by_label("주의 연도")
     topic = by_label("사건 주제")
     good_text = keyword_text(good, "자산 확보")
     caution_text = keyword_text(caution, "책임 전가")
@@ -12338,15 +21924,15 @@ def _premium_timing_story_cards(profile: dict[str, Any]) -> list[dict[str, Any]]
         topic_body = body_text(topic, "재물운", kind="topic")
     candidates = [
         _premium_story_card(
-            "상승 연도",
-            first_value(good) or "상승 연도",
+            "좋은 시기",
+            first_value(good) or "좋은 시기",
             body_text(good, good_text, kind="good"),
             tone="strong",
             source="timing",
         ),
         _premium_story_card(
-            "주의 연도",
-            first_value(caution) or "주의 연도",
+            "조심할 시기",
+            first_value(caution) or "조심할 시기",
             body_text(caution, caution_text, kind="watch"),
             tone="watch",
             source="timing",
@@ -12588,7 +22174,7 @@ PREMIUM_REQUIRED_JUDGMENT_SENTENCES: dict[str, dict[str, tuple[str, str, str]]] 
             "직함보다 실무 책임이 먼저 커질 수 있습니다. 권한 없는 책임은 경력의 손실로 남기 쉽습니다.",
         ),
         "사회적 도약성": (
-            "직업 성취가 지위와 영향력으로 커집니다. 개인 실적이 조직 안팎의 자리로 이어질 수 있습니다.",
+            "직업 성취가 직책과 평판으로 이어집니다. 개인 실적이 조직 안팎의 공식 평가로 남을 수 있습니다.",
             "사회적 도약은 역할 확대에서 시작됩니다. 맡는 범위가 넓어질 때 이름이 따라옵니다.",
             "성과가 있어도 사회적 자리로 옮겨가는 속도는 늦을 수 있습니다. 평가 기준과 공식 권한을 먼저 확보해야 합니다.",
         ),
@@ -13396,7 +22982,7 @@ PREMIUM_REQUIRED_JUDGMENT_MEANINGS: dict[str, dict[str, str]] = {
         "결혼 지속력": "한 번 정한 결혼의 약속을 오래 유지하려는 성향이 드러납니다.",
     },
     "timing": {
-        "대운 구간": "10년 단위로 바뀌는 생활 조건과 사회적 자리를 구분하는 구간입니다.",
+        "시기운 구간": "10년 단위로 바뀌는 생활 조건과 사회적 자리를 구분하는 구간입니다.",
         "세운 사건": "대운의 배경 위에서 특정 연도에 실제 선택과 사건이 올라옵니다.",
         "상승 연도": "성과, 인연, 재물 중 한 가지가 선명한 결과로 남는 해입니다.",
         "수입 강세 연도": "현금 수입과 보상 기준이 한 해의 사건으로 강하게 드러납니다.",
@@ -13466,7 +23052,7 @@ PREMIUM_REQUIRED_JUDGMENT_SCENES: dict[str, dict[str, tuple[str, str]]] = {
         "평가·명예 전환력": ("공식 평가와 추천이 따라올 때 직업운이 강해집니다.", "평가 기준이 흐린 자리는 공로가 다른 사람에게 넘어갑니다."),
         "승진·직함 가능성": ("성과가 직함과 책임자로 이어질 가능성이 있습니다.", "직함 없이 책임만 커지면 경력 부담이 먼저 남습니다."),
         "사회적 도약성": ("개인 성과가 더 큰 자리와 영향력으로 넓어질 수 있습니다.", "사회적 자리는 성과보다 기록과 신뢰가 먼저 요구됩니다."),
-        "권한 확보력": ("결정권이 붙을수록 직업적 손실이 줄고 성취가 남습니다.", "권한 없는 책임은 경력의 흠으로 남기 쉽습니다."),
+        "권한 확보력": ("결정권이 붙을수록 직업적 손실이 줄고 성취가 남습니다.", "권한 없는 책임은 경력상 불리한 기록으로 남기 쉽습니다."),
         "책임·권한 균형": ("책임과 권한이 함께 붙는 자리에서 오래 갑니다.", "문제가 생겼을 때 이름만 남는 자리는 피해야 합니다."),
         "보상 협상력": ("성과가 연봉, 성과급, 계약금으로 계산될 때 유리합니다.", "보상 기준을 늦게 맞추면 해낸 일보다 몫이 작아집니다."),
         "전문 자산화": ("한 분야의 전문성이 쌓이면 대체하기 어려운 역할이 됩니다.", "전문 분야가 흐리면 경험이 많아도 값이 늦게 오릅니다."),
@@ -13501,7 +23087,7 @@ PREMIUM_REQUIRED_JUDGMENT_SCENES: dict[str, dict[str, tuple[str, str]]] = {
         "결혼 현실화력": ("마음이 집, 일정, 가족 협의로 옮겨갈 때 결혼이 성사됩니다.", "현실 준비 없이 밀어붙이면 결정이 부담으로 바뀝니다."),
         "생활 안정": ("주거와 생활비 기준이 잡히면 결혼 생활이 오래 갑니다.", "생활 기준이 어긋나면 애정이 있어도 피로가 커집니다."),
         "주거·생활 설계력": ("집과 생활 구조를 현실적으로 짤수록 안정됩니다.", "역할 분담이 늦으면 같은 갈등이 반복됩니다."),
-        "가정 운영력": ("가정 안의 비용과 책임을 정리하는 힘이 있습니다.", "가정의 책임이 한쪽으로 몰리면 빠르게 지칩니다."),
+        "가정 운영력": ("가정 안의 비용과 책임을 정리하는 역량이 있습니다.", "가정의 책임이 한쪽으로 몰리면 빠르게 지칩니다."),
         "부부 재정": ("공동 생활비와 개인 자산의 선을 나눌수록 안정됩니다.", "부부 돈이 흐리게 섞이면 한쪽 책임이 과해집니다."),
         "생활비 기준성": ("고정비와 저축선이 잡혀야 결혼 생활이 안정됩니다.", "생활비 기준이 흐리면 서운함이 돈 문제로 굳어집니다."),
         "부부 갈등 조정력": ("갈등은 역할을 다시 나눌 때 풀립니다.", "말로만 넘긴 갈등은 생활비와 가족 문제로 반복됩니다."),
@@ -13514,7 +23100,7 @@ PREMIUM_REQUIRED_JUDGMENT_SCENES: dict[str, dict[str, tuple[str, str]]] = {
         "결혼 지속력": ("한 번 정한 약속을 오래 지키는 쪽입니다.", "약속을 미루는 시간이 길어지면 상대의 불안이 커집니다."),
     },
     "timing": {
-        "대운 구간": ("10년 단위로 생활 조건이 바뀝니다.", "대운은 한 해의 사건보다 더 오래 지속되는 생활 조건입니다."),
+        "시기운 구간": ("10년 단위로 생활 조건이 바뀝니다.", "시기운은 한 해의 사건보다 더 오래 지속되는 생활 조건까지 함께 다룹니다."),
         "세운 사건": ("특정 연도에 실제 사건의 성격이 올라옵니다.", "세운은 대운의 배경 위에서 선택, 계약, 관계, 이동으로 나타납니다."),
         "상승 연도": ("일, 돈, 관계 중 한 영역에서 결론이 선명한 해입니다.", "좋은 해라도 무엇이 남는 해인지가 분명해야 합니다."),
         "주의 연도": ("손실과 부담이 커지기 쉬운 해입니다.", "새 결정보다 기존 약속과 책임 범위를 먼저 정리해야 합니다."),
@@ -13524,13 +23110,13 @@ PREMIUM_REQUIRED_JUDGMENT_SCENES: dict[str, dict[str, tuple[str, str]]] = {
 
 PREMIUM_REQUIRED_JUDGMENT_MEANINGS["money"].update(
     {
-        "재물 형성력": "수입이 현금으로 지나가지 않고 명의, 지분, 장기 보유 자산으로 남는 힘입니다.",
+        "재물 형성력": "수입이 현금으로 지나가지 않고 명의, 지분, 장기 보유 자산으로 남는 구조입니다.",
         "재물 규모 확장력": "돈의 단위가 커질 때 감당 가능한 거래 규모와 손실 한도가 함께 드러납니다.",
         "수입 창출력": "노동, 거래, 성과가 실제 입금으로 확인되는 수입 경로입니다.",
         "재주 수익화": "기술, 말, 콘텐츠, 서비스가 단순 재능에 머물지 않고 가격을 갖는 지점입니다.",
-        "성과 보상력": "해낸 일이 타인의 이름으로 흩어지지 않고 자기 몫의 보수로 회수되는 힘입니다.",
+        "성과 보상력": "해낸 일이 타인의 이름으로 흩어지지 않고 자기 몫의 보수로 회수되는 능력입니다.",
         "자산화 능력": "벌어들인 돈을 소비가 아니라 소유권과 보유 자산으로 바꾸는 능력입니다.",
-        "공동자금 운영력": "가까운 사람과 돈이 얽힐 때 자기 몫, 명의, 책임 범위를 지키는 힘입니다.",
+        "공동자금 운영력": "가까운 사람과 돈이 얽힐 때 자기 몫, 명의, 책임 범위를 지켜내는 기준입니다.",
         "계약·명의 안정성": "받을 돈과 권리를 계약서, 명의, 지분으로 고정시키는 능력입니다.",
         "투자·거래 판단력": "겉수익보다 회수 가능성, 상대의 책임, 권리 구조를 먼저 읽는 감각입니다.",
     }
@@ -13540,10 +23126,10 @@ PREMIUM_REQUIRED_JUDGMENT_MEANINGS["career"].update(
     {
         "직업 적성": "실력이 가장 빨리 인정받고 경력의 값이 올라가는 업무 성격입니다.",
         "직업 분야": "직업명보다 실제 업무 방식, 책임 구조, 결과물의 성격을 가르는 기준입니다.",
-        "성취 축적력": "한 번의 성과가 칭찬으로 끝나지 않고 이력, 실적, 다음 자리의 근거로 남는 힘입니다.",
-        "평가·명예 전환력": "실적이 평판, 추천, 직함, 공식 평가로 바뀌어 사회적 이름을 만드는 힘입니다.",
+        "성취 축적력": "한 번의 성과가 칭찬으로 끝나지 않고 이력, 실적, 다음 역할의 근거로 남는 능력입니다.",
+        "평가·명예 전환력": "실적이 평판, 추천, 직함, 공식 평가로 바뀌어 사회적 이름을 만드는 능력입니다.",
         "책임·권한 균형": "맡은 책임에 걸맞은 결정권이 붙을 때 경력 손상을 막고 성취를 남기는 기준입니다.",
-        "권한 확보력": "일을 맡는 수준에 맞춰 결정권, 보고 체계, 보상 기준을 확보하는 힘입니다.",
+        "권한 확보력": "일을 맡는 수준에 맞춰 결정권, 보고 체계, 보상 기준을 확보하는 능력입니다.",
     }
 )
 
@@ -13552,10 +23138,10 @@ PREMIUM_REQUIRED_JUDGMENT_MEANINGS["love"].update(
         "끌림의 기준": "처음 마음이 움직이는 지점과 오래 끌리는 상대의 조건을 구분하는 기준입니다.",
         "상대 선택력": "오래 갈 사람과 손상될 관계를 초기에 가려내는 눈입니다.",
         "상대 신뢰 감별력": "상대의 말보다 반복된 태도, 약속, 책임감을 읽는 감각입니다.",
-        "인연 형성력": "스쳐 가는 호감이 실제 만남과 관계로 이어지는 힘입니다.",
+        "인연 형성력": "스쳐 가는 호감이 실제 만남과 관계로 이어지는 가능성입니다.",
         "관계 진전력": "호감이 만남, 약속, 공개된 관계로 넘어가는 속도와 확정성입니다.",
-        "애정 표현성": "마음이 상대에게 오해 없이 전달되는 정도입니다.",
-        "관계 지속력": "깊어진 관계를 쉽게 끊지 않고 오래 유지하려는 힘입니다.",
+        "애정 표현성": "마음이 상대에게 오해 없이 전달되는 방식입니다.",
+        "관계 지속력": "깊어진 관계를 쉽게 끊지 않고 오래 유지하려는 성향입니다.",
     }
 )
 
@@ -13563,10 +23149,10 @@ PREMIUM_REQUIRED_JUDGMENT_MEANINGS["marriage"].update(
     {
         "혼인 성향": "결혼을 감정의 결론이 아니라 생활의 약속과 책임으로 받아들이는 방식입니다.",
         "배우자상": "오래 맞는 배우자의 성격, 생활 태도, 책임 감각을 보여주는 기준입니다.",
-        "결혼 현실화력": "결혼 의사가 집, 일정, 가족 협의, 공식 절차로 넘어가는 힘입니다.",
+        "결혼 현실화력": "결혼 의사가 집, 일정, 가족 협의, 공식 절차로 넘어가는 현실성입니다.",
         "생활 안정": "주거, 생활비, 역할 기준이 결혼 생활을 오래 버티게 하는 기반입니다.",
-        "부부 재정": "공동 생활비와 개인 자산의 선이 부부 사이의 안정에 미치는 힘입니다.",
-        "가족 책임 경계력": "양가와 원가족 문제에서 부부의 책임선을 지켜내는 힘입니다.",
+        "부부 재정": "공동 생활비와 개인 자산의 선이 부부 사이의 안정에 미치는 기준입니다.",
+        "가족 책임 경계력": "양가와 원가족 문제에서 부부의 책임선을 지켜내는 기준입니다.",
     }
 )
 
@@ -13601,7 +23187,7 @@ PREMIUM_REQUIRED_PRODUCT_BODY_OVERRIDES: dict[str, dict[str, tuple[str, str, str
             "돈의 단위를 키우는 과정에서 부담이 함께 커집니다. 큰 거래를 먼저 잡으면 회수와 책임이 무거워질 수 있습니다. 규모보다 감당 가능한 한도가 먼저입니다.",
         ),
         "수입 창출력": (
-            "수입이 만들어지는 힘은 분명합니다. 일의 결과가 매출, 보수, 계약금처럼 계산 가능한 돈으로 돌아옵니다. 받을 금액이 정해진 자리에서 강합니다.",
+            "수입이 실제 입금으로 확인되는 구조가 분명합니다. 일의 결과가 매출, 보수, 계약금처럼 계산 가능한 돈으로 돌아옵니다. 받을 금액이 정해진 조건에서 강합니다.",
             "수입 기회는 꾸준히 들어옵니다. 다만 수입이 크게 남으려면 역할과 보수 조건이 먼저 맞아야 합니다. 일한 만큼 받을 구조를 잡아야 합니다.",
             "수입 기회는 있어도 받을 몫이 줄어들 수 있습니다. 일은 많아지는데 보수 기준이 흐리면 남는 돈이 작습니다. 먼저 금액과 지급 조건을 확정해야 합니다.",
         ),
@@ -13611,7 +23197,7 @@ PREMIUM_REQUIRED_PRODUCT_BODY_OVERRIDES: dict[str, dict[str, tuple[str, str, str
             "재능에 비해 돈으로 바뀌는 속도가 느립니다. 잘하는 것만으로는 부족하고 가격, 고객, 판매 방식이 필요합니다. 결과물을 시장에 내놓는 과정이 핵심입니다.",
         ),
         "성과 보상력": (
-            "성과가 자기 몫의 보상으로 돌아오는 힘이 좋습니다. 연봉, 성과급, 수수료, 계약금처럼 계산 가능한 보수에서 강합니다. 이름이 남는 성과일수록 돈도 커집니다.",
+            "성과가 자기 몫의 보상으로 돌아오기 쉽습니다. 연봉, 성과급, 수수료, 계약금처럼 계산 가능한 보수에서 강합니다. 이름이 남는 성과일수록 돈도 커집니다.",
             "성과는 있으나 보상 구조를 확인해야 합니다. 해낸 일이 누구의 공으로 남는지에 따라 받을 몫이 달라집니다. 역할 범위를 문서와 평가에 남겨야 합니다.",
             "성과에 비해 보상이 작아질 수 있습니다. 일은 본인이 해도 공과 몫을 나누는 사람이 많아질 수 있습니다. 시작 전에 보상 기준을 잡아야 합니다.",
         ),
@@ -13621,7 +23207,7 @@ PREMIUM_REQUIRED_PRODUCT_BODY_OVERRIDES: dict[str, dict[str, tuple[str, str, str
             "돈이 한 계좌 안에서 섞이면 빠르게 흐트러집니다. 생활비와 투자금이 섞이면 손실 판단이 늦어집니다. 자금의 용도를 먼저 나눠야 합니다.",
         ),
         "자산화 능력": (
-            "번 돈을 자산으로 바꾸는 힘이 좋습니다. 현금보다 명의, 지분, 장기 보유 자산으로 남길 때 재물운이 커집니다. 후반 재산은 이 힘에서 만들어집니다.",
+            "번 돈을 자산으로 바꾸는 능력이 좋습니다. 현금보다 명의, 지분, 장기 보유 자산으로 남길 때 재물운이 커집니다. 후반 재산은 이 구조에서 만들어집니다.",
             "수입을 자산으로 굳히는 과정이 필요합니다. 돈이 들어오면 먼저 소유권이 남는 형태로 옮겨야 합니다. 소비보다 권리 확보가 우선입니다.",
             "수입이 자산으로 굳기 전에 빠져나가기 쉽습니다. 현금이 생겨도 명의와 소유권을 남기지 않으면 재산으로 보이지 않습니다. 저축보다 자산화 전략이 필요합니다.",
         ),
@@ -13688,7 +23274,7 @@ PREMIUM_REQUIRED_PRODUCT_BODY_OVERRIDES: dict[str, dict[str, tuple[str, str, str
             "흥미만으로 고른 일은 오래가기 어렵습니다. 결과물과 권한이 남지 않으면 경력이 가볍게 흩어집니다. 직업 선택에서는 업무 구조를 먼저 봐야 합니다.",
         ),
         "성취 축적력": (
-            "성과가 이력과 실적으로 남는 힘이 좋습니다. 한 번의 칭찬보다 기록, 포트폴리오, 공식 평가로 쌓일 때 경력의 값이 올라갑니다. 시간이 갈수록 경력이 단단해집니다.",
+            "성과가 이력과 실적으로 남는 정도가 좋습니다. 한 번의 칭찬보다 기록, 포트폴리오, 공식 평가로 쌓일 때 경력의 값이 올라갑니다. 시간이 갈수록 경력이 단단해집니다.",
             "성취는 천천히 쌓이는 편입니다. 빠른 인정보다 결과물을 남기는 일이 강합니다. 기록되는 성과를 의식해야 경력이 커집니다.",
             "성과가 자기 이름으로 남지 않기 쉽습니다. 일을 해도 기록과 평가가 빠지면 경력의 값이 늦게 오릅니다. 결과물의 소유권을 남겨야 합니다.",
         ),
@@ -13807,7 +23393,7 @@ PREMIUM_REQUIRED_PRODUCT_BODY_OVERRIDES: dict[str, dict[str, tuple[str, str, str
         "오해 조정력": (
             "오해가 생겨도 다시 정리할 수 있습니다. 감정보다 사실과 약속을 확인하면 관계가 회복됩니다. 차분한 대화가 관계를 살립니다.",
             "오해 조정은 가능하지만 늦으면 커집니다. 서운함을 오래 두면 말이 딱딱해집니다. 작은 오해일 때 풀어야 합니다.",
-            "오해를 방치하면 관계가 급격히 식습니다. 말하지 않은 서운함이 쌓이면 회복이 늦어집니다. 침묵보다 정리가 필요합니다.",
+            "오해를 오래 넘기면 관계가 급격히 식습니다. 말하지 않은 서운함이 쌓이면 회복이 늦어집니다. 침묵보다 정리가 필요합니다.",
         ),
         "갈등 관리력": (
             "갈등이 생겨도 기준을 세우면 풀립니다. 감정 싸움보다 약속, 시간, 돈, 역할을 다시 나누는 방식이 맞습니다. 현실적인 정리가 관계를 지킵니다.",
@@ -14192,7 +23778,7 @@ def _premium_timing_required_judgment_cards(section: dict[str, Any], required_it
     past_value = event_label((timing_map.get("pastCheck") or [None])[0] if isinstance(timing_map.get("pastCheck"), list) else None)
     topic_value = str(topic.get("value") or timing_profile.get("goodFocus") or "주요 분야").strip()
     value_by_title = {
-        "대운 구간": str(timing_decision.get("range") or timing_profile.get("decisiveAgeBands") or topic_value or "20세~79세").strip(),
+        "시기운 구간": str(timing_decision.get("range") or timing_profile.get("decisiveAgeBands") or topic_value or "주요 연도").strip(),
         "세운 사건": f"{good_value} / {caution_value}".strip(" /"),
         "수입 강세 연도": decision_event_label("income_peak", "money_peak") or good_value,
         "재물 강세 연도": decision_event_label("money_peak", "asset_year") or good_value,
@@ -14226,7 +23812,7 @@ def _premium_timing_required_judgment_cards(section: dict[str, Any], required_it
         "결혼 주의 연도": decision_event_label("family_caution", "child_rearing_year") or caution_value,
         "인생 전환 연도": transition_value,
         "말년 안정 연도": later_value,
-        "대운 무대": str(timing_profile.get("decisiveAgeBands") or topic_value or "20세~79세").strip(),
+        "대운 무대": str(timing_profile.get("decisiveAgeBands") or topic_value or "주요 시기").strip(),
         "세운 사건": f"{good_value} / {caution_value}".strip(" /"),
         "상승 연도": good_value,
         "주의 연도": caution_value,
@@ -14236,7 +23822,7 @@ def _premium_timing_required_judgment_cards(section: dict[str, Any], required_it
         "과거 대조": past_value,
     }
     bodies = {
-        "대운 구간": f"{value_by_title.get('대운 구간') or '20세~79세'} 구간에서 큰 변곡점이 갈립니다. 10년 단위로 직업, 재물, 관계의 강약이 달라집니다.",
+        "시기운 구간": f"{value_by_title.get('시기운 구간') or '주요 시기'}에서 큰 변곡점이 갈립니다. 10년 단위로 직업, 재물, 관계의 강약이 달라집니다.",
         "대운 무대": f"10년 단위 운에서는 {topic_value}이 가장 선명합니다. 이 구간에서 생활 조건과 사회적 역할이 바뀝니다.",
         "세운 사건": f"{good_value or '상승 연도'} / {caution_value or '주의 연도'}. 상승 연도에는 성과가 잡히고, 주의 연도에는 책임과 손실이 드러납니다.",
         "상승 연도": f"{good_value or '상승 연도'}. 일, 돈, 관계 중 한 축에서 실제 성과가 잡히는 해입니다.",
@@ -14394,14 +23980,34 @@ def _attach_timing_decision_events_to_section(
     timing_map = dict(enriched.get("timing_map") or {})
     good_additions = [event for event in decision_events if str(event.get("kind") or "") == "good"]
     caution_additions = [event for event in decision_events if str(event.get("kind") or "") == "caution"]
-    timing_map["goodHighlights"] = _merge_timing_event_payloads(
+    good_highlights = _rank_timing_event_payloads(_merge_timing_event_payloads(
         [item for item in timing_map.get("goodHighlights") or [] if isinstance(item, dict)],
         good_additions,
-    )
-    timing_map["cautionHighlights"] = _merge_timing_event_payloads(
+    ))
+    caution_highlights = _rank_timing_event_payloads(_merge_timing_event_payloads(
         [item for item in timing_map.get("cautionHighlights") or [] if isinstance(item, dict)],
         caution_additions,
+    ))
+    timing_map["goodHighlights"] = good_highlights
+    timing_map["cautionHighlights"] = caution_highlights
+    timing_map["publicSummaryCards"] = _timing_public_summary_cards_from_payloads(
+        good_highlights,
+        caution_highlights,
+        list(enriched.get("timing_decades") or []),
     )
+    timing_map["goodKeywords"] = _timing_payload_keyword_summary(good_highlights, str(timing_map.get("goodKeywords") or "계약 · 성과"))
+    timing_map["cautionKeywords"] = _timing_payload_keyword_summary(caution_highlights, str(timing_map.get("cautionKeywords") or "책임 · 손실"))
+    timing_map["goodDomains"] = _timing_payload_top_domain(good_highlights, str(timing_map.get("goodDomains") or "상승 분야"))
+    timing_map["cautionDomains"] = _timing_payload_top_domain(caution_highlights, str(timing_map.get("cautionDomains") or "주의 분야"))
+    past_check, future_check = _timing_payload_period_lists(
+        good_highlights,
+        caution_highlights,
+        current_year=current_year,
+    )
+    if past_check:
+        timing_map["pastCheck"] = past_check
+    if future_check:
+        timing_map["futureCheck"] = future_check
     enriched["timing_map"] = timing_map
     return enriched
 
@@ -14415,6 +24021,7 @@ def _supplemental_premium_sections(
     domain_decision_facets: dict[str, Any] | None = None,
     timing_decision_facets: dict[str, Any] | None = None,
     output_goal_coverage: dict[str, Any] | None = None,
+    gyeokguk_contextual_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     money = _section_by_domain(normalized_sections, "money")
     career = _section_by_domain(normalized_sections, "career")
@@ -14441,6 +24048,30 @@ def _supplemental_premium_sections(
     personality_pace = _checkpoint_value(personality_points, "행동 속도", "판단 기준이 서면 바로 행동으로 옮깁니다.")
     personality_focus = _checkpoint_value(personality_points, "관심 몰입", "한 분야가 정해지면 오래 파고듭니다.")
     personality_profile_payload = _personality_profile_payload(chart_summary, personality_points)
+    personality_feature_axes = _personality_feature_axes_from_profile(personality_profile_payload)
+
+    def personality_detail_metric(*labels: str) -> dict[str, Any]:
+        wanted = {_compact_match_key(label) for label in labels if label}
+        for axis in personality_feature_axes:
+            if not isinstance(axis, dict):
+                continue
+            axis_label = str(axis.get("label") or "")
+            if _compact_match_key(axis_label) not in wanted:
+                continue
+            score = axis.get("score")
+            level = axis.get("level") or (_contract_level_from_score(score) if isinstance(score, int) else "")
+            return {
+                "metric_key": str(axis.get("key") or _compact_match_key(axis_label)),
+                "metric_label": axis_label,
+                "score": score if isinstance(score, int) else None,
+                "level": str(level or ""),
+                "value": str(level or ""),
+            }
+        return {}
+
+    pressure_metric = personality_detail_metric("압박 대응력", "압박 대응")
+    pressure_score = pressure_metric.get("score")
+    pressure_tone = "risk" if isinstance(pressure_score, int) and pressure_score < 55 else ""
     personality_section = _premium_section(
             "premium-personality",
             domain="personality",
@@ -14450,15 +24081,15 @@ def _supplemental_premium_sections(
             narrative=personality_narrative,
             checkpoints=personality_points,
             detail_blocks=[
-                _detail_block("판단 기준", personality_decision, [personality_lead]),
-                _detail_block("대인 거리감", personality_social),
-                _detail_block("감정 반응", personality_emotion),
-                _detail_block("압박 대응", personality_pressure, tone="risk"),
-                _detail_block("행동 속도", personality_pace),
-                _detail_block("관심 몰입", personality_focus),
+                _detail_block("자기 신뢰", personality_decision, [personality_lead], metric=personality_detail_metric("판단 기준")),
+                _detail_block("관계 거리 조절력", personality_social, metric=personality_detail_metric("대인 거리감", "대인 조율감")),
+                _detail_block("감정 조절", personality_emotion, metric=personality_detail_metric("감정 반응", "감정 반응성")),
+                _detail_block("문제 해결력", personality_pressure, tone=pressure_tone, metric=pressure_metric),
+                _detail_block("실행 속도", personality_pace, metric=personality_detail_metric("실행 속도", "행동 속도")),
+                _detail_block("몰입력", personality_focus, metric=personality_detail_metric("관심 몰입도", "관심 몰입")),
              ],
              topic_items=_topic_items_from_sections("personality", *normalized_sections),
-             feature_axes=_personality_feature_axes_from_profile(personality_profile_payload),
+             feature_axes=personality_feature_axes,
      )
     personality_section["personality_profile"] = personality_profile_payload
     if source_personality_profile:
@@ -14470,7 +24101,7 @@ def _supplemental_premium_sections(
             "premium-money",
             domain="money",
             domain_label="재물운",
-            heading="재물 세부 운세",
+            heading="재물운",
             lead="재물 형성력이 강합니다.",
             narrative=_summary_for_card({"domain": "money"}),
             checkpoints=_premium_checkpoints({"domain": "money"}),
@@ -14480,7 +24111,7 @@ def _supplemental_premium_sections(
             "premium-career",
             domain="career",
             domain_label="직업운",
-            heading="직업 세부 운세",
+            heading="직업운",
             lead="직업 성취력이 강합니다.",
             narrative=_summary_for_card({"domain": "career"}),
             checkpoints=_premium_checkpoints({"domain": "career"}),
@@ -14490,7 +24121,7 @@ def _supplemental_premium_sections(
             "premium-love",
             domain="love",
             domain_label="연애운",
-            heading="연애 세부 운세",
+            heading="연애운",
             lead="연애는 상대를 고르는 기준과 관계를 오래 유지하는 힘이 핵심입니다.",
             narrative=_summary_for_card({"domain": "love"}),
             checkpoints=_premium_checkpoints({"domain": "love"}),
@@ -14500,19 +24131,12 @@ def _supplemental_premium_sections(
             "premium-marriage",
             domain="marriage",
             domain_label="결혼운",
-            heading="결혼 세부 운세",
+            heading="결혼운",
             lead="결혼은 배우자상, 생활 기준, 가족 책임, 부부 재정에서 결론이 드러납니다.",
             narrative=_summary_for_card({"domain": "marriage"}),
             checkpoints=_premium_checkpoints({"domain": "marriage"}),
         ),
         _premium_timing_section(chart_summary, normalized_sections, timing_action, timing_caution),
-        _dynamic_life_stage_section(
-            normalized_sections,
-            chart_summary,
-            top_pair=top_pair,
-            life_current=life_current,
-            timing_caution=timing_caution,
-        ),
         _dynamic_honor_section(career),
         _dynamic_social_section(love, marriage, money),
     ]
@@ -14533,6 +24157,11 @@ def _supplemental_premium_sections(
             )
         if isinstance(output_goal_coverage, dict):
             next_section["output_goal_coverage"] = dict(output_goal_coverage)
+        if isinstance(gyeokguk_contextual_context, dict):
+            next_section = _attach_contextual_variations_to_sections(
+                [next_section],
+                gyeokguk_contextual_context,
+            )[0]
         return next_section
 
     def prepare_visible_section(section: dict[str, Any]) -> dict[str, Any]:
@@ -14554,10 +24183,8 @@ def _supplemental_premium_sections(
             )
         )
         for internal_key in (
-            "domain_decision_facets",
             "timing_decision_facets",
             "output_goal_coverage",
-            "feature_axes",
         ):
             visible.pop(internal_key, None)
         return visible
@@ -14644,6 +24271,41 @@ def _premium_summary_strength_display_order(
     return ordered
 
 
+def _premium_summary_source_archetype(sections: list[dict[str, Any]]) -> dict[str, str]:
+    personality_section = _section_by_domain(sections, "personality")
+    source_profile = _source_personality_dict(personality_section.get("source_personality_profile"))
+    combined = _source_personality_trait(source_profile, "month_day_pillar_profile")
+    title = _source_month_day_archetype_title(combined)
+    if not title:
+        return {}
+    inner = _source_personality_phrase(_source_personality_list(combined, "inner_traits", 1))
+    outer = _source_personality_phrase(_source_personality_list(combined, "outer_traits", 1))
+    strengths = _source_personality_phrase(_source_personality_list(combined, "strength_traits", 3))
+    shadows = _source_personality_phrase(_source_personality_list(combined, "shadow_traits", 2))
+    if inner == title:
+        inner = ""
+    if outer == title:
+        outer = ""
+    headline_parts: list[str] = [f"{title}입니다."]
+    if strengths:
+        headline_parts.append(f"{_with_particle(strengths, '이', '가')} 두드러지는 유형입니다.")
+    if inner and outer:
+        summary = f"타고난 기질은 {inner}에 가깝고, 실제 행동에서는 {_with_subject_particle(outer)} 두드러집니다."
+    elif inner:
+        summary = f"타고난 성향은 {inner}에 가깝습니다."
+    elif strengths:
+        summary = f"타고난 기질에는 {_with_particle(strengths, '이', '가')} 두드러집니다."
+    else:
+        summary = "타고난 기질에는 자기 기준이 분명하게 드러납니다."
+    if shadows:
+        summary = f"{summary} 다만 {_with_subject_particle(shadows)} 두드러지면 선택이 무거워질 수 있습니다."
+    return {
+        "profile_type": title,
+        "headline": " ".join(headline_parts),
+        "summary": summary,
+    }
+
+
 def _premium_profile_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
     candidates = _premium_summary_candidates(sections)
     strength_candidates = [
@@ -14663,11 +24325,12 @@ def _premium_profile_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
         secondary,
         management,
     )
+    source_archetype = _premium_summary_source_archetype(sections)
     timing = _premium_summary_timing(sections)
-    personality = _premium_summary_personality(sections)
-    profile_type = _premium_profile_type(primary, secondary)
-    headline = _premium_summary_headline(primary, secondary, management)
-    summary = _premium_summary_body(primary, secondary, management)
+    personality = source_archetype.get("summary") or _premium_summary_personality(sections)
+    profile_type = source_archetype.get("profile_type") or _premium_profile_type(primary, secondary)
+    headline = source_archetype.get("headline") or _premium_summary_headline(primary, secondary, management)
+    summary = source_archetype.get("summary") or _premium_summary_body(primary, secondary, management)
     primary_copy = _premium_profile_panel_copy(
         str((primary or {}).get("domain") or ""),
         "primary",
@@ -14692,7 +24355,7 @@ def _premium_profile_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
     cards = [
         {
             "title": "성격 유형",
-            "meta": "판단 기준과 감정 반응",
+            "meta": "월지·일주 성정" if source_archetype else "판단 기준과 감정 반응",
             "body": personality or "판단 기준이 분명합니다.",
             "detail": _premium_summary_personality_detail(sections),
         },
@@ -14710,7 +24373,7 @@ def _premium_profile_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
         },
         {
             "title": "인생 연도",
-            "meta": "20세~79세 주요 연도",
+            "meta": "좋은 시기와 조심할 시기",
             "body": _premium_timing_card_body(timing, "good"),
             "detail": _premium_timing_card_body(timing, "caution"),
         },
@@ -14778,6 +24441,7 @@ def _premium_profile_panels(
     """Build the premium profile summary as its own product contract."""
 
     personality_lead = _premium_profile_lead(personality, "판단 기준이 분명한 성격입니다.")
+    source_archetype = _premium_summary_source_archetype(sections)
     personality_section = next(
         (
             section
@@ -14794,8 +24458,13 @@ def _premium_profile_panels(
         personality_payload = {}
     if personality_payload:
         personality_lead = _personality_profile_intro(personality_payload, fallback=personality_lead)
+    if source_archetype.get("summary"):
+        personality_lead = str(source_archetype["summary"])
     personality_value = str(
-        personality_payload.get("title") or personality_profile.get("type") or "성격 요약"
+        source_archetype.get("profile_type")
+        or personality_payload.get("title")
+        or personality_profile.get("type")
+        or "성격 요약"
     ).strip()
     personality_score = _personality_profile_score(personality_payload)
     panels: list[dict[str, Any]] = [
@@ -14804,7 +24473,7 @@ def _premium_profile_panels(
             "role": "personality",
             "label": "성격",
             "title": "성격 유형",
-            "caption": "성격과 판단 방식",
+            "caption": "월지·일주 성정" if source_archetype else "성격과 판단 방식",
             "verdict": personality_lead,
             "detail": _premium_summary_personality_detail(sections),
             "domain": "personality",
@@ -14842,14 +24511,14 @@ def _premium_profile_panels(
             "panel_id": "premium_profile_timing",
             "role": "timing",
             "label": "연도",
-            "title": "인생 연도",
-            "caption": "20세~79세 주요 연도",
+            "title": "좋은 시기",
+            "caption": "좋은 시기와 조심할 시기",
             "verdict": _premium_timing_card_body(timing, "good"),
             "detail": _premium_timing_card_body(timing, "caution"),
             "domain": "timing",
-            "domain_label": "인생 주요 연도",
-            "metric_label": "생애 구간",
-            "value": "20세~79세",
+            "domain_label": "시기운",
+            "metric_label": "주요 시기",
+            "value": "연도 확인",
             "score": None,
             "tone": "neutral",
         },
@@ -14858,7 +24527,7 @@ def _premium_profile_panels(
 
 
 def _premium_timing_card_body(timing: dict[str, str], kind: str) -> str:
-    label = "상승 연도" if kind == "good" else "주의 연도"
+    label = "좋은 시기" if kind == "good" else "조심할 시기"
     value = str(timing.get(kind) or "").strip()
     return f"{label}: {value}" if value else label
 
@@ -14961,13 +24630,25 @@ def _premium_summary_candidates(sections: list[dict[str, Any]]) -> list[dict[str
         if domain == "timing":
             continue
         domain_label = str(section.get("domain_label") or section.get("heading") or "")
+        section_profile = section.get("section_profile") if isinstance(section.get("section_profile"), dict) else {}
+        section_profile_summary = str(section_profile.get("summary") or "").strip()
+        section_profile_type = str(section_profile.get("type") or "").strip()
+        section_lead = str(
+            section.get("lead")
+            or section.get("headline")
+            or section.get("summary")
+            or section_profile_summary
+            or ""
+        ).strip()
         for item in _premium_summary_source_items(section):
             score = item.get("score")
             if not isinstance(score, int):
                 continue
             label = _premium_sentence_axis_label(item.get("display_label") or item.get("label") or item.get("title") or "")
             value = str(item.get("value") or _score_value(score)).strip()
-            caption = str(item.get("caption") or item.get("body") or item.get("definition") or "").strip()
+            caption = _fix_common_particle_text(
+                str(item.get("caption") or item.get("body") or item.get("definition") or "")
+            ).strip()
             if not label:
                 continue
             candidates.append(
@@ -14980,6 +24661,9 @@ def _premium_summary_candidates(sections: list[dict[str, Any]]) -> list[dict[str
                     "score": score,
                     "caption": caption,
                     "tone": str(item.get("tone") or _topic_tone_from_score(score)),
+                    "section_lead": section_lead,
+                    "section_profile_summary": section_profile_summary,
+                    "section_profile_type": section_profile_type,
                 }
             )
     return candidates
@@ -15174,18 +24858,102 @@ def _premium_label_priority(label: Any) -> int:
 
 
 def _premium_profile_type(primary: dict[str, Any] | None, secondary: dict[str, Any] | None) -> str:
-    families: list[str] = []
+    axes: list[str] = []
     for item in (primary, secondary):
-        family = str((item or {}).get("family") or "").strip()
-        if family and family not in families:
-            families.append(family)
-    if not families:
+        axis = _premium_profile_type_axis(item)
+        if axis and axis not in axes:
+            axes.append(axis)
+    if not axes:
         return "종합 균형형"
-    families = sorted(
-        families,
-        key=lambda family: PREMIUM_SUMMARY_FAMILY_DISPLAY_PRIORITY.get(family, 99),
+    return "·".join(axes[:2]) + "형"
+
+
+def _premium_profile_type_axis(item: dict[str, Any] | None) -> str:
+    if not item:
+        return ""
+    domain = str(item.get("domain") or "")
+    item_text = " ".join(
+        str(item.get(key) or "")
+        for key in ("label", "caption")
     )
-    return "·".join(families[:2]) + "형"
+    support_text = " ".join(
+        str(item.get(key) or "")
+        for key in ("section_lead", "section_profile_type")
+    )
+    text = " ".join(
+        str(item.get(key) or "")
+        for key in ("label", "caption", "section_lead", "section_profile_type")
+    )
+    if domain == "money":
+        if any(marker in item_text for marker in ("자산", "축재", "재산", "소유")):
+            return "자산 축적"
+        if any(marker in item_text for marker in ("수입", "수익", "보수", "재주")):
+            return "수입 확장"
+        if any(marker in item_text for marker in ("계약", "명의", "공동")):
+            return "재물 관리"
+        if any(marker in support_text for marker in ("자산", "축재", "재산", "소유")):
+            return "자산 축적"
+        if any(marker in support_text for marker in ("수입", "수익", "보수", "재주")):
+            return "수입 확장"
+        if any(marker in support_text for marker in ("계약", "명의", "공동")):
+            return "재물 관리"
+        return "재물 형성"
+    if domain == "career":
+        if any(marker in item_text for marker in ("전문", "단가", "협상")):
+            return "전문 성취"
+        if any(marker in item_text for marker in ("승진", "직함", "권한", "책임")):
+            return "직책 상승"
+        if any(marker in item_text for marker in ("평가", "평판", "인정", "도약")):
+            return "공적 성취"
+        if any(marker in support_text for marker in ("전문", "단가", "협상")):
+            return "전문 성취"
+        if any(marker in support_text for marker in ("승진", "직함", "권한", "책임")):
+            return "직책 상승"
+        if any(marker in support_text for marker in ("평가", "평판", "인정", "도약")):
+            return "공적 성취"
+        return "직업 성취"
+    if domain == "honor":
+        if any(marker in item_text for marker in ("평판", "명예")):
+            return "평판 형성"
+        if any(marker in support_text for marker in ("평판", "명예")):
+            return "평판 형성"
+        return "공식 인정"
+    if domain == "love":
+        if any(marker in item_text for marker in ("표현", "마음")):
+            return "애정 표현"
+        if any(marker in item_text for marker in ("지속", "신뢰", "오래")):
+            return "관계 지속"
+        if any(marker in item_text for marker in ("결혼", "약속")):
+            return "관계 현실화"
+        if any(marker in support_text for marker in ("표현", "마음")):
+            return "애정 표현"
+        if any(marker in support_text for marker in ("지속", "신뢰", "오래")):
+            return "관계 지속"
+        if any(marker in support_text for marker in ("결혼", "약속")):
+            return "관계 현실화"
+        return "인연 형성"
+    if domain == "marriage":
+        if any(marker in item_text for marker in ("생활", "주거", "가정", "운영")):
+            return "생활 안정"
+        if any(marker in item_text for marker in ("배우자", "혼인")):
+            return "배우자 인연"
+        if any(marker in support_text for marker in ("생활", "주거", "가정", "운영")):
+            return "생활 안정"
+        if any(marker in support_text for marker in ("배우자", "혼인")):
+            return "배우자 인연"
+        return "결혼 현실화"
+    if domain == "social":
+        if any(marker in item_text for marker in ("도움", "소개", "지원")):
+            return "조력 인연"
+        if any(marker in item_text for marker in ("오래", "신뢰")):
+            return "신뢰 관계"
+        if any(marker in support_text for marker in ("도움", "소개", "지원")):
+            return "조력 인연"
+        if any(marker in support_text for marker in ("오래", "신뢰")):
+            return "신뢰 관계"
+        return "대인 선택"
+    family = str(item.get("family") or "").strip()
+    return family or label
 
 
 def _premium_summary_headline(
@@ -15211,13 +24979,23 @@ def _premium_summary_domain_pair_sentence(
     secondary: dict[str, Any] | None,
     management: dict[str, Any] | None = None,
 ) -> str:
-    domains = {str((item or {}).get("domain") or "") for item in (primary, secondary, management)}
+    domains = {str((item or {}).get("domain") or "") for item in (primary, secondary)}
     if {"money", "career"}.issubset(domains):
-        return "재물운과 직업운이 같은 자리에서 드러납니다."
-    if domains & {"love", "marriage"} and "money" in domains:
-        return "돈과 관계 문제가 같은 자리에서 움직입니다."
-    if domains & {"love", "marriage"} and "career" in domains:
-        return "직업 선택과 관계 선택이 서로 영향을 줍니다."
+        money_item = next(
+            (item for item in (primary, secondary) if str((item or {}).get("domain") or "") == "money"),
+            None,
+        )
+        money_text = " ".join(
+            str((money_item or {}).get(key) or "")
+            for key in ("label", "caption", "section_lead", "section_profile_summary")
+        )
+        if any(marker in money_text for marker in ("공동", "명의", "지분", "가까운 사람")):
+            return "직업 성취가 커질수록 가까운 금전 관계에서 명의와 지분 문제가 따라붙습니다."
+        if any(marker in money_text for marker in ("계약", "문서", "정산", "수령")):
+            return "직업 성취가 돈으로 남으려면 계약 기준이 먼저 잡혀야 합니다."
+        if any(marker in money_text for marker in ("자산", "축재", "소유")):
+            return "직업 성취가 자산으로 굳어지는 사주입니다."
+        return ""
     return ""
 
 
@@ -15237,18 +25015,41 @@ def _premium_summary_body(
     return " ".join(sentence for sentence in sentences if sentence)
 
 
+def _premium_summary_section_sentence(item: dict[str, Any] | None) -> str:
+    if not item:
+        return ""
+    for key in ("section_profile_summary", "section_lead"):
+        text = _fix_common_particle_text(
+            _premium_story_sentence(item.get(key), max_sentences=1)
+        ).strip().rstrip(".")
+        if not text:
+            continue
+        if len(text) > 82:
+            continue
+        if _premium_text_reads_as_watch(text) or _premium_story_body_has_clear_caution(text):
+            continue
+        if any(blocked in text for blocked in ("주의", "부담", "손실", "갈등", "흔들")):
+            continue
+        return text
+    return ""
+
+
 def _premium_summary_headline_clause(item: dict[str, Any] | None, *, role: str) -> str:
     if not item:
         return ""
     domain = str(item.get("domain") or "")
     label = str(item.get("label") or "")
     is_management = role == "management"
+    if not is_management:
+        section_sentence = _premium_summary_section_sentence(item)
+        if section_sentence:
+            return section_sentence
     caption_verdict = _premium_summary_caption_verdict(item, role=role)
     if caption_verdict:
         return caption_verdict
     if domain in {"love", "marriage"}:
         if is_management:
-            return "관계는 생활 문제에서 부담이 먼저 남습니다"
+            return "관계는 감정보다 생활 책임에서 마찰이 먼저 생깁니다"
         if "관계 안정" in label or "결혼 안정" in label:
             return "관계는 깊은 신뢰로 오래 남습니다"
         if "결혼" in label:
@@ -15271,7 +25072,7 @@ def _premium_summary_headline_clause(item: dict[str, Any] | None, *, role: str) 
         return "수입과 자산을 키우는 재물운입니다"
     if domain in {"career", "honor"}:
         if is_management:
-            return "다만 결정권 없는 책임은 경력의 흠으로 남습니다"
+            return "다만 책임만 크고 권한이 약하면 경력 평가가 불리해집니다"
         if "평가" in label or "인정" in label or "평판" in label:
             return "일의 결과가 이름과 평판으로 남습니다"
         if "전문" in label:
@@ -15293,6 +25094,10 @@ def _premium_summary_sentence(item: dict[str, Any] | None, *, role: str) -> str:
     label = str(item.get("label") or "")
     caption = str(item.get("caption") or "").strip().rstrip(".")
     is_management = role == "management"
+    if not is_management:
+        section_sentence = _premium_summary_section_sentence(item)
+        if section_sentence:
+            return section_sentence
     caption_verdict = _premium_summary_caption_verdict(item, role=role)
     if caption_verdict:
         return caption_verdict
@@ -15317,7 +25122,7 @@ def _premium_summary_sentence(item: dict[str, Any] | None, *, role: str) -> str:
         if "축재" in label:
             return "수입이 소비로 흩어지지 않고 소유 자산으로 남습니다" if not is_management else "수입이 자산으로 굳기 전에 관계 비용과 생활비가 먼저 늘어납니다"
         if "수입" in label:
-            return "일의 성과가 보수와 계약금으로 확정됩니다" if not is_management else "수입 조건이 흐리면 받을 몫이 줄어듭니다"
+            return "일의 성과가 보수와 계약금으로 분명히 잡힙니다" if not is_management else "수입 조건이 흐리면 받을 몫이 줄어듭니다"
         if "공동" in label:
             return "공동 자금은 명의와 몫이 분명할 때 재산으로 남습니다" if not is_management else "가까운 금전 관계에서는 명의와 지분이 상대 쪽으로 기울기 쉽습니다"
         if "계약" in label or "문서" in label:
@@ -15331,7 +25136,7 @@ def _premium_summary_sentence(item: dict[str, Any] | None, *, role: str) -> str:
         if "독립" in label:
             return "전문성이 경력의 단가와 협상력을 만듭니다"
         if "권한" in label or "책임" in label:
-            return "책임과 권한이 맞물릴 때 직업적 성취가 본인 이력으로 남습니다" if not is_management else "결정권 없는 책임은 경력의 흠으로 남습니다"
+            return "책임과 권한이 맞물릴 때 직업적 성취가 본인 이력으로 남습니다" if not is_management else "책임만 크고 권한이 약하면 경력 평가가 불리해집니다"
         if "조직" in label:
             return "조직 안에서는 책임 있는 자리를 맡을수록 평가가 올라갑니다"
         return "일에서 만든 결과가 이름과 평판으로 남습니다"
@@ -15577,7 +25382,7 @@ def _premium_money_management_detail_matches(label: str, detail: dict[str, Any])
 def _premium_summary_caption_verdict(item: dict[str, Any] | None, *, role: str) -> str:
     if not item or role == "management":
         return ""
-    caption = _premium_story_sentence(item.get("caption"), max_sentences=1).strip().rstrip(".")
+    caption = _fix_common_particle_text(_premium_story_sentence(item.get("caption"), max_sentences=1)).strip().rstrip(".")
     if not caption:
         return ""
     if _premium_text_reads_as_watch(caption) or _premium_story_body_has_clear_caution(caption):
@@ -15620,6 +25425,8 @@ def _premium_summary_caption_verdict(item: dict[str, Any] | None, *, role: str) 
             return "한 분야의 전문성이 경력의 단가와 협상력을 만듭니다"
         if "독립" in label:
             return "한 분야의 전문성이 경력의 단가와 협상력을 만듭니다"
+        if "도약" in label:
+            return "직업 성취가 직책과 평판으로 이어집니다"
         if "평가" in label or "인정" in label or "평판" in label:
             return "일에서 만든 결과가 이름과 평판으로 남습니다"
         if "조직" in label:
@@ -15637,13 +25444,13 @@ def _premium_summary_caption_verdict(item: dict[str, Any] | None, *, role: str) 
         if "자산" in label or "축재" in label or "재산" in label:
             return "수입이 소유권 있는 자산으로 남는 재물운입니다"
         if "수익" in label or "수입" in label or "재물이 들어오는 길" in label:
-            return "성과가 실제 보수로 확정되는 재물운입니다"
+            return "성과가 보수와 계약금으로 분명히 잡히는 재물운입니다"
     if (
         domain == "money"
         and any(marker in label for marker in ("수익", "수입", "재물이 들어오는 길", "성과 수익화"))
         and caption == "성과가 보수로 확정됩니다"
     ):
-        return "성과가 실제 보수로 확정되는 재물운입니다"
+        return "성과가 보수와 계약금으로 분명히 잡히는 재물운입니다"
     return caption
 
 
@@ -15833,6 +25640,9 @@ def _premium_summary_timing_title(event: dict[str, Any], kind: str) -> str:
 
 
 def _premium_summary_personality(sections: list[dict[str, Any]]) -> str:
+    source_archetype = _premium_summary_source_archetype(sections)
+    if source_archetype.get("summary"):
+        return str(source_archetype["summary"])
     personality = next((section for section in sections if str(section.get("domain") or "") == "personality"), None)
     if not personality:
         return ""
@@ -15905,7 +25715,7 @@ def _judgment_catalog_entries(tier: str) -> list[dict[str, Any]]:
         _catalog_entry(
             "judgment_money",
             "재물운",
-            "수입이 생기는 자리와 재산으로 남는 자리를 나누어 보여드립니다.",
+            "수입이 생기는 경로와 재산으로 확정되는 기준을 구분해 보여드립니다.",
             tier=tier,
             linked_index=1,
         ),
@@ -15944,7 +25754,7 @@ def _judgment_catalog_entries(tier: str) -> list[dict[str, Any]]:
         ),
         _catalog_entry(
             "premium_money_detail",
-            "재물 세부 운세",
+            "재물운",
             "재물 형성력, 수입 창출력, 자산화 능력, 공동자금 운영력, 계약·명의 안정성이 각각 드러납니다.",
             tier=tier,
             display_group="premium",
@@ -15954,7 +25764,7 @@ def _judgment_catalog_entries(tier: str) -> list[dict[str, Any]]:
         ),
         _catalog_entry(
             "premium_career_detail",
-            "직업 세부 운세",
+            "직업운",
             "성취 축적력, 평가·명예 전환력, 조직 적응력, 권한 확보력, 전문 자산화가 각각 드러납니다.",
             tier=tier,
             display_group="premium",
@@ -15964,7 +25774,7 @@ def _judgment_catalog_entries(tier: str) -> list[dict[str, Any]]:
         ),
         _catalog_entry(
             "premium_love_detail",
-            "연애 세부 운세",
+            "연애운",
             "상대 선택, 인연 형성, 애정 표현, 관계 지속과 주변 개입 지점이 드러납니다.",
             tier=tier,
             display_group="premium",
@@ -15974,7 +25784,7 @@ def _judgment_catalog_entries(tier: str) -> list[dict[str, Any]]:
         ),
         _catalog_entry(
             "premium_marriage_detail",
-            "결혼 세부 운세",
+            "결혼운",
             "혼인 성향, 배우자상, 생활 안정, 부부 재정, 가족 책임의 차이를 보여드립니다.",
             tier=tier,
             display_group="premium",
@@ -15984,21 +25794,11 @@ def _judgment_catalog_entries(tier: str) -> list[dict[str, Any]]:
         ),
         _catalog_entry(
             "premium_good_timing",
-            "인생 주요 연도",
-            "20세부터 79세까지 좋은 연도와 주의 연도를 구분해 제시합니다.",
+            "시기운",
+            "좋은 시기와 조심할 시기를 연도로 구분해 제시합니다.",
             tier=tier,
             display_group="premium",
             kind="timing",
-            premium_only=True,
-            view_target="premium",
-        ),
-        _catalog_entry(
-            "premium_life_stages",
-            "초년·중년·말년",
-            "인생 구간별로 강해지는 영역과 보완할 영역을 구분합니다.",
-            tier=tier,
-            display_group="premium",
-            kind="premium",
             premium_only=True,
             view_target="premium",
         ),
@@ -16028,15 +25828,16 @@ def _judgment_catalog_entries(tier: str) -> list[dict[str, Any]]:
     return free_entries + premium_entries
 
 
-def _pick_factor_preview_sections(sections: list[dict[str, Any]], limit: int = 23) -> list[dict[str, Any]]:
+def _pick_factor_preview_sections(sections: list[dict[str, Any]], limit: int = 64) -> list[dict[str, Any]]:
     layer_limits = {
         "season_context": 1,
         "month_governance": 1,
-        "branch_reality": 3,
+        "branch_reality": 4,
+        "branch_pair": 8,
         "cycle_principle_matrix": 8,
         "cycle_regulation": 6,
         "integrated_saju": 2,
-        "element_combination": 2,
+        "element_combination": 20,
         "stem_reception": 2,
         "ten_god_interaction": 2,
     }
@@ -16147,6 +25948,12 @@ def _customer_factor_lead(section: dict[str, Any]) -> str:
             "필요한 작용이 살아나는지, 부담 작용이 손실과 갈등으로 드러나는지 판정합니다."
         )
 
+    if source == "지지 배합":
+        specific = _compact_factor_sentences(lead, limit=3)
+        if specific:
+            return specific
+        return "두 지지가 맞물릴 때 생기는 오행의 생극과 합충형파해를 함께 정리한 근거입니다."
+
     if layer == "month_governance" or source == "월령 심화":
         specific = _compact_factor_sentences(lead, limit=4)
         if specific:
@@ -16193,11 +26000,17 @@ def _customer_factor_lead(section: dict[str, Any]) -> str:
         specific = specific.replace("살아 있으면", "받쳐 주면")
         return specific
 
-    if layer in {"integrated_saju", "element_combination"}:
+    if layer == "element_combination":
+        specific = re.sub(r"\s+", " ", str(lead or "").strip().replace("\n", " "))
+        if specific:
+            return specific
+        return f"{heading}은 천간 배합 사전에서 확인한 오행 작용입니다."
+
+    if layer == "integrated_saju":
         first = _compact_factor_text(lead)
         if first:
             return first
-        return f"{heading}은 오행의 성질과 십신의 역할을 결합해 판단한 근거입니다."
+        return f"{heading}은 여러 십신이 한 구조에서 함께 작용하는 근거입니다."
 
     return _compact_factor_text(lead)
 
@@ -16214,6 +26027,15 @@ FACTOR_BASIS_COPY_REPLACEMENTS: tuple[tuple[str, str], ...] = (
     (
         "부담이 붙기 쉬운 오행은 확인 필요",
         "부담 작용은 대운과 세운에서 드러나는 쪽으로 잡힙니다",
+    ),
+    ("사회적 역할와", "사회적 역할과"),
+    (
+        "지식과 보호가 자기 주장이나 동료 관계를 키웁니다. 자기 기준도 쉽게 굳어집니다.",
+        "지식과 보호가 자기 기준과 책임 의식을 강하게 만들고, 사람 사이의 주장과 역할 문제를 함께 드러냅니다.",
+    ),
+    (
+        "수극화의 충돌은 목이 받쳐 줄 때 수생목생화로 풀립니다.",
+        "수극화의 충돌은 목 기운이 중간에서 이어 줄 때 수생목생화로 정리됩니다.",
     ),
     ("큰 자금를", "큰 자금을"),
     ("작용이 월령 기준 판정에 들어갑니다", "월령 기준 판정에 반영됩니다"),
@@ -16271,6 +26093,4686 @@ def _prepare_factor_sections_for_cards(sections: Any) -> list[dict[str, Any]]:
             }
         )
     return prepared
+
+
+ANALYSIS_DETAIL_UNIT_META: dict[str, dict[str, Any]] = {
+    "summary": {
+        "title": "종합 기준",
+        "lead": "사주의 전체 인상, 강한 영역, 관리할 영역을 먼저 압축합니다. 사용자는 여기서 자신의 사주가 어느 방향으로 읽히는지 잡아야 합니다.",
+        "layers": ("month_governance", "season_context", "cycle_principle_matrix", "integrated_saju"),
+        "source_labels": ("월령 심화", "월령·조후", "생극·십신", "오행·십신 통합", "십신 복합"),
+        "limit": 4,
+    },
+    "domains": {
+        "title": "분야별 총운",
+        "lead": "재물, 직업, 연애, 결혼처럼 실제 생활에서 바로 체감되는 분야로 판단값을 구분합니다.",
+        "layers": ("branch_reality", "branch_pair", "cycle_principle_matrix", "cycle_regulation", "integrated_saju", "element_combination"),
+        "source_labels": ("지지·지장간", "지지 배합", "생극·십신", "상생상극", "오행·십신 통합", "십신 복합", "오행 배합"),
+        "limit": 18,
+    },
+    "timing": {
+        "title": "시기운",
+        "lead": "원국의 중심 작용이 어느 시기에 강해지고 약해지는지, 좋은 연도와 주의 연도를 함께 정리합니다.",
+        "layers": ("cycle_principle_matrix", "cycle_regulation", "month_governance"),
+        "source_labels": ("생극·십신", "상생상극", "월령 심화"),
+        "limit": 5,
+    },
+    "gyeokguk": {
+        "title": "격국 분석",
+        "lead": "월지에서 잡힌 격이 사회적 방식과 운의 방향을 정합니다. 여기에 십신의 생극이 붙으면서 실제 사건의 성격이 갈립니다.",
+        "layers": ("month_governance", "cycle_principle_matrix"),
+        "source_labels": ("월령 심화", "생극·십신"),
+        "limit": 6,
+    },
+    "ten_gods": {
+        "title": "십신 분석",
+        "lead": "월령과 격국 위에서 십신이 어떤 역할로 드러나는지 정리합니다. 단일 십신, 이중 십신, 생극 연쇄를 나누어 봅니다.",
+        "layers": ("cycle_principle_matrix", "cycle_regulation", "integrated_saju", "month_governance"),
+        "source_labels": ("생극·십신", "상생상극", "오행·십신 통합", "십신 복합", "월령 심화"),
+        "limit": 6,
+    },
+    "month": {
+        "title": "월령 해석",
+        "lead": "월령은 사주의 기본 환경입니다. 같은 십신도 어느 계절과 월지 위에서 작동하는지에 따라 성격이 달라집니다.",
+        "layers": ("season_context", "month_governance", "branch_reality"),
+        "source_labels": ("월령·조후", "월령 심화", "지지·지장간"),
+        "limit": 5,
+    },
+    "elements": {
+        "title": "오행 분석",
+        "lead": "오행은 성향의 결을 만들고, 십신은 그 성향이 사회적 역할로 드러나는 방식을 정합니다.",
+        "layers": ("element_combination", "integrated_saju", "cycle_regulation"),
+        "source_labels": ("오행 배합", "오행·십신 통합", "십신 복합", "상생상극"),
+        "limit": 20,
+    },
+    "temperature": {
+        "title": "조후 분석",
+        "lead": "조후는 사주의 온도와 건습을 조절합니다. 필요한 오행이 보강되는지에 따라 같은 격국도 체감이 달라집니다.",
+        "layers": ("season_context", "cycle_regulation"),
+        "source_labels": ("월령·조후", "상생상극"),
+        "limit": 5,
+    },
+    "contextual": {
+        "title": "종합 근거",
+        "lead": "격국, 월령, 오행, 조후를 따로 보지 않고 한 번 더 합쳐 최종 판단의 근거를 정리합니다.",
+        "layers": ("month_governance", "season_context", "branch_pair", "cycle_principle_matrix", "cycle_regulation", "integrated_saju", "element_combination"),
+        "source_labels": ("월령 심화", "월령·조후", "지지 배합", "생극·십신", "상생상극", "오행·십신 통합", "십신 복합", "오행 배합"),
+        "limit": 64,
+    },
+    "basis": {
+        "title": "명식 기준",
+        "lead": "월령, 지지, 지장간, 생극 관계를 기준으로 정리한 명식 요소입니다.",
+        "layers": (),
+        "source_labels": (),
+        "limit": 12,
+    },
+}
+
+
+def _analysis_detail_title(factor: dict[str, Any]) -> str:
+    layer = str(factor.get("layer") or "")
+    heading = str(factor.get("heading") or factor.get("source_label") or "").strip()
+    if layer == "element_combination":
+        if len(re.findall(r"[甲乙丙丁戊己庚辛壬癸]", heading)) >= 2:
+            return heading
+        text = " ".join([heading, str(factor.get("lead") or "")])
+        element_key = _element_combination_dictionary_key(text)
+        if element_key:
+            return f"{element_key} 배합"
+    return heading.rstrip(" ,，·")
+
+
+ANALYSIS_DETAIL_SOURCE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "월령 기준": ("월령", "계절 기준", "월지", "조후", "필요 오행", "현실 조건"),
+    "월령 심화": ("월지", "본기", "여기", "월률분야", "격국", "십신 작용"),
+    "지지·지장간": ("지지", "지장간", "투출", "통근", "현실 작용", "생활 기반"),
+    "지지 배합": ("지지", "오행 배합", "상생상극", "현실 조건", "관계 작용", "생활 기반"),
+    "생극·십신": ("십신", "생극", "성격", "제어", "보조", "현실 작용"),
+    "상생상극": ("상생", "상극", "통관", "생조", "극제", "기운 균형"),
+    "오행 배합": ("오행", "물상", "배합", "기질", "관심 방향", "작용 방식"),
+    "오행·십신 통합": ("오행", "십신", "기질", "역할", "현실 작용", "통합 판단"),
+    "십신 복합": ("십신", "복합 작용", "기질", "역할", "현실 작용"),
+    "사건 작용": ("합충형파해", "사건 발동", "관계 변화", "현실 변수", "시기 작용"),
+}
+
+
+ANALYSIS_DETAIL_TITLE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "재생관": ("현실 감각", "책임 수행력", "제도 친화성", "명분 확보", "체면 관리", "직책 욕구", "조직 적응력"),
+    "관인상생": ("책임", "명분", "자격", "보호", "공식성", "조직 신뢰", "문서"),
+    "정관생편인": ("공식 책임", "전문 해석", "문서 기준", "자격", "보호", "평판 관리"),
+    "재극인": ("현실 압박", "문서 부담", "독립", "수익 요구", "보호 약화", "실리"),
+    "식상생재": ("생산물", "결과물", "판매", "수입화", "기술 수익", "시장성"),
+    "비겁극재": ("경쟁", "분배", "공동 재정", "손실", "몫 다툼", "동업"),
+    "비겁쟁재": ("경쟁", "분배", "공동 재정", "손실", "몫 다툼", "동업"),
+    "관성극비겁": ("질서", "규칙", "계약", "책임", "경쟁 제어", "공식 기준"),
+    "인성생비겁": ("학습", "보호", "지지 기반", "동료", "연대", "기준 형성"),
+    "수극화 통관": ("수화 충돌", "통관", "조율", "표현 조절", "냉정과 열정", "목 기운"),
+    "화토": ("표현", "신뢰", "축적", "기반", "브랜드", "현실화"),
+    "火土": ("표현", "신뢰", "축적", "기반", "브랜드", "현실화"),
+    "병기": ("표현", "현실화", "신뢰", "정리", "실속", "관리성"),
+    "丙己": ("표현", "현실화", "신뢰", "정리", "실속", "관리성"),
+}
+
+
+def _analysis_detail_keywords(
+    *,
+    title: str,
+    body: str,
+    source_label: str,
+    layer: str,
+    domain_labels: Any,
+) -> list[str]:
+    values: list[str] = []
+
+    if layer == "element_combination":
+        stem_key = _stem_combination_dictionary_key(title)
+        if stem_key:
+            exact = core_keywords_for_exact_section(
+                stem_key,
+                file_name_contains="10천간배합",
+                limit=12,
+            )
+            if exact:
+                return exact
+        element_key = _element_combination_dictionary_key(title)
+        if element_key:
+            fallback = core_keywords_for_exact_section(
+                element_key,
+                file_name_contains="오행배합",
+                limit=12,
+            )
+            if fallback:
+                return fallback
+
+    if source_label in {"지지·지장간", "지지 배합"}:
+        branch_labels = list(dict.fromkeys(re.findall(r"[子丑寅卯辰巳午未申酉戌亥]", title)))
+        exact: list[str] = []
+        for branch_label in branch_labels:
+            for keyword in core_keywords_for_exact_section(
+                branch_label,
+                file_name_contains="12지지",
+                limit=12,
+            ):
+                if keyword not in exact:
+                    exact.append(keyword)
+                if len(exact) >= 12:
+                    break
+            if len(exact) >= 12:
+                break
+        if exact:
+            return exact
+
+    def add(items: Any) -> None:
+        for item in list(items or []):
+            text = str(item or "").strip()
+            if not text or text in values:
+                continue
+            values.append(text)
+
+    matched_title_keywords: list[str] = []
+    for key, keywords in ANALYSIS_DETAIL_TITLE_KEYWORDS.items():
+        if key and key in title:
+            for keyword in keywords:
+                text = str(keyword or "").strip()
+                if text and text not in matched_title_keywords:
+                    matched_title_keywords.append(text)
+    # 명칭만으로 작용이 확정되는 십신 구조는 고객이 읽을 생활 의미만
+    # 노출한다. 여기에 출처 분류어를 뒤섞으면 핵심어의 밀도가 떨어진다.
+    if matched_title_keywords:
+        return matched_title_keywords[:7]
+    add(ANALYSIS_DETAIL_SOURCE_KEYWORDS.get(source_label, ()))
+    add(domain_labels if isinstance(domain_labels, list) else [])
+    add(core_keywords_for_query(title, body, source_label, layer, *(domain_labels if isinstance(domain_labels, list) else []), limit=8))
+    if title and title not in values:
+        values.insert(0, title)
+    return values[:12]
+
+
+def _analysis_detail_card(factor: dict[str, Any], *, domain: str | None = None) -> dict[str, Any] | None:
+    heading = _analysis_detail_title(factor)
+    if not heading:
+        return None
+    body = ""
+    if domain:
+        domain_bodies = factor.get("domain_bodies")
+        if isinstance(domain_bodies, dict):
+            body = str(domain_bodies.get(domain) or "").strip()
+    if not body:
+        body = str(factor.get("lead") or "").strip()
+    if str(factor.get("layer") or "") == "element_combination":
+        stem_key = _stem_combination_dictionary_key(heading, body)
+        _source_heading, exact_text = _stem_combination_source(stem_key)
+        if exact_text:
+            body = exact_text
+        else:
+            element_key = _element_combination_dictionary_key(heading, body)
+            fallback_text = _element_combination_source_text(element_key) if element_key else ""
+            if fallback_text:
+                body = fallback_text
+    if not body:
+        return None
+    layer = str(factor.get("layer") or "")
+    source_label = _basis_card_label(str(factor.get("source_label") or ""), layer)
+    if layer == "integrated_saju":
+        source_label = "십신 복합"
+    domain_labels = list(factor.get("domain_labels") or [])[:4]
+    score = None
+    if domain:
+        domain_scores = factor.get("domain_scores")
+        if isinstance(domain_scores, dict):
+            try:
+                score = int(domain_scores.get(domain)) if domain_scores.get(domain) is not None else None
+            except (TypeError, ValueError):
+                score = None
+    return {
+        "title": heading,
+        "body": body,
+        "source_label": source_label,
+        "layer": layer,
+        "domain_labels": domain_labels,
+        "keywords": _analysis_detail_keywords(
+            title=heading,
+            body=body,
+            source_label=source_label,
+            layer=layer,
+            domain_labels=domain_labels,
+        ),
+        "score": score,
+    }
+
+
+def _analysis_detail_factor_score(factor: dict[str, Any], key: str, index: int) -> int:
+    meta = ANALYSIS_DETAIL_UNIT_META.get(key, {})
+    layer = str(factor.get("layer") or "")
+    source_label = str(factor.get("source_label") or "")
+    heading = str(factor.get("heading") or "")
+    lead = str(factor.get("lead") or "")
+    score = max(0, 120 - index)
+    if layer in set(meta.get("layers") or ()):
+        score += 120
+    if source_label in set(meta.get("source_labels") or ()):
+        score += 90
+    domain_labels = [str(label or "") for label in factor.get("domain_labels") or []]
+    domain_scores = factor.get("domain_scores") if isinstance(factor.get("domain_scores"), dict) else {}
+    if key == "summary" and layer in {"month_governance", "season_context", "cycle_principle_matrix", "integrated_saju"}:
+        score += 55
+    if key == "domains":
+        if domain_labels:
+            score += 75
+        if domain_scores:
+            score += min(80, int(max(domain_scores.values()) if domain_scores.values() else 0))
+    if key == "timing":
+        try:
+            timing_score = int(domain_scores.get("timing") or 0)
+        except (TypeError, ValueError):
+            timing_score = 0
+        score += timing_score
+        if any(term in " ".join([heading, lead, source_label]) for term in ("대운", "세운", "시기", "연도", "발동", "사건")):
+            score += 55
+    if key == "gyeokguk" and ("격" in heading or "재생관" in heading or "관인상생" in heading):
+        score += 40
+    if key == "ten_gods":
+        if layer in {"cycle_principle_matrix", "cycle_regulation", "integrated_saju"}:
+            score += 70
+        if any(
+            term in " ".join([heading, lead, source_label])
+            for term in ("십신", "정재", "편재", "정관", "편관", "식신", "상관", "인성", "비겁", "재생관", "재극인", "식상생재", "관인상생")
+        ):
+            score += 65
+    if key == "month" and (heading.startswith("월지") or "월지" in lead or "월령" in heading):
+        score += 50
+    if key == "temperature" and any(term in " ".join([heading, lead, source_label]) for term in ("조후", "차가", "따뜻", "수생", "화생", "통관")):
+        score += 45
+    if key == "elements" and any(term in " ".join([heading, lead, source_label]) for term in ("오행", "木", "火", "土", "金", "水", "상생상극", "통합")):
+        score += 45
+    if key == "contextual":
+        if layer in {"month_governance", "cycle_principle_matrix", "cycle_regulation"}:
+            score += 60
+        if domain_labels:
+            score += 35
+    if key == "basis":
+        score += 50
+    return score
+
+
+def _analysis_detail_unit(
+    key: str,
+    factors: list[dict[str, Any]],
+    *,
+    domain: str | None = None,
+) -> dict[str, Any]:
+    meta = ANALYSIS_DETAIL_UNIT_META[key]
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for index, factor in enumerate(factors):
+        card = _analysis_detail_card(factor, domain=domain)
+        if not card:
+            continue
+        score = _analysis_detail_factor_score(factor, key, index)
+        if key != "basis" and score < 180:
+            continue
+        scored.append((score, index, card))
+    limit = int(meta.get("limit") or 5)
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    selected: list[tuple[int, int, dict[str, Any]]] = []
+    selected_ids: set[int] = set()
+    preferred_source_labels = [
+        _basis_card_label(str(source_label), "")
+        for source_label in meta.get("source_labels") or ()
+    ]
+    for source_label in preferred_source_labels:
+        for scored_index, item in enumerate(scored):
+            _, _, card = item
+            if scored_index in selected_ids:
+                continue
+            if card.get("source_label") != source_label:
+                continue
+            selected.append(item)
+            selected_ids.add(scored_index)
+            break
+        if len(selected) >= limit:
+            break
+    for scored_index, item in enumerate(scored):
+        if len(selected) >= limit:
+            break
+        if scored_index in selected_ids:
+            continue
+        selected.append(item)
+        selected_ids.add(scored_index)
+    cards = [card for _, _, card in selected[:limit]]
+    source_layers = list(dict.fromkeys(card.get("source_label") for card in cards if card.get("source_label")))
+    return {
+        "title": str(meta.get("title") or ""),
+        "lead": str(meta.get("lead") or ""),
+        "cards": cards,
+        "source_layers": source_layers,
+    }
+
+
+def _analysis_detail_units(factors: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "summary": _analysis_detail_unit("summary", factors),
+        "domains": _analysis_detail_unit("domains", factors),
+        "timing": _analysis_detail_unit("timing", factors),
+        "gyeokguk": _analysis_detail_unit("gyeokguk", factors),
+        "ten_gods": _analysis_detail_unit("ten_gods", factors),
+        "month": _analysis_detail_unit("month", factors),
+        "elements": _analysis_detail_unit("elements", factors),
+        "temperature": _analysis_detail_unit("temperature", factors),
+        "contextual": _analysis_detail_unit("contextual", factors),
+        "basis": _analysis_detail_unit("basis", factors),
+    }
+
+
+def _compact_text_list(value: Any, *, limit: int = 6) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    for item in values:
+        text = str(item or "").strip()
+        if not text or text in result:
+            continue
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _compact_month_fit_items(value: Any, *, limit: int = 8, polarity: str = "") -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    status_labels = {
+        "supports_month_command": "월령 보강",
+        "harms_month_command": "월령 부담",
+        "mixed_by_month_command": "보강과 부담 혼재",
+        "usable_by_month_command": "월령 활용",
+        "burdensome_by_month_command": "월령 과부하",
+    }
+    authority_labels = {
+        "season_winter": "계절 기준",
+        "season_spring": "계절 기준",
+        "season_summer": "계절 기준",
+        "season_autumn": "계절 기준",
+        "month_branch_body": "월지 본기",
+        "month_branch_middle": "월지 중기",
+        "month_branch_residual": "월지 여기",
+        "month_hidden_protruded": "지장간 투출",
+        "month_hidden_body": "월지 본기",
+        "month_hidden_secondary": "월지 중기",
+        "month_hidden_residual": "월지 여기",
+        "hidden_stem": "지장간",
+    }
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _to_int(raw: Any) -> int:
+        try:
+            return int(raw or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    for item in values:
+        if isinstance(item, dict):
+            element = str(item.get("element") or "").strip()
+            label = str(item.get("label") or _element_label(element) or element).strip()
+            status = str(item.get("status") or item.get("month_fit_state") or "").strip()
+            status_label = str(item.get("status_label") or status_labels.get(status) or status).strip()
+            authority = str(item.get("month_authority") or item.get("authority") or "").strip()
+            authority_label = str(item.get("month_authority_label") or authority_labels.get(authority) or authority).strip()
+            support_score = _to_int(item.get("support_score"))
+            pressure_score = _to_int(item.get("pressure_score"))
+            if polarity == "support" and pressure_score > support_score and status not in {"mixed_by_month_command"}:
+                continue
+            if polarity == "pressure" and support_score > pressure_score and status not in {"mixed_by_month_command"}:
+                continue
+            display_name = " · ".join(part for part in (label, status_label) if part)
+            key = (label, status_label)
+            if not display_name or key in seen:
+                continue
+            result.append(
+                {
+                    "element": element,
+                    "label": label,
+                    "display_name": display_name,
+                    "status": status,
+                    "status_label": status_label,
+                    "support_score": support_score,
+                    "pressure_score": pressure_score,
+                    "reality_score": _to_int(item.get("reality_score")),
+                    "month_authority": authority,
+                    "month_authority_label": authority_label,
+                }
+            )
+            seen.add(key)
+        else:
+            text = str(item or "").strip()
+            key = (text, "")
+            if not text or key in seen:
+                continue
+            result.append({"label": text, "display_name": text})
+            seen.add(key)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _compact_label_dict(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in keys:
+        item = value.get(key)
+        if item in (None, "", [], {}):
+            continue
+        result[key] = item
+    return result
+
+
+def _compact_keyword_profile_groups(value: Any, *, limit: int = 5, word_limit: int = 6) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    groups: list[dict[str, Any]] = []
+    for group in value:
+        if not isinstance(group, dict):
+            continue
+        tag = str(group.get("tag") or "").strip()
+        words: list[str] = []
+        for word in group.get("words") or []:
+            text = str(word or "").strip()
+            if text and text not in words:
+                words.append(text)
+            if len(words) >= word_limit:
+                break
+        if tag and words:
+            groups.append({"tag": tag, "words": words})
+        if len(groups) >= limit:
+            break
+    return groups
+
+
+def _compact_keyword_profiles(value: Any, *, limit: int = 10) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    profiles: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        hanja = str(item.get("hanja") or "").strip()
+        key = hanja or name
+        if key and key in seen:
+            continue
+        groups = _compact_keyword_profile_groups(item.get("groups"), limit=5, word_limit=6)
+        if not groups and isinstance(item.get("keywords"), list):
+            group_map: dict[str, list[str]] = {}
+            for keyword in item.get("keywords") or []:
+                if not isinstance(keyword, dict):
+                    continue
+                tag = str(keyword.get("tag") or "").strip()
+                word = str(keyword.get("word") or "").strip()
+                if tag and word and word not in group_map.setdefault(tag, []):
+                    group_map[tag].append(word)
+            groups = [
+                {"tag": tag, "words": words[:6]}
+                for tag, words in list(group_map.items())[:5]
+            ]
+        compact = _compact_label_dict(
+            item,
+            (
+                "kind",
+                "type",
+                "category",
+                "usage",
+                "source_usage",
+                "source_id",
+                "promotion_status",
+                "exposure_scope",
+                "name",
+                "hanja",
+                "aliases",
+                "one_line",
+                "relation_type",
+                "branches",
+                "branch_labels",
+                "positions",
+                "pillar_labels",
+                "domains",
+                "effect_element",
+                "intensity",
+                "priority",
+                "formula_names",
+                "basis_codes",
+                "activation_years",
+                "occurrences",
+                "structure_alignment",
+            ),
+        )
+        if groups:
+            compact["groups"] = groups
+        if compact:
+            profiles.append(compact)
+            if key:
+                seen.add(key)
+        if len(profiles) >= limit:
+            break
+    return profiles
+
+
+def _compact_basis_steps(value: Any, *, limit: int = 8) -> list[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return []
+    order = [str(key or "") for key in value.get("order") or []]
+    steps: list[dict[str, Any]] = []
+    for key in order:
+        step = value.get(key)
+        if not isinstance(step, dict):
+            continue
+        label = str(step.get("label") or step.get("summary") or step.get("state") or "").strip()
+        if not label:
+            continue
+        steps.append(
+            {
+                "key": key,
+                "label": label,
+                "score": step.get("score"),
+            }
+        )
+        if len(steps) >= limit:
+            break
+    return steps
+
+
+GYEOKGUK_COMPACT_SENTENCE_BLOCKLIST = (
+    "방향으로 이어진다",
+    "현실 결과로 넓어진다",
+    "다시 보았습니다",
+    "출발점",
+    "도착점",
+)
+
+
+def _compact_string_map(value: Any, *, limit: int = 6) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        text = re.sub(r"\s+", " ", str(item or "").strip())
+        if not text:
+            continue
+        result[str(key)] = _clean_customer_copy_text(_fix_common_particle_text(text))
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _compact_gyeokguk_projection_text(
+    *,
+    value: dict[str, Any],
+    match: dict[str, Any],
+    domain_priority: list[str],
+) -> str:
+    real_world = value.get("real_world_projection")
+    if not isinstance(real_world, dict):
+        real_world = {}
+    projection_maps = [
+        real_world.get("domain_projections"),
+        match.get("domain_projections"),
+        value.get("domain_projections"),
+    ]
+    for domain in domain_priority:
+        for projection in projection_maps:
+            if not isinstance(projection, dict):
+                continue
+            text = str(projection.get(domain) or "").strip()
+            if text:
+                return text
+    for projection in projection_maps:
+        if not isinstance(projection, dict):
+            continue
+        for text in projection.values():
+            cleaned = str(text or "").strip()
+            if cleaned:
+                return cleaned
+    return ""
+
+
+def _compact_gyeokguk_summary_sentences(values: list[Any], *, limit: int = 2) -> str:
+    picked: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "").strip().replace("\n", " "))
+        if not text:
+            continue
+        for raw in text.split("."):
+            sentence = raw.strip()
+            if not sentence:
+                continue
+            if any(token in sentence for token in GYEOKGUK_COMPACT_SENTENCE_BLOCKLIST):
+                continue
+            if re.fullmatch(r"[가-힣·]+(으로|로) 작용한다", sentence):
+                continue
+            sentence = _clean_customer_copy_text(_fix_common_particle_text(sentence))
+            if not sentence or sentence in seen:
+                continue
+            seen.add(sentence)
+            picked.append(sentence)
+            if len(picked) >= limit:
+                return " ".join(f"{part}." for part in picked)
+    return " ".join(f"{part}." for part in picked)
+
+
+def _compact_operation_assessment(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return _compact_label_dict(
+        value,
+        (
+            "operation_type",
+            "center_judgment_axis",
+            "role_in_pattern_logic",
+            "pattern_resolution_logic",
+            "combination_resolution_logic",
+            "disease_medicine_logic",
+            "first_to_second_relation",
+            "pattern_center_bridge",
+            "exact_pair_effect",
+            "exact_pair_risk",
+            "exact_pair_timing",
+        ),
+    )
+
+
+def _compact_classical_mechanics(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        result: list[dict[str, Any]] = []
+        for tag, item in value.items():
+            if not isinstance(item, dict):
+                continue
+            compacted = _compact_label_dict(
+                item,
+                (
+                    "flow",
+                    "disease",
+                    "medicine",
+                    "principle_text",
+                    "disease_text",
+                    "medicine_text",
+                ),
+            )
+            if compacted:
+                compacted = {"tag": str(tag), **compacted}
+                events = _compact_text_list(item.get("events"), limit=6)
+                if events:
+                    compacted["events"] = events
+                result.append(compacted)
+            if len(result) >= 4:
+                break
+        return result
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        compacted = _compact_label_dict(
+            item,
+            (
+                "tag",
+                "name",
+                "mechanic",
+                "flow",
+                "disease",
+                "medicine",
+                "event",
+                "money",
+                "career",
+                "relationship",
+                "marriage",
+                "personality",
+            ),
+        )
+        if compacted:
+            result.append(compacted)
+        if len(result) >= 4:
+            break
+    return result
+
+
+def _compact_gyeokguk_action_summary(
+    value: dict[str, Any],
+    identity: dict[str, Any],
+    match: dict[str, Any],
+    first_then_second: dict[str, Any],
+) -> str:
+    real_world = value.get("real_world_projection")
+    if not isinstance(real_world, dict):
+        real_world = {}
+    domain_priority = _compact_text_list(
+        value.get("domain_priority")
+        or match.get("domain_priority")
+        or real_world.get("primary_domains"),
+        limit=4,
+    )
+    projection_text = _compact_gyeokguk_projection_text(
+        value=value,
+        match=match,
+        domain_priority=domain_priority,
+    )
+    sequence_text = str(first_then_second.get("sequence_summary") or "").strip()
+    return _compact_gyeokguk_summary_sentences(
+        [
+            projection_text,
+            identity.get("exact_pair_effect"),
+            identity.get("center_effect"),
+            match.get("expert_summary"),
+            identity.get("combination_resolution_logic"),
+            identity.get("disease_medicine_logic"),
+            match.get("pattern_resolution_logic"),
+            value.get("context_judgment_summary"),
+            sequence_text,
+        ],
+        limit=2,
+    )
+
+
+def _compact_gyeokguk_action(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    identity = value.get("action_identity")
+    if not isinstance(identity, dict):
+        identity = {}
+    activation = identity.get("activation_order_profile")
+    if not isinstance(activation, dict):
+        activation = {}
+    first_then_second = activation.get("first_then_second")
+    if not isinstance(first_then_second, dict):
+        first_then_second = {}
+    second_then_first = activation.get("second_then_first")
+    if not isinstance(second_then_first, dict):
+        second_then_first = {}
+    basis = value.get("selection_basis")
+    if not isinstance(basis, dict):
+        basis = value.get("raw_selection_basis") if isinstance(value.get("raw_selection_basis"), dict) else {}
+    role = value.get("selection_role")
+    if not isinstance(role, dict):
+        role = {}
+    axis = value.get("center_judgment_axis")
+    if not isinstance(axis, dict):
+        axis = identity.get("center_judgment_axis") if isinstance(identity.get("center_judgment_axis"), dict) else {}
+    match = value.get("match")
+    if not isinstance(match, dict):
+        match = {}
+    operation_faces = identity.get("operation_faces") if isinstance(identity.get("operation_faces"), list) else []
+    if not operation_faces and isinstance(match.get("operation_faces"), list):
+        operation_faces = match.get("operation_faces") or []
+    real_world = value.get("real_world_projection")
+    if not isinstance(real_world, dict):
+        real_world = {}
+    event_manifestations = _compact_string_map(
+        value.get("event_manifestations") or match.get("event_manifestations"),
+        limit=6,
+    )
+    domain_projections = _compact_string_map(
+        real_world.get("domain_projections") or match.get("domain_projections"),
+        limit=6,
+    )
+    interaction_judgment = _compact_string_map(
+        value.get("interaction_judgment") or match.get("interaction_judgment"),
+        limit=6,
+    )
+    visibility_interaction = _compact_string_map(
+        value.get("visibility_interaction") or match.get("visibility_interaction"),
+        limit=6,
+    )
+    exact_profile_domain_basis = identity.get("exact_profile_domain_basis")
+    exact_profile_domains = (
+        exact_profile_domain_basis.get("all")
+        if isinstance(exact_profile_domain_basis, dict)
+        else []
+    )
+    summary_interpretation = _compact_gyeokguk_action_summary(value, identity, match, first_then_second)
+    operation_assessment = _compact_operation_assessment(
+        match.get("dual_operation_assessment")
+        or match.get("single_operation_assessment")
+        or identity.get("dual_operation_assessment")
+        or identity.get("single_operation_assessment")
+    )
+    if not operation_assessment:
+        operation_assessment = {
+            "operation_type": "single_ten_god_role" if str(value.get("source") or "") == "single" else "gyeokguk_core_action",
+            "center_judgment_axis": _compact_label_dict(axis, ("code", "label", "summary", "score")),
+            "role_in_pattern_logic": str(identity.get("role_in_pattern_logic") or match.get("role_in_pattern_logic") or "").strip(),
+            "pattern_resolution_logic": str(identity.get("pattern_resolution_logic") or match.get("pattern_resolution_logic") or "").strip(),
+            "effect": str(identity.get("center_effect") or identity.get("exact_pair_effect") or "").strip(),
+            "risk": str(identity.get("exact_pair_risk") or match.get("excess_disease") or "").strip(),
+        }
+    classical_action_tags = _compact_text_list(
+        match.get("classical_action_tags") or identity.get("classical_action_tags"),
+        limit=8,
+    )
+    classical_action_mechanics = _compact_classical_mechanics(
+        match.get("classical_action_mechanics") or identity.get("classical_action_mechanics")
+    )
+    pattern_center_bridge = _compact_label_dict(
+        match.get("pattern_center_bridge") or identity.get("pattern_center_bridge"),
+        ("profile", "bridge_key", "direction", "summary", "pattern_center", "pair_category"),
+    )
+    basis_codes = _compact_text_list(
+        value.get("basis_codes") or identity.get("basis_codes") or match.get("basis_codes"),
+        limit=16,
+    )
+    counter_signals = _compact_text_list(
+        value.get("counter_signals") or identity.get("counter_signals") or match.get("counter_signals"),
+        limit=10,
+    )
+    return {
+        "title": str(value.get("title") or identity.get("exact_pair_name") or "").strip(),
+        "source": str(value.get("source") or "").strip(),
+        "role": _compact_label_dict(role, ("code", "label", "reason")),
+        "judgment_axis": _compact_label_dict(axis, ("code", "label", "summary", "score")),
+        "pattern_label": str(identity.get("pattern_label") or "").strip(),
+        "pair_name": str(identity.get("exact_pair_name") or "").strip(),
+        "pair_category": str(identity.get("exact_pair_category") or "").strip(),
+        "combination_state": str(identity.get("pattern_combination_state") or identity.get("combination_resolution_state") or "").strip(),
+        "chain_grade": str(identity.get("chain_grade") or "").strip(),
+        "chain_nature": str(identity.get("chain_nature") or "").strip(),
+        "pattern_combination_state": str(identity.get("pattern_combination_state") or "").strip(),
+        "combination_resolution_state": str(identity.get("combination_resolution_state") or "").strip(),
+        "summary_interpretation": summary_interpretation,
+        "mechanism": str(identity.get("combination_resolution_logic") or identity.get("disease_medicine_logic") or "").strip(),
+        "effect": str(identity.get("exact_pair_effect") or identity.get("center_effect") or "").strip(),
+        "risk": str(identity.get("exact_pair_risk") or match.get("excess_disease") or "").strip(),
+        "timing": str(identity.get("exact_pair_timing") or match.get("timing_activation") or "").strip(),
+        "domains": _compact_text_list(
+            activation.get("dominant_result_domain_labels")
+            or first_then_second.get("result_domain_labels")
+            or real_world.get("axis_labels")
+            or exact_profile_domains,
+            limit=6,
+        ),
+        "domain_priority": _compact_text_list(value.get("domain_priority") or match.get("domain_priority"), limit=6),
+        "domain_projection": next(iter(domain_projections.values()), ""),
+        "domain_projections": domain_projections,
+        "event_manifestations": event_manifestations,
+        "interaction_judgment": interaction_judgment,
+        "visibility_interaction": visibility_interaction,
+        "operation_assessment": operation_assessment,
+        "classical_action_tags": classical_action_tags,
+        "classical_action_mechanics": classical_action_mechanics,
+        "feature_axis_impacts": [
+            _compact_label_dict(
+                item,
+                (
+                    "source",
+                    "classical_tag",
+                    "axis_key",
+                    "axis_label",
+                    "axis_category",
+                    "current_score",
+                    "current_strength_label",
+                    "raw_score_delta",
+                    "direction",
+                    "domain_priority",
+                ),
+            )
+            for item in list(value.get("feature_axis_impacts") or [])[:8]
+            if isinstance(item, dict)
+        ],
+        "pattern_center_bridge": pattern_center_bridge,
+        "operation_faces": [
+            _compact_label_dict(face, ("label", "action", "result", "risk", "timing", "exact_nuance"))
+            for face in operation_faces[:3]
+            if isinstance(face, dict)
+        ],
+        "first_then_second": _compact_label_dict(
+            first_then_second,
+            (
+                "entry_ten_god_label",
+                "entry_operation_face",
+                "follow_ten_god_label",
+                "follow_operation_face",
+                "sequence_summary",
+            ),
+        ),
+        "second_then_first": _compact_label_dict(
+            second_then_first,
+            (
+                "entry_ten_god_label",
+                "entry_operation_face",
+                "follow_ten_god_label",
+                "follow_operation_face",
+                "sequence_summary",
+            ),
+        ),
+        "score": value.get("center_score") or value.get("flow_activation_score") or value.get("selection_adjusted_score"),
+        "basis_steps": _compact_basis_steps(basis),
+        "basis_codes": basis_codes,
+        "counter_signals": counter_signals,
+    }
+
+
+def _compact_ten_god_action_match(value: Any, *, source: str = "") -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compacted = _compact_gyeokguk_action(value)
+    if compacted.get("title") or compacted.get("pair_name"):
+        return compacted
+    source_key = str(source or value.get("source") or "").strip()
+    pattern_label = str(
+        value.get("pattern_label")
+        or value.get("pattern_ten_god_label")
+        or value.get("pattern")
+        or ""
+    ).strip()
+    title = ""
+    if source_key == "dual":
+        title = str(
+            value.get("exact_pair_name")
+            or value.get("exact_pair_key")
+            or value.get("sequence_key")
+            or value.get("rule_key")
+            or ""
+        ).strip()
+    if not title:
+        acting_label = str(value.get("acting_ten_god_label") or value.get("acting_ten_god") or "").strip()
+        title = f"{acting_label} 중심 작용" if acting_label else str(value.get("rule_key") or "").strip()
+    domains = _compact_text_list(value.get("domain_priority"), limit=6)
+    summary = _compact_gyeokguk_summary_sentences(
+        [
+            value.get("context_judgment_summary"),
+            value.get("expert_summary"),
+            value.get("exact_pair_effect"),
+            value.get("center_effect"),
+            value.get("role_in_pattern_logic"),
+            value.get("pattern_resolution_logic"),
+            value.get("combination_resolution_logic"),
+        ],
+        limit=2,
+    )
+    return {
+        "title": title,
+        "source": source_key or "ten_god",
+        "pattern_label": pattern_label,
+        "pair_name": title,
+        "summary_interpretation": summary,
+        "mechanism": str(value.get("role_in_pattern_logic") or value.get("actor_hierarchy_logic") or "").strip(),
+        "effect": str(value.get("exact_pair_effect") or value.get("center_effect") or "").strip(),
+        "risk": str(value.get("exact_pair_risk") or value.get("excess_disease") or value.get("deficiency_gap") or "").strip(),
+        "timing": str(value.get("exact_pair_timing") or value.get("timing_activation") or "").strip(),
+        "domains": domains,
+        "domain_projection": _compact_gyeokguk_projection_text(
+            value=value,
+            match=value,
+            domain_priority=domains,
+        ),
+        "event_manifestations": _compact_string_map(value.get("event_manifestations"), limit=6),
+        "domain_projections": _compact_string_map(value.get("domain_projections"), limit=6),
+        "interaction_judgment": _compact_string_map(value.get("interaction_judgment"), limit=6),
+        "visibility_interaction": _compact_string_map(value.get("visibility_interaction"), limit=6),
+        "month_fit_state": value.get("month_fit_state"),
+        "verdict": value.get("verdict"),
+        "presence_score": value.get("presence_score"),
+        "basis_codes": _compact_text_list(value.get("basis_codes"), limit=10),
+    }
+
+
+def _direction_pair_label(key: Any, mapper: Any) -> str:
+    text = str(key or "").strip()
+    if "->" not in text:
+        return ""
+    left, right = text.split("->", 1)
+    left_label = str(mapper(left) or "").strip()
+    right_label = str(mapper(right) or "").strip()
+    if not (left_label and right_label):
+        return ""
+    return f"{left_label}→{right_label}"
+
+
+def _integrated_signal_summary(value: dict[str, Any]) -> str:
+    element_direction = _direction_pair_label(value.get("element_direction_key"), _element_label)
+    ten_god_direction = _direction_pair_label(value.get("ten_god_direction_key"), _ten_god_label)
+    ten_key = str(value.get("ten_god_direction_key") or "").strip()
+    ten_rule_text = ""
+    if "->" in ten_key:
+        source, target = ten_key.split("->", 1)
+        rule = TEN_GOD_DIRECTION_RULES.get((source, target))
+        if isinstance(rule, dict):
+            ten_rule_text = str(rule.get("interpretation") or "").strip()
+    parts: list[str] = []
+    if element_direction and ten_god_direction:
+        parts.append(f"오행에서는 {element_direction} 생극이 드러나고, 십신에서는 {ten_god_direction} 관계가 동시에 나타납니다.")
+    elif ten_god_direction:
+        parts.append(f"십신에서는 {ten_god_direction} 관계가 중심에 놓입니다.")
+    elif element_direction:
+        parts.append(f"오행에서는 {element_direction} 생극이 먼저 드러납니다.")
+    traits = _compact_text_list(value.get("trait_keywords"), limit=3)
+    domain_labels = _compact_text_list(_domain_labels(value.get("domain_links")), limit=3)
+    if traits and domain_labels:
+        parts.append(f"{'·'.join(traits)} 성향은 {'·'.join(domain_labels)}에서 선택과 대응의 기준으로 나타납니다.")
+    elif traits:
+        parts.append(f"{'·'.join(traits)} 성향이 선택 방식으로 드러납니다.")
+    elif domain_labels:
+        parts.append(f"{'·'.join(domain_labels)}에서 실제 선택의 기준으로 나타납니다.")
+    if ten_rule_text:
+        parts.append(ten_rule_text)
+    else:
+        parts.append(str(value.get("combined_interpretation") or value.get("core_interpretation") or "").strip())
+    summary = " ".join(part for part in parts if part)
+    return _clean_customer_copy_text(summary)
+
+
+def _compact_engine_signal(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out = _compact_label_dict(
+        value,
+        (
+            "signal_id",
+            "layer",
+            "title",
+            "classical_name",
+            "relation_type",
+            "relation",
+            "direction_key",
+            "element_direction_key",
+            "ten_god_direction_key",
+            "combination_key",
+            "strength",
+            "polarity",
+            "cycle_judgment_label",
+            "month_command_verdict_label",
+            "decision_reason",
+            "source_rule",
+            "source_position",
+            "target_position",
+            "position",
+        ),
+    )
+    for key in ("domain_links", "trait_keywords", "basis_codes", "counter_signals", "elements", "ten_gods", "stems", "branches"):
+        if key in value:
+            out[key] = _compact_text_list(value.get(key), limit=8)
+    for key in (
+        "interpretation",
+        "element_interpretation",
+        "core_interpretation",
+        "combined_interpretation",
+        "felt_experience",
+        "behavior_tendency",
+        "sentence",
+        "classical_theory",
+    ):
+        text = str(value.get(key) or "").strip()
+        if text:
+            out[key] = text
+    integrated_summary = _integrated_signal_summary(value)
+    if integrated_summary:
+        out["summary_interpretation"] = integrated_summary
+    return out
+
+
+def _element_materiality_with_dictionary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result = dict(value)
+    element_key = _element_combination_dictionary_key(
+        value.get("element_pair_label"),
+        value.get("interpretation"),
+    )
+    if not element_key:
+        return result
+    exact_text = _element_combination_source_text(element_key)
+    exact_keywords = core_keywords_for_exact_section(
+        element_key,
+        file_name_contains="오행배합",
+        limit=12,
+    )
+    if exact_text:
+        result["dictionary_description"] = exact_text
+    if exact_keywords:
+        result["dictionary_keywords"] = exact_keywords
+    return result
+
+
+def _compact_domain_facet(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out = _compact_label_dict(
+        value,
+        (
+            "domain",
+            "domain_label",
+            "score",
+            "grade",
+            "grade_label",
+            "summary",
+            "headline",
+            "primary_judgment",
+            "caution_judgment",
+            "basis_summary",
+        ),
+    )
+    for key in ("strong_axes", "caution_axes", "basis_codes", "keywords", "event_targets"):
+        if key in value:
+            out[key] = _compact_text_list(value.get(key), limit=8)
+    return out
+
+
+def _compact_domain_item(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out = _compact_label_dict(
+        value,
+        (
+            "key",
+            "label",
+            "meaning",
+            "score",
+            "value",
+            "pressure_score",
+            "pressure_level",
+            "has_pressure",
+        ),
+    )
+    for key in (
+        "layer_coverage",
+        "raw_layer_coverage",
+        "pressure_reasons",
+        "basis_codes",
+        "counter_signals",
+    ):
+        if key in value:
+            out[key] = _compact_text_list(value.get(key), limit=10)
+    for source_key, target_key in (
+        ("cycle_sources", "cycle_sources"),
+        ("principle_edges", "principle_edges"),
+        ("gyeokguk_action_sources", "gyeokguk_action_sources"),
+    ):
+        sources = value.get(source_key)
+        if not isinstance(sources, list):
+            continue
+        out[target_key] = [
+            _compact_engine_signal(source)
+            if source_key != "gyeokguk_action_sources"
+            else _compact_label_dict(
+                source,
+                (
+                    "source",
+                    "title",
+                    "presence_score",
+                    "month_fit_state",
+                    "context_judgment_state",
+                    "domain_projection",
+                    "salience",
+                ),
+            )
+            for source in sources[:3]
+            if isinstance(source, dict)
+        ]
+    return out
+
+
+def _compact_domain_contract_value(value: Any) -> dict[str, Any]:
+    if isinstance(value, list):
+        items = [_compact_domain_item(item) for item in value[:8] if isinstance(item, dict)]
+        items = [item for item in items if item]
+        if not items:
+            return {}
+        return {
+            "items": items,
+            "top_labels": [str(item.get("label") or "") for item in items[:4] if item.get("label")],
+            "scores": [
+                {"key": item.get("key"), "label": item.get("label"), "score": item.get("score"), "value": item.get("value")}
+                for item in items
+            ],
+        }
+    if isinstance(value, dict):
+        return _compact_domain_facet(value)
+    return {}
+
+
+CONTEXTUAL_VARIATION_DOMAIN_ALIASES: dict[str, tuple[str, ...]] = {
+    "personality": ("personality", "self", "career", "reputation"),
+    "money": ("money",),
+    "career": ("career", "reputation"),
+    "love": ("relationship", "love"),
+    "marriage": ("marriage", "relationship"),
+    "life": ("money", "career", "relationship", "marriage", "reputation"),
+    "honor": ("reputation", "career"),
+    "social": ("relationship", "reputation", "career"),
+    "timing": ("money", "career", "relationship", "marriage", "reputation"),
+}
+
+
+CONTEXTUAL_VARIATION_PRIMARY_ALIASES: dict[str, tuple[str, ...]] = {
+    "personality": ("personality", "self"),
+    "money": ("money",),
+    "career": ("career",),
+    "love": ("love", "relationship"),
+    "marriage": ("marriage",),
+    "life": ("life",),
+    "honor": ("honor", "reputation"),
+    "social": ("social", "relationship"),
+    "timing": ("timing",),
+}
+
+
+CONTEXTUAL_VARIATION_DOMAIN_LABELS: dict[str, str] = {
+    "personality": "성격",
+    "money": "재물",
+    "career": "직업",
+    "love": "연애",
+    "marriage": "결혼",
+    "life": "인생 구간",
+    "honor": "명예",
+    "social": "대인관계",
+    "timing": "시기운",
+}
+
+
+CONTEXTUAL_VARIATION_DOMAIN_SENTENCES: dict[str, str] = {
+    "personality": "성격에서는 판단 기준, 책임감, 감정 처리 방식이 먼저 드러납니다.",
+    "money": "재물은 수입의 크기보다 돈이 누구의 권리로 남는가에서 차이가 납니다.",
+    "career": "직업운은 맡은 역할이 평가, 권한, 보상으로 이어질 때 강해집니다.",
+    "love": "연애는 첫 끌림보다 표현의 일관성과 신뢰 확인에서 안정 여부가 갈립니다.",
+    "marriage": "결혼은 애정의 깊이보다 생활 기준, 가족 책임, 재정 합의에서 성패가 갈립니다.",
+    "life": "인생 구간에서는 사회적 책임과 현실 선택이 커지는 때에 영향이 뚜렷합니다.",
+    "honor": "명예운은 평판이 공식 평가와 직함으로 이어질 때 힘을 얻습니다.",
+    "social": "대인관계는 호감보다 신뢰, 거리, 책임의 경계에서 오래갑니다.",
+    "timing": "시기운은 원국의 장점이 살아나는 해와 부담이 드러나는 해를 나누어 잡습니다.",
+}
+
+
+CONTEXTUAL_VARIATION_DOMAIN_ACTIONS: dict[str, str] = {
+    "personality": "큰 선택일수록 기분보다 책임 소재와 남는 결과를 먼저 정리해야 합니다.",
+    "money": "돈이 커질수록 명의, 지분, 지급일, 회수 조건을 먼저 확정해야 합니다.",
+    "career": "역할이 커질수록 결재권, 평가권, 보상 기준을 함께 확보해야 합니다.",
+    "love": "마음이 깊어질수록 상대가 확인할 수 있는 말과 행동을 늦추지 않아야 합니다.",
+    "marriage": "결혼은 생활비, 주거, 양가 책임의 선이 분명할 때 안정됩니다.",
+    "life": "인생의 전환기에는 새로 벌이는 일보다 책임 범위와 남는 결과를 먼저 잡아야 합니다.",
+    "honor": "평판이 커지는 시기에는 직함보다 공식 기록과 책임 범위를 분명히 해야 합니다.",
+    "social": "가까운 관계일수록 호의와 책임의 선을 초반에 보여야 오래갑니다.",
+    "timing": "좋은 해에는 성과를 확정하고, 주의 해에는 계약과 책임 범위를 좁혀야 합니다.",
+}
+
+
+CONTEXTUAL_VARIATION_CLIMATE_SENTENCES: dict[str, dict[str, str]] = {
+    "support": {
+        "personality": "조후가 받쳐 판단이 날카로워도 태도가 과해지지 않습니다.",
+        "money": "조후가 받쳐 돈이 생긴 뒤에도 회수와 보유 과정이 안정됩니다.",
+        "career": "조후가 받쳐 역할이 커져도 속도와 지속력이 무너지지 않습니다.",
+        "love": "조후가 받쳐 감정의 온도가 일정하고 관계가 쉽게 급해지지 않습니다.",
+        "marriage": "조후가 받쳐 생활 기준과 감정의 온도가 함께 안정됩니다.",
+        "life": "조후가 받쳐 전환기에도 선택을 마무리하는 힘이 살아납니다.",
+        "honor": "조후가 받쳐 평판이 과열되지 않고 공식 인정으로 정리됩니다.",
+        "social": "조후가 받쳐 가까운 관계에서도 말의 온도와 거리가 안정됩니다.",
+        "timing": "조후가 맞는 해에는 성과가 급하게 흩어지지 않고 확정됩니다.",
+    },
+    "burden": {
+        "personality": "조후가 맞지 않아 판단은 분명해도 반응이 경직되기 쉽습니다.",
+        "money": "조후가 맞지 않아 수입보다 보유 과정에서 소모가 커집니다.",
+        "career": "조후가 맞지 않아 책임은 커지지만 지속력과 체력이 먼저 흔들립니다.",
+        "love": "조후가 맞지 않아 마음은 있어도 표현의 온도가 어긋납니다.",
+        "marriage": "조후가 맞지 않아 생활 조건을 갖춰도 정서적 안정이 늦어집니다.",
+        "life": "조후가 맞지 않은 구간에서는 성취보다 소모가 먼저 드러납니다.",
+        "honor": "조후가 맞지 않아 평판이 올라가도 부담과 구설이 함께 따라붙습니다.",
+        "social": "조후가 맞지 않아 가까운 관계일수록 말의 강도가 세집니다.",
+        "timing": "조후가 맞지 않는 해에는 성과를 키우기보다 손실을 줄이는 판단이 먼저입니다.",
+    },
+}
+
+
+CONTEXTUAL_VARIATION_CLIMATE_ACTIONS: dict[str, dict[str, str]] = {
+    "support": {
+        "personality": "결정을 미루기보다 판단 기준을 글로 정리하면 장점이 더 분명해집니다.",
+        "money": "수입이 생긴 뒤에는 회수일과 소유권을 먼저 굳히는 쪽이 맞습니다.",
+        "career": "역할이 커질 때는 권한과 평가 기준을 함께 받아야 합니다.",
+        "love": "관계가 깊어질수록 감정 표현의 속도를 일정하게 가져가는 편이 좋습니다.",
+        "marriage": "생활비와 책임 범위를 초반에 정하면 결혼 안정성이 오래 갑니다.",
+        "life": "전환기에는 새 선택보다 마무리와 정착을 먼저 잡아야 합니다.",
+        "honor": "평판이 붙을 때는 말보다 공식 기록과 결과물을 남겨야 합니다.",
+        "social": "가까운 관계일수록 약속의 범위를 분명히 하면 신뢰가 오래갑니다.",
+        "timing": "좋은 해에는 성과를 밖으로 드러내고 계약과 기록을 남겨야 합니다.",
+    },
+    "burden": {
+        "personality": "문제가 커질 때는 결론보다 말의 강도를 먼저 낮춰야 합니다.",
+        "money": "현금이 움직일 때는 지출 규모보다 회수일과 명의부터 확정해야 합니다.",
+        "career": "책임이 늘어날수록 권한 없는 업무를 오래 떠안지 않아야 합니다.",
+        "love": "감정이 커질수록 즉답보다 표현의 일관성을 먼저 지켜야 합니다.",
+        "marriage": "생활 문제가 커질수록 가족 책임과 재정 범위를 나누어야 합니다.",
+        "life": "전환기에는 확장보다 체력, 시간, 책임의 한계를 먼저 보아야 합니다.",
+        "honor": "평판이 흔들릴 때는 해명보다 기록과 절차를 먼저 확보해야 합니다.",
+        "social": "관계가 가까워질수록 부탁과 책임의 선을 초반에 잘라야 합니다.",
+        "timing": "주의 해에는 새 약속보다 기존 계약과 책임 범위를 줄여야 합니다.",
+    },
+}
+
+
+def _contextual_variation_climate_direction(match: dict[str, Any]) -> str:
+    delta = match.get("climate_delta")
+    if not isinstance(delta, int) or abs(delta) < 2:
+        return ""
+    return "support" if delta > 0 else "burden"
+
+
+def _contextual_variation_climate_sentence(domain: str, match: dict[str, Any]) -> str:
+    direction = _contextual_variation_climate_direction(match)
+    if not direction:
+        return ""
+    return CONTEXTUAL_VARIATION_CLIMATE_SENTENCES.get(direction, {}).get(str(domain or ""), "")
+
+
+def _contextual_variation_has_climate_state_conflict(state: str, match: dict[str, Any]) -> bool:
+    climate_direction = _contextual_variation_climate_direction(match)
+    state = str(state or "")
+    return (
+        climate_direction == "burden"
+        and state in {"support", "clear"}
+    ) or (
+        climate_direction == "support"
+        and state in {"burden", "unstable"}
+    )
+
+
+def _contextual_variation_domain_action(domain: str, match: dict[str, Any]) -> str:
+    base_action = CONTEXTUAL_VARIATION_DOMAIN_ACTIONS.get(domain, _domain_default_action_sentence(domain))
+    direction = _contextual_variation_climate_direction(match)
+    climate_action = CONTEXTUAL_VARIATION_CLIMATE_ACTIONS.get(direction, {}).get(str(domain or ""), "")
+    if not climate_action:
+        return base_action
+    return _clean_customer_copy_text(_join_profile_sentences(climate_action, base_action))
+
+
+def _contextual_variation_domain_match(variation: dict[str, Any], domain: str) -> dict[str, Any]:
+    if not isinstance(variation, dict):
+        return {}
+    aliases = CONTEXTUAL_VARIATION_DOMAIN_ALIASES.get(str(domain or ""), (str(domain or ""),))
+    tilts = variation.get("domain_tilt")
+    if not isinstance(tilts, list):
+        return {}
+    primary_aliases = CONTEXTUAL_VARIATION_PRIMARY_ALIASES.get(str(domain or ""), (str(domain or ""),))
+    for item in tilts:
+        if not isinstance(item, dict):
+            continue
+        item_domain = str(item.get("domain") or "")
+        if item_domain in aliases:
+            matched = _compact_label_dict(
+                item,
+                (
+                    "domain",
+                    "label",
+                    "state",
+                    "net",
+                    "total",
+                    "score_delta",
+                    "reception_delta",
+                    "materiality_delta",
+                    "climate_delta",
+                    "reason",
+                ),
+            )
+            matched["match_strength"] = "primary" if item_domain in primary_aliases else "secondary"
+            return matched
+    return {}
+
+
+def _contextual_variation_primary_domains(variation: dict[str, Any]) -> tuple[str, ...]:
+    group = str(variation.get("primary_group") or "")
+    return {
+        "peer": ("personality", "social", "money"),
+        "output": ("career", "money", "love"),
+        "wealth": ("money", "marriage"),
+        "officer": ("career", "honor", "marriage"),
+        "resource": ("personality", "career", "social"),
+    }.get(group, ())
+
+
+def _contextual_variation_domain_tone(variation: dict[str, Any], match: dict[str, Any], domain: str = "") -> str:
+    variation_state = str(variation.get("variation_state") or "")
+    match_state = str(match.get("state") or "")
+    match_delta = _contextual_variation_effective_match_delta(match)
+    if isinstance(match_delta, int):
+        if match_delta >= 3:
+            return "good"
+        if match_delta <= -3:
+            return "watch"
+        if str(match.get("match_strength") or "") == "secondary":
+            return "neutral"
+    if match_state in {"burden", "pressure", "caution"}:
+        return "watch"
+    if match_state == "support" and str(match.get("match_strength") or "primary") == "primary":
+        return "good"
+    primary_domains = _contextual_variation_primary_domains(variation)
+    is_primary_domain = str(domain or "") in primary_domains
+    if variation_state in {"burden", "unstable"}:
+        return "watch" if is_primary_domain else "neutral"
+    if variation_state in {"support", "clear"} and is_primary_domain:
+        return "good"
+    return "neutral"
+
+
+def _contextual_variation_effective_match_delta(match: dict[str, Any]) -> int | None:
+    raw_delta = match.get("score_delta")
+    if not isinstance(raw_delta, int):
+        return None
+    delta = max(-8, min(8, raw_delta))
+    if str(match.get("match_strength") or "primary") == "secondary":
+        return max(-3, min(3, round(delta * 0.35)))
+    return delta
+
+
+def _contextual_variation_effect_state(variation: dict[str, Any], match: dict[str, Any], domain: str = "") -> str:
+    match_state = str(match.get("state") or "")
+    match_delta = _contextual_variation_effective_match_delta(match)
+    if isinstance(match_delta, int):
+        if match_delta > 0:
+            return "support"
+        if match_delta < 0:
+            return "burden"
+        if str(match.get("match_strength") or "") == "secondary":
+            return "mixed"
+    if match_state == "mixed":
+        return "mixed"
+    if match_state in {"support", "burden", "pressure", "caution"} and str(match.get("match_strength") or "primary") == "primary":
+        return "burden" if match_state in {"pressure", "caution"} else match_state
+    tone = _contextual_variation_domain_tone(variation, match, domain)
+    if tone == "good":
+        return "support"
+    if tone == "watch":
+        return "burden"
+    return str(variation.get("variation_state") or "mixed")
+
+
+def _contextual_variation_score_delta(variation: dict[str, Any], match: dict[str, Any], domain: str = "") -> int:
+    match_delta = _contextual_variation_effective_match_delta(match)
+    if isinstance(match_delta, int):
+        return match_delta
+    tone = _contextual_variation_domain_tone(variation, match, domain)
+    if tone == "good":
+        return 3
+    if tone == "watch":
+        return -3
+    return 0
+
+
+def _contextual_variation_relation_sentence(relation: str) -> str:
+    relation = str(relation or "").strip()
+    if not relation:
+        return ""
+    if relation == "월령과 같은 오행":
+        return "월지와 격국이 같은 기운으로 서 있어, 이 판단은 현실에서 빠르게 드러납니다."
+    if relation == "월령이 생하는 오행":
+        return "월령이 해당 기운을 밀어주기 때문에 장점이 현실에서 살아나기 쉽습니다."
+    if relation == "월령을 생하는 오행":
+        return "사주의 힘이 월령 쪽으로 빠져나가므로 성과와 부담이 함께 커집니다."
+    if relation == "월령이 극하는 오행":
+        return "월령의 압박을 받는 기운이라, 결과가 나오기 전까지 제약이 먼저 붙습니다."
+    if relation == "월령을 극하는 오행":
+        return "월령의 힘을 제어하려는 기운이라, 균형을 잡으면 강점이 되고 과하면 충돌이 됩니다."
+    if "격국 작용을 제어" in relation:
+        return "월령이 이 기운을 바로 받쳐주지는 않아, 결과가 나기 전 조율 과정이 따릅니다."
+    if relation.endswith("관계") or relation.endswith("오행"):
+        return f"{relation}입니다."
+    if relation.endswith("작용"):
+        return f"{relation}입니다."
+    return f"{relation}로 드러납니다."
+
+
+def _contextual_variation_materiality_sentence(domain: str, variation: dict[str, Any]) -> str:
+    materiality = variation.get("elemental_materiality") if isinstance(variation.get("elemental_materiality"), dict) else {}
+    relation_label = _screen_text(materiality.get("relation_type_label") if materiality else "")
+    pair = _screen_text(materiality.get("element_pair_label") if materiality else "")
+    label = _contextual_variation_materiality_label(variation)
+    marker = relation_label or label
+    if not marker and not pair:
+        return ""
+    if "토수" in marker or "현금" in marker or "조절" in marker:
+        by_domain = {
+            "money": "현금 운용과 책임 지출이 함께 움직이므로, 돈은 들어오는 경로보다 묶어두는 방식에서 차이가 납니다.",
+            "career": "실무 범위와 책임 부담이 함께 커지므로, 직업운은 권한과 보상 기준이 잡힐 때 안정됩니다.",
+            "love": "감정이 깊어져도 현실 부담을 함께 계산하므로, 관계는 신뢰와 확인 절차에서 안정됩니다.",
+            "marriage": "생활비와 가족 책임이 동시에 올라오기 쉬워, 결혼은 재정 합의가 늦으면 피로가 커집니다.",
+            "personality": "감정보다 책임과 손익을 먼저 계산하는 성향이 강해집니다.",
+        }
+        return by_domain.get(domain, "현실 부담과 정리 능력이 함께 작동하는 배합입니다.")
+    if "화토" in marker or "평판" in marker or "기반" in marker:
+        by_domain = {
+            "money": "표현과 성과가 신뢰로 굳어질 때 재물이 자산으로 남습니다.",
+            "career": "드러난 성과가 평판과 직책으로 굳어지는 힘이 있습니다.",
+            "love": "표현이 따뜻하고 꾸준할 때 관계의 신뢰가 빠르게 쌓입니다.",
+            "marriage": "생활의 온도와 책임감이 맞으면 결혼 안정성이 높아집니다.",
+            "personality": "밖으로 드러나는 태도와 책임감이 사람들에게 신뢰로 남습니다.",
+        }
+        return by_domain.get(domain, "드러난 성과가 기반으로 굳어지는 배합입니다.")
+    if "목화" in marker or "표현" in marker or "성장" in marker:
+        by_domain = {
+            "money": "생각과 재능을 밖으로 내놓을수록 수입 기회가 열립니다.",
+            "career": "기획, 발표, 설득처럼 밖으로 드러나는 업무에서 강점이 큽니다.",
+            "love": "호감은 빠르게 생기지만 표현의 지속성이 관계를 결정합니다.",
+            "marriage": "대화와 생활 계획이 함께 살아날 때 결혼 이야기가 구체화됩니다.",
+            "personality": "생각을 말과 행동으로 빠르게 옮기는 성향이 강합니다.",
+        }
+        return by_domain.get(domain, "생각이 표현과 활동으로 이어지는 배합입니다.")
+    if "금수" in marker or "분석" in marker or "유통" in marker:
+        by_domain = {
+            "money": "정보와 계산이 맞을 때 거래와 회수 판단이 좋아집니다.",
+            "career": "분석, 문서, 전략 업무에서 직업적 값이 올라갑니다.",
+            "love": "감정보다 말의 정확성과 신뢰 확인을 중시합니다.",
+            "marriage": "결혼은 감정보다 현실 조건을 꼼꼼히 맞출수록 안정됩니다.",
+            "personality": "관찰과 판단이 빠르며, 불분명한 일은 쉽게 넘기지 않습니다.",
+        }
+        return by_domain.get(domain, "분석과 정보 처리 성향이 강하게 작동하는 배합입니다.")
+    if "동일 오행" in marker or "반복" in marker:
+        by_domain = {
+            "personality": "자기 기준이 선명하고 쉽게 흔들리지 않는 성향이 강합니다.",
+            "money": "재물 판단이 빠른 대신, 돈의 방향이 한쪽으로 쏠리기 쉽습니다.",
+            "career": "전문성, 규칙, 평가 기준이 분명한 자리에서 직업적 강점이 살아납니다.",
+            "love": "호불호가 분명해 관계에서도 확신이 없으면 거리감이 빨리 생깁니다.",
+            "marriage": "생활 기준이 분명한 대신, 맞지 않는 조건은 오래 넘기기 어렵습니다.",
+            "life": "인생의 선택이 한 방향으로 굳어지는 때가 분명합니다.",
+            "honor": "평판이 한번 굳어지면 쉽게 흔들리지 않는 편입니다.",
+            "social": "관계에서도 기준이 분명해, 맞는 사람과 맞지 않는 사람이 뚜렷하게 갈립니다.",
+            "timing": "같은 성격의 사건이 반복되며 강점과 부담이 함께 커질 수 있습니다.",
+        }
+        return by_domain.get(domain, "한쪽 기운이 겹쳐 장점은 선명하지만, 같은 문제도 반복되기 쉽습니다.")
+    if "상극" in marker:
+        return "충돌처럼 보이는 힘이 있으나, 기준을 세우면 제어력과 분별력으로 바뀝니다."
+    if "반복" in marker:
+        return "한쪽 기운이 겹쳐 장점은 선명하지만, 같은 문제도 반복되기 쉽습니다."
+    return f"{marker}이 이 영역의 실제 양상을 보정합니다."
+
+
+def _contextual_variation_state_sentence(domain: str, state: str) -> str:
+    state = str(state or "")
+    if state in {"support", "clear"}:
+        return {
+            "personality": "판단과 실행이 한 방향으로 모일 때 장점이 선명해집니다.",
+            "money": "수입과 소유권이 같은 방향으로 잡히면 재물이 빠르게 남습니다.",
+            "career": "성과와 평가가 같은 방향으로 묶이면 경력 상승이 빠릅니다.",
+            "love": "마음과 표현이 같은 방향으로 움직이면 관계가 안정됩니다.",
+            "marriage": "애정과 생활 기준이 맞으면 결혼이 현실적으로 굳어집니다.",
+            "life": "선택과 책임이 같은 방향으로 잡힐 때 인생의 다음 단계가 열립니다.",
+            "honor": "평판과 공식 평가가 맞물리면 명예가 뚜렷하게 올라갑니다.",
+            "social": "호의와 신뢰가 같은 방향으로 쌓이면 오래 가는 인연이 됩니다.",
+            "timing": "원국의 강점이 운에서 다시 살아나면 결과를 확정하기 좋습니다.",
+        }.get(domain, "강점이 한 방향으로 모이기 때문에 결과를 확정하기 좋은 편입니다.")
+    if state in {"burden", "unstable"}:
+        return {
+            "personality": "부담이 커질수록 내 책임과 남의 책임을 분리해야 합니다.",
+            "money": "돈이 커질수록 수입, 지출, 소유권을 따로 분리해야 합니다.",
+            "career": "성과가 커질수록 권한과 책임 범위를 따로 분리해야 합니다.",
+            "love": "마음이 깊어질수록 애정 표현과 현실 부담을 따로 보아야 합니다.",
+            "marriage": "결혼 이야기가 구체화될수록 돈과 가족 책임을 따로 정리해야 합니다.",
+            "life": "전환기가 커질수록 새 선택과 기존 책임을 분리해야 합니다.",
+            "honor": "평판이 커질수록 명예와 책임 기록을 함께 관리해야 합니다.",
+            "social": "관계가 가까워질수록 호의와 책임을 분리해야 합니다.",
+            "timing": "운이 크게 움직이는 해일수록 성과와 부담을 함께 확인해야 합니다.",
+        }.get(domain, "강점이 있어도 결과가 커질수록 손실과 책임을 따로 분리해야 합니다.")
+    return ""
+
+
+def _contextual_variation_body_state_sentence(domain: str, state: str, match: dict[str, Any]) -> str:
+    state = str(state or "")
+    climate_direction = _contextual_variation_climate_direction(match)
+    if climate_direction == "burden" and state in {"support", "clear"}:
+        return {
+            "personality": "조후 부담이 있어 기본 판단력은 살아 있으나, 부담이 커지면 말과 태도가 단단해집니다.",
+            "money": "조후 부담이 있어 재물운 자체는 살아 있으나, 돈을 보유하는 과정에서 소모가 따릅니다.",
+            "career": "조후 부담이 있어 직업운 자체는 살아 있으나, 역할이 커질수록 체력과 지속력을 따로 관리해야 합니다.",
+            "love": "조후 부담이 있어 인연운 자체는 살아 있으나, 표현의 온도가 어긋나 오해가 생기기 쉽습니다.",
+            "marriage": "조후 부담이 있어 결혼운 자체는 살아 있으나, 생활 조건을 갖춰도 정서적 안정은 늦어질 수 있습니다.",
+            "life": "조후 부담이 있어 성취운 자체는 살아 있으나, 전환기마다 소모도 함께 커집니다.",
+            "honor": "조후 부담이 있어 명예운 자체는 살아 있으나, 평판이 오를수록 부담과 구설도 함께 붙습니다.",
+            "social": "조후 부담이 있어 관계운 자체는 살아 있으나, 가까운 사람에게 말의 강도가 세질 수 있습니다.",
+            "timing": "좋은 해에도 성과 확정과 손실 관리를 함께 보아야 합니다.",
+        }.get(domain, "")
+    if climate_direction == "support" and state in {"burden", "unstable"}:
+        return {
+            "personality": "조후가 받쳐 부담은 있어도 판단의 균형을 되찾는 힘이 남아 있습니다.",
+            "money": "조후가 받쳐 부담은 있어도 회수와 보유 기준을 세우면 재물 손실이 줄어듭니다.",
+            "career": "조후가 받쳐 부담은 있어도 역할과 권한이 맞으면 직업적 소모가 줄어듭니다.",
+            "love": "조후가 받쳐 부담은 있어도 표현의 온도를 맞추면 관계가 빠르게 정리됩니다.",
+            "marriage": "조후가 받쳐 부담은 있어도 생활 기준을 맞추면 결혼 안정성이 회복됩니다.",
+            "life": "조후가 받쳐 부담은 있어도 시기의 균형이 맞으면 전환을 감당할 수 있습니다.",
+            "honor": "조후가 받쳐 부담은 있어도 절차와 기록이 갖춰지면 평판 손상이 줄어듭니다.",
+            "social": "조후가 받쳐 부담은 있어도 거리와 책임이 분명하면 관계가 오래 갑니다.",
+            "timing": "주의 해라도 균형이 맞으면 손실을 줄이고 결과를 지킬 수 있습니다.",
+        }.get(domain, "")
+    return _contextual_variation_state_sentence(domain, state)
+
+
+def _contextual_variation_domain_opening(domain: str, first: str, domain_heading: str) -> str:
+    by_domain = {
+        "personality": f"{first}은 판단 기준이 세워지는 방식을 뚜렷하게 만듭니다.",
+        "money": f"{first}은 재물이 내 몫으로 확정되는 방식을 먼저 움직입니다.",
+        "career": f"{first}은 직업에서 책임이 붙는 방식을 결정합니다.",
+        "love": f"{first}은 어떤 사람에게 끌리는지를 정합니다.",
+        "marriage": f"{first}은 결혼 뒤 생활 기준이 굳어지는 방식을 가릅니다.",
+        "life": f"{first}은 어느 시기에 성취가 두드러지는지 구분합니다.",
+        "honor": f"{first}은 공식 인정이 붙는 방식을 결정합니다.",
+        "social": f"{first}은 대인관계에서 거리감이 정해지는 기준이 됩니다.",
+        "timing": f"{first}은 좋은 해와 주의할 해가 갈리는 기준이 됩니다.",
+    }
+    return by_domain.get(domain, f"{first}은 {domain_heading}의 강점과 부담이 갈리는 기준이 됩니다.")
+
+
+def _contextual_variation_domain_body(
+    domain: str,
+    variation: dict[str, Any],
+    match: dict[str, Any],
+    effect_state: str = "",
+) -> str:
+    pattern = str(variation.get("primary_pattern_label") or variation.get("primary_pattern") or "격국").strip()
+    season = str(variation.get("season_display") or variation.get("season_label") or "").strip()
+    element = str(variation.get("pattern_element_label") or "").strip()
+    relation = str(variation.get("month_pattern_relation_label") or "").strip()
+    domain_heading = {
+        "personality": "성향",
+        "money": "재물운",
+        "career": "직업운",
+        "love": "연애운",
+        "marriage": "결혼운",
+        "life": "인생 흐름",
+        "honor": "명예운",
+        "social": "대인관계운",
+        "timing": "시기운",
+    }.get(domain, CONTEXTUAL_VARIATION_DOMAIN_LABELS.get(domain, DOMAIN_LABEL_BY_KEY.get(domain, "운세")))
+    domain_sentence = CONTEXTUAL_VARIATION_DOMAIN_SENTENCES.get(domain, "격국과 월령이 이 영역의 강점과 부담을 함께 가릅니다.")
+    first_parts = [pattern]
+    if season:
+        first_parts.append(f"{season} 월령")
+    if element:
+        first_parts.append(f"{element} 기운")
+    first = " · ".join(first_parts)
+    relation_sentence = _contextual_variation_relation_sentence(relation)
+    materiality_sentence = _contextual_variation_materiality_sentence(domain, variation)
+    state = effect_state or _contextual_variation_effect_state(variation, match, domain)
+    climate_sentence = "" if _contextual_variation_has_climate_state_conflict(state, match) else _contextual_variation_climate_sentence(domain, match)
+    state_sentence = _contextual_variation_body_state_sentence(
+        domain,
+        state,
+        match,
+    )
+    body = _join_profile_sentences(
+        _contextual_variation_domain_opening(domain, first, domain_heading),
+        relation_sentence,
+        materiality_sentence,
+        climate_sentence,
+        state_sentence,
+        domain_sentence,
+    )
+    return _clean_customer_copy_text(body)
+
+
+def _contextual_variation_materiality_label(variation: dict[str, Any]) -> str:
+    materiality = variation.get("elemental_materiality") if isinstance(variation.get("elemental_materiality"), dict) else {}
+    if not materiality:
+        return ""
+    pair = _screen_text(materiality.get("element_pair_label"))
+    relation_type = str(materiality.get("relation_type") or "")
+    if relation_type == "same_element_density" and pair:
+        return f"{pair} 기운 반복"
+    if relation_type == "element_control" and pair:
+        return f"{pair} 상극"
+    if "cashflow" in relation_type and pair:
+        return f"{pair} 조절 배합"
+    if "reputation" in relation_type and pair:
+        return f"{pair} 기반 배합"
+    if pair:
+        return f"{pair} 배합"
+    return ""
+
+
+def _contextual_variation_payload_for_domain(domain: str, variation: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(variation, dict) or not variation.get("variation_key"):
+        return {}
+    match = _contextual_variation_domain_match(variation, domain)
+    tone = _contextual_variation_domain_tone(variation, match, domain)
+    profile_state = str(variation.get("variation_state") or "")
+    domain_state = _contextual_variation_effect_state(variation, match, domain)
+    score_delta = _contextual_variation_score_delta(variation, match, domain)
+    if score_delta > 0 and tone == "watch":
+        tone = "neutral"
+    elif score_delta < 0 and tone == "good":
+        tone = "neutral"
+    label = CONTEXTUAL_VARIATION_DOMAIN_LABELS.get(domain, DOMAIN_LABEL_BY_KEY.get(domain, domain))
+    value = _screen_first_value(
+        variation.get("primary_pattern_label"),
+        variation.get("pattern_element_status_label"),
+        variation.get("month_pattern_relation_label"),
+        fallback="격국·월령",
+    )
+    return {
+        "source": "gyeokguk_month_element_variation",
+        "domain": domain,
+        "domain_label": label,
+        "label": "격국·월령 적용",
+        "title": f"{label}에 적용되는 격국·월령",
+        "value": value,
+        "tone": tone,
+        "state": domain_state,
+        "domain_state": domain_state,
+        "profile_state": profile_state,
+        "matched_domain_state": match.get("state"),
+        "score_delta": score_delta,
+        "materiality_label": _contextual_variation_materiality_label(variation),
+        "body": _contextual_variation_domain_body(domain, variation, match, domain_state),
+        "action": _contextual_variation_domain_action(domain, match),
+        "matched_domain": match,
+        "judgment_summary": variation.get("judgment_summary"),
+        "basis_codes": _compact_text_list(variation.get("basis_codes"), limit=8),
+    }
+
+
+def _contextual_variations_by_domain(variation: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if not isinstance(variation, dict) or not variation.get("variation_key"):
+        return {}
+    domains = (
+        "personality",
+        "money",
+        "career",
+        "love",
+        "marriage",
+        "life",
+        "honor",
+        "social",
+        "timing",
+    )
+    return {
+        domain: payload
+        for domain in domains
+        if (payload := _contextual_variation_payload_for_domain(domain, variation))
+    }
+
+
+def _clamp_metric_score(score: int) -> int:
+    return max(0, min(100, int(score)))
+
+
+def _public_metric_quality_score(item: dict[str, Any]) -> int | None:
+    """Return the customer-facing good/bad score for one public metric."""
+    score = _metric_score_from_public_item(item)
+    if not isinstance(score, int):
+        return None
+    direction = str(item.get("score_direction") or "").strip().lower()
+    if direction in {"higher_is_better", "higher_is_good", "quality"}:
+        return score
+    if direction in {"lower_is_better", "higher_is_risk", "risk_is_bad"}:
+        return 100 - score
+    explicit_quality_score = _bounded_metric_score(item.get("quality_score"))
+    if isinstance(explicit_quality_score, int):
+        return explicit_quality_score
+    if str(item.get("polarity") or "positive").strip().lower() == "risk":
+        return 100 - score
+    return score
+
+
+def _apply_contextual_variation_score_to_section(
+    section: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return section
+    variation_key = "|".join(
+        str(payload.get(key) or "")
+        for key in ("source", "domain", "state", "domain_state")
+    )
+    next_section = dict(section)
+    if next_section.get("_contextual_variation_score_key") == variation_key:
+        return next_section
+    # Contextual variation remains available to the narrative/evidence layer,
+    # but it must not add the same domain-wide delta to every independent axis.
+    # The engine axis itself is the score; context explains why it is expressed
+    # in a particular way without manufacturing within-chart uniformity.
+    next_section["contextual_variation"] = {
+        key: payload.get(key)
+        for key in (
+            "source",
+            "domain",
+            "state",
+            "domain_state",
+            "profile_state",
+            "value",
+            "score_delta",
+        )
+        if payload.get(key) not in (None, "")
+    }
+    next_section["_contextual_variation_score_key"] = variation_key
+    return next_section
+
+
+BRANCH_COMBINATION_ORDER: dict[str, int] = {
+    branch: index for index, branch in enumerate("子丑寅卯辰巳午未申酉戌亥")
+}
+
+
+def _branch_combination_dictionary_key(*values: Any) -> str:
+    branches: list[str] = []
+    for value in values:
+        branches.extend(re.findall(r"[子丑寅卯辰巳午未申酉戌亥]", str(value or "")))
+    if len(branches) < 2:
+        return ""
+    pair = sorted(branches[:2], key=lambda branch: BRANCH_COMBINATION_ORDER[branch])
+    return "".join(pair)
+
+
+def _source_evidence_card(
+    profile: dict[str, Any],
+    *,
+    lookup_label: str,
+    evidence_section: str,
+    priority: int,
+    readable_heading: bool = False,
+    extra_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not profile or profile.get("source_verified") is not True:
+        return {}
+    source_heading = str(profile.get("source_section") or profile.get("title") or "").strip()
+    if not source_heading:
+        return {}
+    display_title = (
+        re.sub(r"^\d+\s*[.)]\s*", "", source_heading).strip()
+        if readable_heading
+        else source_heading
+    )
+    card = {
+        "source_verified": True,
+        "source_file": str(profile.get("source_file") or ""),
+        "source_section": source_heading,
+        "source_lookup_label": str(lookup_label or "").strip(),
+        "title": source_heading,
+        "display_title": display_title,
+        "description_parts": [
+            str(item)
+            for item in profile.get("description_parts") or []
+            if str(item).strip()
+        ],
+        "groups": [
+            {
+                "tag": str(group.get("tag") or ""),
+                "words": [str(word) for word in group.get("words") or [] if str(word).strip()],
+            }
+            for group in profile.get("groups") or []
+            if isinstance(group, dict) and group.get("tag") and group.get("words")
+        ],
+        "keywords": [str(item) for item in profile.get("keywords") or [] if str(item).strip()],
+        "evidence_section": evidence_section,
+        "priority": int(priority),
+    }
+    if isinstance(extra_fields, dict):
+        card.update(extra_fields)
+    return card
+
+
+def _source_contextual_evidence_profiles(
+    life_feature_summary: dict[str, Any],
+    factors: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the public contextual evidence exclusively from 명리 핵심어 파일 2."""
+
+    contextual = life_feature_summary.get("gyeokguk_contextual_context")
+    if not isinstance(contextual, dict):
+        contextual = {}
+    anchor = contextual.get("anchor") if isinstance(contextual.get("anchor"), dict) else {}
+    profiles: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(
+        lookup_labels: Any,
+        *,
+        file_name_contains: str,
+        evidence_section: str,
+        priority: int,
+        description_fields: tuple[str, ...] = ("한 줄 핵심", "작용 구조", "배합 구조"),
+        readable_heading: bool = False,
+        extra_fields: dict[str, Any] | None = None,
+    ) -> bool:
+        labels = lookup_labels if isinstance(lookup_labels, (list, tuple)) else [lookup_labels]
+        for raw_label in labels:
+            label = str(raw_label or "").strip()
+            if not label:
+                continue
+            profile = core_source_section_profile(
+                label,
+                file_name_contains=file_name_contains,
+                description_fields=description_fields,
+                keyword_limit=12,
+            )
+            if not profile:
+                continue
+            key = (
+                str(profile.get("source_file") or ""),
+                str(profile.get("source_section") or ""),
+            )
+            if not all(key) or key in seen:
+                return True
+            card = _source_evidence_card(
+                profile,
+                lookup_label=label,
+                evidence_section=evidence_section,
+                priority=priority,
+                readable_heading=readable_heading,
+                extra_fields=extra_fields,
+            )
+            if not card:
+                continue
+            seen.add(key)
+            profiles.append(card)
+            return True
+        return False
+
+    month_branch = _branch_label(anchor.get("month_branch"))
+    if month_branch:
+        add(
+            f"{month_branch}月",
+            file_name_contains="월령_핵심어사전_v1",
+            evidence_section="foundation",
+            priority=100,
+            description_fields=("한 줄 핵심",),
+            readable_heading=True,
+        )
+
+    pattern_label = str(anchor.get("primary_pattern_label") or "").strip()
+    if pattern_label:
+        add(
+            pattern_label,
+            file_name_contains="격국_핵심어사전_v1",
+            evidence_section="foundation",
+            priority=98,
+            description_fields=("한 줄 핵심",),
+            readable_heading=True,
+        )
+
+    primary_ten_god = str(anchor.get("primary_ten_god_label") or "").strip()
+    if primary_ten_god:
+        add(
+            primary_ten_god,
+            file_name_contains="십신_핵심어사전_v1_1",
+            evidence_section="action",
+            priority=94,
+            description_fields=("한 줄 핵심",),
+        )
+
+    for action in contextual.get("contextual_actions") or []:
+        if not isinstance(action, dict):
+            continue
+        actor_labels: list[str] = []
+        for actor in action.get("actors") or []:
+            if isinstance(actor, dict):
+                label = str(actor.get("label") or _ten_god_label(actor.get("key")) or "").strip()
+            else:
+                label = _ten_god_label(actor)
+            if label and label not in actor_labels:
+                actor_labels.append(label)
+        if len(actor_labels) >= 2:
+            pair = "+".join(actor_labels[:2])
+            reverse_pair = "+".join(reversed(actor_labels[:2]))
+            add(
+                (pair, reverse_pair),
+                file_name_contains="십신배합_핵심어사전_v1",
+                evidence_section="action",
+                priority=92,
+                description_fields=("한 줄 핵심",),
+            )
+        elif actor_labels:
+            add(
+                actor_labels[0],
+                file_name_contains="십신_핵심어사전_v1_1",
+                evidence_section="action",
+                priority=90,
+                description_fields=("한 줄 핵심",),
+            )
+
+    for factor in factors:
+        if not isinstance(factor, dict) or factor.get("layer") != "element_combination":
+            continue
+        stem_key = _stem_combination_dictionary_key(factor.get("heading"), factor.get("lead"))
+        if stem_key:
+            add(
+                stem_key,
+                file_name_contains="10천간배합_핵심어사전_v1",
+                evidence_section="element",
+                priority=84,
+                description_fields=("한 줄 핵심", "작용 구조"),
+            )
+
+    for factor in factors:
+        if not isinstance(factor, dict) or factor.get("layer") != "branch_reality":
+            continue
+        branches = re.findall(r"[子丑寅卯辰巳午未申酉戌亥]", str(factor.get("heading") or ""))
+        if branches:
+            add(
+                branches[0],
+                file_name_contains="12지지_핵심어사전_v1",
+                evidence_section="position",
+                priority=78,
+                description_fields=("한 줄 핵심",),
+            )
+
+    for factor in factors:
+        if not isinstance(factor, dict) or factor.get("layer") != "branch_pair":
+            continue
+        branch_key = _branch_combination_dictionary_key(factor.get("heading"))
+        if branch_key:
+            add(
+                branch_key,
+                file_name_contains="12지지배합_핵심어사전_v1",
+                evidence_section="branch",
+                priority=74,
+                description_fields=("한 줄 핵심", "배합 구조"),
+            )
+
+    for relation in contextual.get("branch_relation_keyword_profiles") or []:
+        if not isinstance(relation, dict):
+            continue
+        add(
+            relation.get("name") or relation.get("hanja"),
+            file_name_contains="합충형파해_핵심어사전_v1",
+            evidence_section="branch",
+            priority=70,
+            description_fields=("한 줄 핵심",),
+        )
+
+    for shinsal in contextual.get("shinsal_keyword_profiles") or []:
+        if not isinstance(shinsal, dict):
+            continue
+        meta_parts: list[str] = []
+        pillar_labels = [str(value) for value in shinsal.get("pillar_labels") or [] if str(value)]
+        if pillar_labels:
+            meta_parts.append(" · ".join(list(dict.fromkeys(pillar_labels))))
+        activation_years = [
+            int(value)
+            for value in shinsal.get("activation_years") or []
+            if isinstance(value, int)
+        ]
+        if activation_years:
+            meta_parts.append("·".join(f"{year}년" for year in sorted(set(activation_years))) + " 발동")
+        alignment = shinsal.get("structure_alignment")
+        if isinstance(alignment, dict) and alignment.get("label"):
+            meta_parts.append(str(alignment.get("label")))
+        add(
+            shinsal.get("name") or shinsal.get("hanja"),
+            file_name_contains="신살_잡설_핵심어사전_v1",
+            evidence_section="auxiliary",
+            priority=50,
+            description_fields=("한 줄 핵심",),
+            extra_fields={
+                "meta": " / ".join(meta_parts),
+                "source_id": shinsal.get("source_id"),
+                "source_usage": shinsal.get("source_usage"),
+                "promotion_status": shinsal.get("promotion_status"),
+                "exposure_scope": "comprehensive_basis_only",
+                "positions": list(shinsal.get("positions") or []),
+                "pillar_labels": pillar_labels,
+                "formula_names": list(shinsal.get("formula_names") or []),
+                "basis_codes": list(shinsal.get("basis_codes") or []),
+                "activation_years": activation_years,
+                "occurrences": list(shinsal.get("occurrences") or []),
+                "structure_alignment": alignment if isinstance(alignment, dict) else {},
+                "score_influence": False,
+            },
+        )
+
+    section_order = {
+        "foundation": 0,
+        "action": 1,
+        "element": 2,
+        "position": 3,
+        "branch": 4,
+        "auxiliary": 5,
+    }
+    profiles.sort(
+        key=lambda item: (
+            section_order.get(str(item.get("evidence_section") or ""), 9),
+            -int(item.get("priority") or 0),
+        )
+    )
+    return profiles
+
+
+def _analysis_engine_contract(
+    life_feature_summary: dict[str, Any],
+    detail_units: dict[str, Any],
+    factors: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    gyeokguk = life_feature_summary.get("gyeokguk_context")
+    if not isinstance(gyeokguk, dict):
+        gyeokguk = {}
+    month = life_feature_summary.get("month_governance_context")
+    if not isinstance(month, dict):
+        month = {}
+    season = life_feature_summary.get("season_context")
+    if not isinstance(season, dict):
+        season = {}
+    cycle = life_feature_summary.get("cycle_regulation_context")
+    if not isinstance(cycle, dict):
+        cycle = {}
+    contextual = life_feature_summary.get("gyeokguk_contextual_context")
+    if not isinstance(contextual, dict):
+        contextual = {}
+    month_hidden_phase = month.get("month_hidden_phase")
+    if not isinstance(month_hidden_phase, dict):
+        month_hidden_phase = {}
+    cycle_signals = cycle.get("signals") if isinstance(cycle.get("signals"), list) else []
+    domain_facets = life_feature_summary.get("domain_decision_facets")
+    if not isinstance(domain_facets, dict):
+        domain_facets = {}
+    timing_facets = life_feature_summary.get("timing_decision_facets")
+    if not isinstance(timing_facets, dict):
+        timing_facets = {}
+
+    center_actions = [
+        item
+        for item in (
+            _compact_gyeokguk_action(action)
+            for action in (gyeokguk.get("center_core_action_matches") or gyeokguk.get("center_core_action_cards") or [])[:4]
+        )
+        if item.get("title") or item.get("pair_name")
+    ]
+    flow_actions = [
+        item
+        for item in (
+            _compact_gyeokguk_action(action)
+            for action in (gyeokguk.get("flow_activated_core_action_matches") or [])[:4]
+        )
+        if item.get("title") or item.get("pair_name")
+    ]
+    single_ten_god_actions = [
+        item
+        for item in (
+            _compact_ten_god_action_match(action, source="single")
+            for action in (gyeokguk.get("ten_god_action_matches") or [])[:5]
+        )
+        if item.get("title") or item.get("pair_name")
+    ]
+    dual_ten_god_actions = [
+        item
+        for item in (
+            _compact_ten_god_action_match(action, source="dual")
+            for action in (gyeokguk.get("dual_ten_god_action_matches") or [])[:5]
+        )
+        if item.get("title") or item.get("pair_name")
+    ]
+
+    element_signals = [
+        _compact_engine_signal(signal)
+        for signal in (life_feature_summary.get("top_element_combination_signals") or [])[:4]
+        if isinstance(signal, dict)
+    ]
+    integrated_signals = [
+        _compact_engine_signal(signal)
+        for signal in (life_feature_summary.get("top_integrated_saju_signals") or [])[:4]
+        if isinstance(signal, dict)
+    ]
+    cycle_top_ids = set(_compact_text_list(cycle.get("top_signal_ids"), limit=10))
+    cycle_selected = [
+        signal
+        for signal in cycle_signals
+        if isinstance(signal, dict)
+        and (not cycle_top_ids or str(signal.get("signal_id") or "") in cycle_top_ids)
+    ][:4]
+    if not cycle_selected:
+        cycle_selected = [signal for signal in cycle_signals if isinstance(signal, dict)][:4]
+    cycle_selected_signals = [_compact_engine_signal(signal) for signal in cycle_selected]
+    contextual_actions = [
+        _compact_label_dict(
+            action,
+            (
+                "source",
+                "rule_key",
+                "pattern",
+                "pattern_label",
+                "action_name",
+                "actors",
+                "group_labels",
+                "salience_score",
+                "presence_score",
+                "context_score_delta",
+                "operation_profile",
+                "month_fit_state",
+                "verdict",
+                "resolution_state",
+                "contextual_state",
+                "day_master_strength_context",
+                "climate_context",
+                "position_summary",
+                "branch_relation_summary",
+                "domain_priority",
+                "single_classical_tags",
+                "dual_classical_tags",
+                "basis_codes",
+                "counter_signals",
+            ),
+        )
+        for action in (contextual.get("contextual_actions") or [])[:6]
+        if isinstance(action, dict)
+    ]
+    contextual_domains = [
+        _compact_label_dict(
+            item,
+            (
+                "domain",
+                "label",
+                "support",
+                "burden",
+                "mixed",
+                "net",
+                "total",
+                "state",
+                "source_count",
+                "source_keys",
+            ),
+        )
+        for item in ((contextual.get("domain_synthesis") or {}).get("top_domains") or [])[:6]
+        if isinstance(item, dict)
+    ]
+    contextual_domain_action_map = {
+        str(key): _compact_label_dict(
+            value,
+            (
+                "domain",
+                "label",
+                "state",
+                "net",
+                "total",
+                "support",
+                "burden",
+                "mixed",
+                "source_count",
+                "action_labels",
+                "lead_actions",
+                "basis_codes",
+            ),
+        )
+        for key, value in (contextual.get("domain_action_map") or {}).items()
+        if isinstance(value, dict)
+    }
+    contextual_element = contextual.get("element_context") if isinstance(contextual.get("element_context"), dict) else {}
+    contextual_variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    contextual_variation = dict(contextual_variation)
+    contextual_variation["elemental_materiality"] = _element_materiality_with_dictionary(
+        contextual_variation.get("elemental_materiality")
+    )
+    source_evidence_profiles = _source_contextual_evidence_profiles(
+        life_feature_summary,
+        list(factors or []),
+    )
+    ten_god_action_names: list[str] = []
+    for action in [*single_ten_god_actions, *dual_ten_god_actions, *center_actions, *flow_actions, *contextual_actions]:
+        if not isinstance(action, dict):
+            continue
+        for field in ("pair_name", "action_name", "title", "pattern_label"):
+            name = str(action.get(field) or "").strip()
+            if name and name not in ten_god_action_names:
+                ten_god_action_names.append(name)
+                break
+    ten_god_domain_map: dict[str, Any] = {}
+    for key, value in contextual_domain_action_map.items():
+        if not isinstance(value, dict):
+            continue
+        ten_god_domain_map[key] = _compact_label_dict(
+            value,
+            (
+                "domain",
+                "label",
+                "state",
+                "net",
+                "support",
+                "burden",
+                "mixed",
+                "source_count",
+                "action_labels",
+                "lead_actions",
+                "basis_codes",
+            ),
+        )
+
+    required = {
+        "gyeokguk": bool(gyeokguk.get("primary_pattern") and center_actions),
+        "ten_gods": bool(single_ten_god_actions or dual_ten_god_actions or center_actions or contextual_actions),
+        "gyeokguk_contextual": bool((contextual.get("anchor") or {}).get("primary_pattern") and contextual_actions and contextual_variation),
+        "month": bool(month.get("month_branch") and month_hidden_phase),
+        "elements": bool(element_signals and integrated_signals),
+        "temperature": bool(season.get("season") and cycle_selected_signals),
+        "domains": bool(domain_facets),
+        "timing": bool(timing_facets.get("range") or timing_facets.get("domain_years")),
+    }
+    missing = [key for key, ok in required.items() if not ok]
+    domain_contracts: dict[str, Any] = {}
+    for key, value in domain_facets.items():
+        if not isinstance(value, (dict, list)):
+            continue
+        compact_value = _compact_domain_contract_value(value)
+        if compact_value:
+            domain_contracts[key] = compact_value
+    contextual_domain_variations = _contextual_variations_by_domain(contextual_variation)
+    for key, contextual_domain_variation in contextual_domain_variations.items():
+        next_contract = dict(domain_contracts.get(key) or {})
+        next_contract["contextual_variation"] = contextual_domain_variation
+        domain_contracts[key] = next_contract
+
+    return {
+        "schema_version": "analysis_engine_contract_v1",
+        "gyeokguk": {
+            "primary_pattern": gyeokguk.get("primary_pattern"),
+            "primary_pattern_label": _regular_pattern_label(gyeokguk.get("primary_pattern"))
+            or gyeokguk.get("primary_ten_god_label")
+            or gyeokguk.get("month_command_label"),
+            "primary_ten_god": gyeokguk.get("primary_ten_god"),
+            "primary_ten_god_label": gyeokguk.get("primary_ten_god_label"),
+            "month_branch": gyeokguk.get("month_branch"),
+            "month_branch_label": gyeokguk.get("month_branch_label"),
+            "month_command_stem": gyeokguk.get("month_command_stem"),
+            "month_command_ten_god": gyeokguk.get("month_command_ten_god"),
+            "month_command_label": gyeokguk.get("month_command_label"),
+            "formation_state": gyeokguk.get("formation_state"),
+            "clarity_state": gyeokguk.get("clarity_state"),
+            "success_conditions": _compact_text_list(gyeokguk.get("success_conditions"), limit=8),
+            "failure_conditions": _compact_text_list(gyeokguk.get("failure_conditions"), limit=8),
+            "favorable_elements": _compact_text_list(gyeokguk.get("favorable_element_labels") or gyeokguk.get("favorable_elements")),
+            "unfavorable_elements": _compact_text_list(gyeokguk.get("unfavorable_element_labels") or gyeokguk.get("unfavorable_elements")),
+            "basis_codes": _compact_text_list(gyeokguk.get("basis_codes"), limit=12),
+            "action_match_counts": {
+                "single": len(gyeokguk.get("ten_god_action_matches") or []),
+                "dual": len(gyeokguk.get("dual_ten_god_action_matches") or []),
+                "center": len(center_actions),
+                "flow_activated": len(flow_actions),
+            },
+            "center_core_actions": center_actions,
+            "flow_activated_core_actions": flow_actions,
+        },
+        "ten_gods": {
+            "primary_pattern": gyeokguk.get("primary_pattern"),
+            "primary_pattern_label": _regular_pattern_label(gyeokguk.get("primary_pattern"))
+            or gyeokguk.get("primary_ten_god_label")
+            or gyeokguk.get("month_command_label"),
+            "primary_ten_god": gyeokguk.get("primary_ten_god"),
+            "primary_ten_god_label": gyeokguk.get("primary_ten_god_label"),
+            "month_command_ten_god": gyeokguk.get("month_command_ten_god"),
+            "month_command_label": gyeokguk.get("month_command_label"),
+            "month_branch": gyeokguk.get("month_branch"),
+            "month_branch_label": gyeokguk.get("month_branch_label"),
+            "formation_state": gyeokguk.get("formation_state"),
+            "clarity_state": gyeokguk.get("clarity_state"),
+            "action_labels": _compact_text_list(ten_god_action_names, limit=10),
+            "action_match_counts": {
+                "single": len(gyeokguk.get("ten_god_action_matches") or []),
+                "dual": len(gyeokguk.get("dual_ten_god_action_matches") or []),
+                "center": len(center_actions),
+                "flow_activated": len(flow_actions),
+                "contextual": len(contextual_actions),
+            },
+            "single_actions": single_ten_god_actions,
+            "dual_actions": dual_ten_god_actions,
+            "center_actions": center_actions,
+            "flow_actions": flow_actions,
+            "contextual_actions": contextual_actions,
+            "domain_action_map": ten_god_domain_map,
+            "basis_codes": _compact_text_list(
+                list(gyeokguk.get("basis_codes") or []) + list(contextual.get("basis_codes") or []),
+                limit=18,
+            ),
+        },
+        "gyeokguk_contextual": {
+            "source_evidence_profiles": source_evidence_profiles,
+            "context_key": contextual.get("context_key"),
+            "anchor": _compact_label_dict(
+                contextual.get("anchor"),
+                (
+                    "primary_pattern",
+                    "primary_pattern_label",
+                    "primary_ten_god",
+                    "primary_ten_god_label",
+                    "primary_group",
+                    "primary_group_label",
+                    "formation_state",
+                    "clarity_state",
+                    "day_master_stem",
+                    "month_branch",
+                    "month_element",
+                    "month_command_stem",
+                    "month_command_ten_god",
+                    "month_command_group",
+                    "regular_pattern",
+                    "season_label",
+                ),
+            ),
+            "element_context": _compact_label_dict(
+                contextual_element,
+                (
+                    "day_master_element",
+                    "day_master_element_label",
+                    "day_master_strength",
+                    "day_master_strength_score",
+                    "dominant_elements",
+                    "weak_elements",
+                    "useful_element_labels",
+                    "caution_element_labels",
+                    "temperature_balance",
+                    "moisture_balance",
+                    "climate_needs",
+                    "circulation_level",
+                ),
+            ),
+            "pattern_variation": _compact_label_dict(
+                contextual_variation,
+                (
+                    "variation_key",
+                    "primary_pattern",
+                    "primary_pattern_label",
+                    "primary_ten_god",
+                    "primary_ten_god_label",
+                    "primary_group",
+                    "primary_group_label",
+                    "season_label",
+                    "season_display",
+                    "day_master_stem",
+                    "day_master_stem_label",
+                    "day_master_element",
+                    "day_master_element_label",
+                    "month_element",
+                    "month_element_label",
+                    "pattern_element",
+                    "pattern_element_label",
+                    "pattern_element_status",
+                    "pattern_element_status_label",
+                    "month_pattern_relation",
+                    "month_pattern_relation_label",
+                    "variation_state",
+                    "elemental_judgment",
+                    "elemental_materiality",
+                    "climate_adjustment",
+                    "day_stem_reception",
+                    "reality_profile",
+                    "pattern_element_score",
+                    "climate_profile",
+                    "favorable_modifiers",
+                    "caution_modifiers",
+                    "domain_tilt",
+                    "judgment_summary",
+                    "basis_codes",
+                ),
+            ),
+            "contextual_actions": contextual_actions,
+            "branch_relation_keyword_profiles": _compact_keyword_profiles(
+                contextual.get("branch_relation_keyword_profiles"),
+                limit=10,
+            ),
+            "shinsal_keyword_profiles": _compact_keyword_profiles(
+                contextual.get("shinsal_keyword_profiles"),
+                limit=24,
+            ),
+            "domain_synthesis": contextual_domains,
+            "domain_action_map": contextual_domain_action_map,
+            "action_distribution": _compact_label_dict(
+                contextual.get("action_distribution"),
+                (
+                    "action_count",
+                    "by_source",
+                    "by_state",
+                    "classical_tags",
+                    "lead_actions",
+                    "support_actions",
+                    "burden_actions",
+                ),
+            ),
+            "engine_readiness": contextual.get("engine_readiness")
+            if isinstance(contextual.get("engine_readiness"), dict)
+            else {},
+            "coverage": _compact_label_dict(
+                contextual.get("coverage"),
+                (
+                    "month_anchor",
+                    "gyeokguk_actions",
+                    "role_edges",
+                    "element_edges",
+                    "branch_relations",
+                    "useful_element_edges",
+                    "caution_element_edges",
+                    "climate",
+                ),
+            ),
+            "basis_codes": _compact_text_list(contextual.get("basis_codes"), limit=18),
+        },
+        "month": {
+            "month_branch": month.get("month_branch"),
+            "month_branch_label": month.get("month_branch_label"),
+            "month_element": month.get("month_element"),
+            "month_element_label": month.get("month_element_label"),
+            "month_command_ten_god": month.get("month_command_ten_god"),
+            "month_command_label": month.get("month_command_label"),
+            "month_command_group": month.get("month_command_group"),
+            "regular_pattern": month.get("regular_pattern"),
+            "active_hidden_phase": _compact_label_dict(
+                {
+                    **month_hidden_phase,
+                    "active_phase_label": MONTH_HIDDEN_PHASE_LABEL_BY_KEY.get(str(month_hidden_phase.get("active_phase") or ""), ""),
+                    "active_stem_label": _stem_label(month_hidden_phase.get("active_stem")),
+                    "active_element_label": _element_label(month_hidden_phase.get("active_element")),
+                    "active_ten_god_label": _ten_god_label(month_hidden_phase.get("active_ten_god")),
+                },
+                (
+                    "active_phase",
+                    "active_phase_label",
+                    "active_stem",
+                    "active_stem_label",
+                    "active_element",
+                    "active_element_label",
+                    "active_ten_god",
+                    "active_ten_god_label",
+                    "active_ten_god_group",
+                    "day_index_from_boundary",
+                ),
+            ),
+            "useful_elements": _compact_text_list(month.get("useful_elements")),
+            "caution_elements": _compact_text_list(month.get("caution_elements")),
+            "support_fits": _compact_month_fit_items(month.get("support_fits"), limit=8, polarity="support"),
+            "pressure_fits": _compact_month_fit_items(month.get("pressure_fits"), limit=8, polarity="pressure"),
+        },
+        "elements": {
+            "detail_source_layers": list((detail_units.get("elements") or {}).get("source_layers") or []),
+            "element_combination_signals": element_signals,
+            "integrated_saju_signals": integrated_signals,
+            "ten_god_interaction_signals": [
+                _compact_engine_signal(signal)
+                for signal in (life_feature_summary.get("top_ten_god_interaction_signals") or [])[:3]
+                if isinstance(signal, dict)
+            ],
+        },
+        "temperature": {
+            "season": season.get("season"),
+            "season_label": season.get("season_label"),
+            "month_element": season.get("month_element"),
+            "month_element_label": season.get("month_element_label"),
+            "temperature_balance": season.get("temperature_balance"),
+            "moisture_balance": season.get("moisture_balance"),
+            "day_master_strength": season.get("day_master_strength"),
+            "dominant_elements": _compact_text_list(season.get("dominant_elements")),
+            "useful_elements": _compact_text_list(season.get("useful_element_labels") or season.get("useful_elements")),
+            "caution_elements": _compact_text_list(season.get("caution_element_labels") or season.get("caution_elements")),
+            "climate_needs": _compact_text_list(season.get("climate_need_labels") or season.get("climate_needs")),
+            "cycle_regulation_signals": cycle_selected_signals,
+            "principle_coverage": _compact_label_dict(
+                cycle.get("principle_coverage"),
+                (
+                    "element_bridge_count",
+                    "element_exception_count",
+                    "ten_god_edge_count",
+                    "branch_cycle_count",
+                    "pattern_cycle_match_count",
+                    "supportive_signal_ids",
+                    "pressure_signal_ids",
+                ),
+            ),
+        },
+        "domains": domain_contracts,
+        "timing": _compact_label_dict(
+            timing_facets,
+            (
+                "range",
+                "target_years",
+                "good_years",
+                "caution_years",
+                "domain_years",
+                "event_years",
+                "decade_profile",
+            ),
+        ),
+        "coverage": {
+            "status": "ready" if not missing else "needs_engine_data",
+            "required_layers": required,
+            "missing_layers": missing,
+        },
+    }
+
+
+def _screen_text(value: Any, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    return _clean_customer_copy_text(text or fallback)
+
+
+def _screen_first_value(*values: Any, fallback: str = "") -> str:
+    for value in values:
+        text = _screen_text(value)
+        if text:
+            return text
+    return fallback
+
+
+def _screen_menu_card(
+    key: str,
+    title: str,
+    copy: str,
+    icon: str,
+    required_paths: list[str],
+    values: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "key": key,
+        "title": tongbyeon_surface_title(title),
+        "copy": tongbyeon_surface_text(copy),
+        "icon": icon,
+        "required_contract_paths": required_paths,
+        "primary_values": [
+            {
+                **item,
+                "label": tongbyeon_surface_title(item.get("label")),
+                "value": tongbyeon_surface_text(item.get("value")),
+            }
+            for item in (values or [])
+            if item.get("label") and item.get("value")
+        ],
+    }
+
+
+def _screen_domain_labels(sections: list[dict[str, Any]], limit: int = 4) -> list[str]:
+    labels: list[str] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        label = _screen_text(section.get("domain_label") or section.get("title"))
+        if label and label not in labels:
+            labels.append(label)
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def _first_screen_dict(values: Any) -> dict[str, Any]:
+    if isinstance(values, list):
+        for value in values:
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
+def _screen_display_token(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "->" in text:
+        left, right = text.split("->", 1)
+        left_label = _screen_display_token(left)
+        right_label = _screen_display_token(right)
+        return f"{left_label}→{right_label}" if left_label and right_label else text
+    if "-" in text:
+        parts = [_screen_display_token(part) for part in text.split("-")]
+        parts = [part for part in parts if part]
+        return "·".join(parts) if len(parts) >= 2 else text
+    mapped = (
+        STEM_HANJA_BY_KEY.get(text)
+        or BRANCH_HANJA_BY_KEY.get(text)
+        or TEN_GOD_LABEL_BY_KEY.get(text)
+        or ELEMENT_LABEL_BY_KEY.get(text)
+        or {
+            "cold": "차가움",
+            "hot": "뜨거움",
+            "dry": "건조함",
+            "wet": "습함",
+            "balanced": "균형",
+            "neutral": "중립",
+            "very_weak": "매우 약함",
+            "weak": "약함",
+            "moderate": "보통",
+            "strong": "강함",
+            "very_strong": "매우 강함",
+            "support": "긍정",
+            "burden": "부담",
+            "mixed": "혼합",
+            "stable": "안정",
+            "unstable": "불안정",
+            "overloaded": "과부하",
+            "underpowered": "힘 부족",
+            "caution": "주의",
+            "both_supported_by_month_command": "월령이 함께 받치는 상태",
+            "first_supported_by_month_command": "앞선 작용이 월령에 닿는 상태",
+            "second_supported_by_month_command": "뒤따르는 작용이 월령에 닿는 상태",
+            "not_supported_by_month_command": "월령 접점이 약한 상태",
+            "constructive_action": "생극 작용",
+            "constructive_dual_action": "생극 결합",
+            "seonggyeok_chain": "성격 보조",
+            "spring": "봄",
+            "summer": "여름",
+            "autumn": "가을",
+            "fall": "가을",
+            "winter": "겨울",
+            "late_winter": "늦겨울",
+            "late_spring": "늦봄",
+            "late_summer": "환절기",
+            "late_autumn": "늦가을",
+        }.get(text)
+    )
+    if mapped:
+        return mapped
+    if re.fullmatch(r"[a-z][a-z0-9_:\-]*", text):
+        return ""
+    return text
+
+
+def _screen_display_list(values: Any, limit: int = 4) -> list[str]:
+    return [
+        label
+        for label in (_screen_display_token(value) for value in _compact_text_list(values, limit=limit))
+        if label
+    ]
+
+
+SCREEN_TEN_GOD_CENTER_BODIES: dict[str, str] = {
+    "비견": "비견이 월령의 중심에 서면 자기 기준과 독립성이 사주의 기준점이 됩니다. 함께 일하는 사람과의 힘겨루기까지 같이 보아야 합니다.",
+    "겁재": "겁재가 월령의 중심에 서면 내 몫, 경쟁, 분배 문제가 강하게 드러납니다. 사람과 돈이 가까워질수록 기준을 분명히 세워야 합니다.",
+    "식신": "식신이 월령의 중심에 서면 꾸준히 만들어내는 결과물이 운을 살립니다. 말보다 실제 산출물이 재물과 직업의 근거가 됩니다.",
+    "상관": "상관이 월령의 중심에 서면 표현력, 비판력, 개선 능력이 강하게 작동합니다. 말과 결과물이 평가로 이어지는 방식을 보아야 합니다.",
+    "편재": "편재가 월령의 중심에 서면 거래, 사업성, 큰 자금과 외부 기회가 사주의 기준점이 됩니다. 수익보다 회수와 권리 구조가 중요합니다.",
+    "정재": "정재가 월령의 중심에 서면 고정 수입, 생활 기준, 정산과 소유가 사주의 기준점이 됩니다. 성실한 축적과 분명한 권리 관계에서 강해집니다.",
+    "편관": "편관이 월령의 중심에 서면 압박, 경쟁, 위험 처리, 강한 책임이 먼저 드러납니다. 어려운 일을 감당하는 방식이 직업운의 핵심이 됩니다.",
+    "정관": "정관이 월령의 중심에 서면 직책, 규칙, 평판, 책임 있는 관계가 사주의 기준점이 됩니다. 공식적인 평가와 신뢰가 운세의 중심이 됩니다.",
+    "편인": "편인이 월령의 중심에 서면 독자적인 해석, 전문성, 비주류 감각이 강하게 작동합니다. 깊이 파고드는 능력이 이름과 값으로 바뀌어야 합니다.",
+    "정인": "정인이 월령의 중심에 서면 학습, 문서, 보호, 안정적인 신뢰가 사주의 기준점이 됩니다. 오래 쌓은 자격과 근거가 힘이 됩니다.",
+}
+
+
+SCREEN_SUMMARY_TEN_GOD_SUBJECTS: dict[str, str] = {
+    "비견": "자기 기준과 독립성이 먼저 드러납니다",
+    "겁재": "경쟁, 분배, 내 몫의 문제가 먼저 드러납니다",
+    "식신": "꾸준히 만든 결과물과 실무력이 먼저 드러납니다",
+    "상관": "표현력과 돌파력이 먼저 드러납니다",
+    "편재": "거래 감각과 외부 확장이 먼저 드러납니다",
+    "정재": "재물 기준과 생활 책임이 먼저 드러납니다",
+    "편관": "압박과 책임을 처리하는 능력이 먼저 드러납니다",
+    "정관": "공식 평가와 책임 있는 관계가 먼저 드러납니다",
+    "편인": "분석력과 특수한 전문성이 먼저 드러납니다",
+    "정인": "학습, 문서, 신뢰의 기반이 먼저 드러납니다",
+}
+
+
+SCREEN_SUMMARY_TEN_GOD_SEASON_SUBJECTS: dict[str, dict[str, str]] = {
+    "비견": {
+        "봄": "새 일을 시작할 때 자기 기준을 먼저 세우는 성향이 강합니다",
+        "여름": "자기 의사를 밖으로 드러내고 주도권을 잡으려는 성향이 강합니다",
+        "가을": "원칙과 실익을 따져 자기 몫을 분명히 하려는 성향이 강합니다",
+        "겨울": "겉으로 앞서기보다 오래 버티며 자기 기반을 지키는 성향이 강합니다",
+    },
+    "겁재": {
+        "봄": "사람과 일을 넓히는 과정에서 경쟁과 분배 문제가 함께 따라옵니다",
+        "여름": "활동 범위가 커질수록 사람 사이의 몫과 주도권 문제가 빨리 드러납니다",
+        "가을": "성과가 보이는 순간 권리, 지분, 배분 기준이 예민해집니다",
+        "겨울": "가까운 사람과 자원을 함께 다룰 때 손익 기준을 분명히 해야 합니다",
+    },
+    "식신": {
+        "봄": "시작한 일을 키워 결과물로 만드는 작용이 강합니다",
+        "여름": "표현과 산출 속도가 빨라 결과물이 눈에 띄게 드러납니다",
+        "가을": "만든 것을 품질, 기준, 실제 성과로 정리하는 작용이 강합니다",
+        "겨울": "준비한 기술과 경험을 천천히 축적해 결과물로 내놓는 작용이 강합니다",
+    },
+    "상관": {
+        "봄": "새로운 방식으로 문제를 고치고 자기 의견을 제시하는 힘이 강합니다",
+        "여름": "말, 표현, 노출이 강해져 평가와 충돌이 함께 따라오기 쉽습니다",
+        "가을": "비판력과 개선 능력이 성과 기준을 날카롭게 만듭니다",
+        "겨울": "속으로 쌓아둔 판단과 분석이 특정 순간 강하게 표현됩니다",
+    },
+    "편재": {
+        "봄": "외부 기회를 빠르게 포착하고 수익 가능성을 넓히는 감각이 강합니다",
+        "여름": "거래, 영업, 노출을 통해 돈의 기회가 빠르게 커집니다",
+        "가을": "협상, 회수, 권리 정리에서 재물 감각이 뚜렷해집니다",
+        "겨울": "정보와 준비를 바탕으로 돈이 움직일 때 성과가 생깁니다",
+    },
+    "정재": {
+        "봄": "생활 기반을 넓히며 수입과 책임을 함께 키우는 작용이 강합니다",
+        "여름": "수입과 지출의 속도가 빨라져 재물 기준을 분명히 세워야 합니다",
+        "가을": "소유권, 정산, 계산 기준이 재물운의 중심에 놓입니다",
+        "겨울": "현금 보존과 장기 관리 의식이 재물운의 중심에 놓입니다",
+    },
+    "편관": {
+        "봄": "경쟁 속에서 역할이 커지고 어려운 일을 맡는 작용이 강합니다",
+        "여름": "압박과 책임이 빠르게 드러나며 강한 자리에서 실력이 시험됩니다",
+        "가을": "규율, 통제, 위기 처리 능력이 직업적 평가로 이어집니다",
+        "겨울": "보이지 않는 압박을 견디며 책임을 방어하는 힘이 중요해집니다",
+    },
+    "정관": {
+        "봄": "책임 있는 역할이 성장하면서 공식적인 자리가 열리기 쉽습니다",
+        "여름": "평가와 노출이 강해져 직함과 책임이 함께 드러납니다",
+        "가을": "규칙, 직책, 평판이 분명해지고 사회적 기준이 강해집니다",
+        "겨울": "신뢰와 기록을 오래 쌓아 책임 있는 위치를 지키는 성향이 강합니다",
+    },
+    "편인": {
+        "봄": "독자적인 발상과 특수한 관심사가 새로운 방향을 엽니다",
+        "여름": "특수한 감각과 해석력이 밖으로 드러나 평가를 받기 쉽습니다",
+        "가을": "분석력과 분별력이 강해져 전문 영역에서 강점을 얻습니다",
+        "겨울": "깊이 몰입하고 연구하는 성향이 강해져 혼자 파고드는 일이 맞습니다",
+    },
+    "정인": {
+        "봄": "배움과 보호 기반이 성장하면서 실력의 토대가 만들어집니다",
+        "여름": "자격, 문서, 신뢰가 밖으로 드러나 평가를 받기 쉽습니다",
+        "가을": "근거, 문서, 자격 기준이 분명해져 안정성이 강해집니다",
+        "겨울": "오래 축적한 공부와 신뢰가 뒤에서 사주를 받쳐줍니다",
+    },
+}
+
+
+SCREEN_SUMMARY_SEASON_SENTENCES: dict[str, str] = {
+    "봄": "봄 기운이 강해 시작과 확장에 대한 감각이 앞섭니다.",
+    "여름": "여름 기운이 강해 표현과 속도가 먼저 살아납니다.",
+    "가을": "가을 기운이 강해 기준 정리와 성과 확인이 분명합니다.",
+    "겨울": "겨울 기운이 강해 준비와 보존 의식이 강합니다.",
+}
+
+
+SCREEN_MONTH_ELEMENT_BODIES: dict[str, str] = {
+    "목": "목 기운은 시작, 성장, 기획, 확장의 성향을 강하게 만듭니다.",
+    "화": "화 기운은 표현, 노출, 속도, 평가의 작용을 강하게 만듭니다.",
+    "토": "토 기운은 보유, 조정, 책임, 현실 기준의 작용을 강하게 만듭니다.",
+    "금": "금 기운은 기준, 정리, 성과 확인, 권리 의식을 강하게 만듭니다.",
+    "수": "수 기운은 준비, 저장, 정보, 관계의 흐름을 강하게 만듭니다.",
+}
+
+
+def _screen_gyeokguk_center_body(
+    gyeokguk: dict[str, Any],
+    temperature: dict[str, Any] | None = None,
+    month: dict[str, Any] | None = None,
+) -> str:
+    label = _screen_text(gyeokguk.get("primary_ten_god_label") or gyeokguk.get("month_command_label"))
+    temp = temperature if isinstance(temperature, dict) else {}
+    month_data = month if isinstance(month, dict) else {}
+    season = _screen_text(temp.get("season_label"))
+    month_branch = _screen_text(gyeokguk.get("month_branch_label") or month_data.get("month_branch_label"))
+    seasonal_subject = _screen_summary_ten_god_subject(label, season)
+    if label and seasonal_subject:
+        prefix = f"{month_branch}월 {label}" if month_branch else label
+        return f"{prefix}{_topic_particle(prefix)} 월령의 중심입니다. {seasonal_subject}."
+    if label in SCREEN_TEN_GOD_CENTER_BODIES:
+        return SCREEN_TEN_GOD_CENTER_BODIES[label]
+    return "월령의 십신은 사회적 역할, 성취 방식, 운의 우선순위를 정하는 기준입니다."
+
+
+def _screen_summary_ten_god_subject(ten_god: str, season: str) -> str:
+    seasonal = SCREEN_SUMMARY_TEN_GOD_SEASON_SUBJECTS.get(ten_god, {})
+    return seasonal.get(season) or SCREEN_SUMMARY_TEN_GOD_SUBJECTS.get(ten_god, "")
+
+
+def _screen_month_element_body(element_label: str) -> str:
+    label = str(element_label or "")
+    for key, body in SCREEN_MONTH_ELEMENT_BODIES.items():
+        if key in label:
+            return body
+    return ""
+
+
+def _screen_month_body(month: dict[str, Any]) -> str:
+    branch = _screen_text(month.get("month_branch_label"))
+    element = _screen_text(month.get("month_element_label"))
+    command = _screen_text(month.get("month_command_label"))
+    element_body = _screen_month_element_body(element)
+    if branch and element and command:
+        return f"{branch}월은 {element} 기운을 강하게 세웁니다. {element_body} 월령의 {command}가 성격과 사건의 기본 방향을 잡습니다."
+    if branch and element:
+        extra = f" {element_body}" if element_body else ""
+        return f"{branch}월은 {element} 기운을 강하게 세우며, 원국에서 무엇이 먼저 작동하는지 정합니다.{extra}"
+    return "월지는 태어난 계절의 세력을 보여 주며, 원국에서 무엇이 강하게 작용하는지 정합니다."
+
+
+def _screen_month_support_body(useful_elements: list[str], temperature: dict[str, Any]) -> str:
+    useful = " · ".join(useful_elements)
+    temp = _screen_display_token((temperature or {}).get("temperature_balance"))
+    moisture = _screen_display_token((temperature or {}).get("moisture_balance"))
+    balance_text = " · ".join(part for part in (temp, moisture) if part)
+    if useful and balance_text:
+        return f"보완 기운은 {useful}{_subject_particle(useful)} 우선입니다. {balance_text}으로 치우친 체감이 조절될 때 판단과 실행이 안정됩니다."
+    if useful:
+        return f"보완 기운은 {useful}{_subject_particle(useful)} 우선입니다. 필요한 오행이 들어올 때 월령의 치우침이 줄어듭니다."
+    return "월령의 치우침은 필요한 오행이 들어올 때 줄어듭니다."
+
+
+def _screen_temperature_season_body(temperature: dict[str, Any]) -> str:
+    season = _screen_text(temperature.get("season_label"))
+    month_element = _screen_text(temperature.get("month_element_label"))
+    temp = _screen_display_token(temperature.get("temperature_balance"))
+    moisture = _screen_display_token(temperature.get("moisture_balance"))
+    useful = _screen_display_list(temperature.get("useful_elements"), limit=3)
+    opening = ""
+    if season and month_element:
+        opening = f"{season}의 {month_element} 기운이 사주의 체감 온도와 속도를 정합니다."
+    elif season:
+        opening = f"{season} 기운이 사주의 체감 온도와 속도를 정합니다."
+    state = " · ".join(part for part in (temp, moisture) if part)
+    middle = f"현재 체감은 {state} 쪽으로 기웁니다." if state else ""
+    closing = f"{' · '.join(useful)} 기운이 들어올 때 표현과 결정이 안정됩니다." if useful else ""
+    return " ".join(part for part in (opening, middle, closing) if part) or "계절은 같은 격국이라도 표현 방식과 사건의 속도를 다르게 만듭니다."
+
+
+def _screen_temperature_climate_body(climate_needs: list[str]) -> str:
+    if climate_needs:
+        return "조후상 필요한 오행입니다. 원국이나 운에서 이 오행이 보강되면 같은 격국도 판단, 실행, 회복에서 차이를 보입니다."
+    return "조후상 별도 보완보다 월령과 격국의 균형을 우선합니다."
+
+
+def _screen_hidden_stem_body(active_phase: dict[str, Any]) -> str:
+    stem = _screen_text(active_phase.get("active_stem_label"))
+    ten_god = _screen_text(active_phase.get("active_ten_god_label"))
+    phase = _screen_text(active_phase.get("active_phase_label"))
+    if stem and ten_god:
+        phase_text = f"{phase}에서 " if phase else ""
+        return f"지장간은 겉으로 바로 드러나지 않는 관계입니다. 이 명식은 {phase_text}{stem} {ten_god}{_subject_particle(ten_god)} 운에서 자극될 때 현실 문제로 올라옵니다."
+    return "지장간은 겉으로 드러나지 않은 관계입니다. 운에서 자극될 때 성향과 사건으로 올라옵니다."
+
+
+def _screen_summary_domain_sentence(primary: dict[str, Any], management: dict[str, Any]) -> str:
+    primary_domain = _screen_text(primary.get("domain_label"))
+    primary_axis = _screen_text(primary.get("label"))
+    management_domain = _screen_text(management.get("domain_label"))
+    management_axis = _screen_text(management.get("label"))
+    if primary_domain and management_domain and primary_domain != management_domain:
+        return f"가장 강한 분야는 {primary_domain}이고, 먼저 확인할 분야는 {management_domain}입니다."
+    if primary_domain and primary_axis and management_axis and primary_axis != management_axis:
+        return (
+            f"{primary_domain} 안에서도 {primary_axis}{_subject_particle(primary_axis)} 강하고, "
+            f"{management_axis}{_object_particle(management_axis)} 먼저 확인해야 합니다."
+        )
+    if primary_domain:
+        return f"{primary_domain}{_subject_particle(primary_domain)} 가장 강합니다."
+    return ""
+
+
+def _screen_summary_clean_sentence(text: Any) -> str:
+    return str(text or "").strip().rstrip(".。")
+
+
+def _screen_summary_strength_sentence(item: dict[str, Any], *, secondary: bool = False) -> str:
+    domain = _screen_text(item.get("domain_label"))
+    axis = _screen_text(item.get("label"))
+    if domain and axis:
+        if secondary:
+            return f"{domain}도 {axis}{_subject_particle(axis)} 좋습니다."
+        return f"{domain}{_topic_particle(domain)} {axis}{_subject_particle(axis)} 가장 강합니다."
+    if domain:
+        return f"{domain}{_subject_particle(domain)} 강합니다."
+    return ""
+
+
+def _screen_watch_axis_label(label: str) -> str:
+    text = _screen_text(label)
+    if not text:
+        return ""
+    direct = {
+        "공동자금 운영력": "공동자금 문제",
+        "자금 운용 안정성": "자금 운용",
+        "재정 안정성": "재정 안정",
+        "재정 방어력": "재정 방어",
+        "계약·명의 안정성": "계약·명의",
+        "계약 문서 안정성": "계약 문서",
+        "조직 안에서 자리 잡는 힘": "조직 적응",
+        "조직 적응력": "조직 적응",
+        "성취 축적력": "성취 축적",
+        "관계 진전력": "관계 진전",
+        "애정 표현성": "애정 표현",
+        "재회 가능성": "재회 관계",
+        "부부 재정": "부부 재정",
+        "부부 갈등 조정력": "갈등 조정",
+        "실행 속도": "실행 속도",
+        "대인 조율감": "대인 조율",
+        "타고난 재물의 그릇": "재물 규모",
+        "재물 형성력": "재물 형성",
+    }
+    if text in direct:
+        return direct[text]
+    for suffix in (" 가능성", " 안정성", " 운영력", " 창출력", " 형성력", " 조정력", " 대응력", " 지속력", " 수용력", " 표현성", " 적응력", " 확장력", " 축적력", " 관리력", " 방어력", " 감별력", " 도약성"):
+        if text.endswith(suffix):
+            return text[: -len(suffix)] + suffix.replace("력", "").replace("성", "")
+    return text
+
+
+def _screen_summary_watch_sentence(item: dict[str, Any]) -> str:
+    domain = _screen_text(item.get("domain_label"))
+    caption = _screen_summary_clean_sentence(item.get("caption"))
+    lead = _screen_summary_clean_sentence(item.get("section_lead") or item.get("section_profile_summary"))
+    axis = _screen_text(item.get("label"))
+    if domain and caption:
+        return f"다만 {domain}{_topic_particle(domain)} {caption}."
+    if domain and lead:
+        lead = lead.replace("당신의 ", "")
+        return f"다만 {lead}."
+    if domain and axis:
+        axis_label = _screen_watch_axis_label(axis) or axis
+        return f"다만 {domain}{_topic_particle(domain)} {axis_label}{_object_particle(axis_label)} 먼저 확인해야 합니다."
+    return ""
+
+
+def _screen_summary_headline(
+    profile: dict[str, Any],
+    gyeokguk: dict[str, Any],
+    month: dict[str, Any],
+    temperature: dict[str, Any],
+    primary: dict[str, Any],
+    secondary: dict[str, Any],
+    management: dict[str, Any],
+) -> str:
+    profile_type = _screen_text(profile.get("profile_type"))
+    profile_summary = _screen_first_value(profile.get("summary"), profile.get("headline"))
+    if profile_type and profile_summary:
+        return profile_summary
+
+    result_sentences = [
+        _screen_summary_strength_sentence(primary),
+    ]
+    if (
+        isinstance(secondary, dict)
+        and _screen_text(secondary.get("domain_label"))
+        and _screen_text(secondary.get("domain_label")) != _screen_text(primary.get("domain_label"))
+    ):
+        result_sentences.append(_screen_summary_strength_sentence(secondary, secondary=True))
+    watch_sentence = _screen_summary_watch_sentence(management)
+    if watch_sentence:
+        result_sentences.append(watch_sentence)
+    result_sentences = [sentence for sentence in result_sentences if sentence]
+    if result_sentences:
+        return " ".join(result_sentences)
+
+    ten_god = _screen_text(
+        gyeokguk.get("primary_ten_god_label")
+        or gyeokguk.get("month_command_label")
+        or month.get("month_command_label")
+    )
+    month_branch = _screen_text(
+        gyeokguk.get("month_branch_label")
+        or month.get("month_branch_label")
+    )
+    season = _screen_text(temperature.get("season_label"))
+    subject = _screen_summary_ten_god_subject(ten_god, season)
+    sentences: list[str] = []
+    if ten_god and subject:
+        if month_branch:
+            sentences.append(f"{month_branch}월 {ten_god} 구조라 {subject}.")
+        else:
+            sentences.append(f"{ten_god}가 월령의 중심에 있어 {subject}.")
+    season_sentence = SCREEN_SUMMARY_SEASON_SENTENCES.get(season)
+    if season_sentence:
+        sentences.append(season_sentence)
+    domain_sentence = _screen_summary_domain_sentence(primary, management)
+    if domain_sentence:
+        sentences.append(domain_sentence)
+    if sentences:
+        return " ".join(sentences)
+    return _screen_first_value(profile.get("headline"), profile.get("summary"), fallback="사주의 중심 구조를 정리했습니다.")
+
+
+def _direction_particle(label: str) -> str:
+    text = str(label or "").strip()
+    if not text:
+        return "로"
+    last = text[-1]
+    code = ord(last)
+    if 0xAC00 <= code <= 0xD7A3:
+        jong = (code - 0xAC00) % 28
+        return "로" if jong in (0, 8) else "으로"
+    return "로"
+
+
+def _screen_action_label(actions: Any) -> str:
+    for action in actions or []:
+        if not isinstance(action, dict):
+            continue
+        direct_label = _screen_first_value(
+            action.get("pair_name"),
+            action.get("title"),
+            action.get("classical_name"),
+        )
+        if direct_label:
+            return direct_label
+        element_direction = _screen_display_token(action.get("element_direction_key"))
+        ten_god_direction = _screen_display_token(action.get("ten_god_direction_key"))
+        if element_direction and ten_god_direction:
+            return f"{element_direction} · {ten_god_direction}"
+        label = _screen_first_value(
+            _screen_display_token(action.get("combination_key")),
+            _screen_display_token(action.get("direction_key")),
+            element_direction,
+            ten_god_direction,
+            action.get("signal_id"),
+        )
+        if label:
+            return label
+    return ""
+
+
+SCREEN_ACTION_BODY_BLOCKLIST = (
+    "방향으로 이어진다",
+    "현실 결과로 넓어진다",
+    "다시 보았습니다",
+    "출발점 8",
+    "도착점 -6",
+)
+
+
+def _screen_sequence_body(action: dict[str, Any]) -> str:
+    sequence = action.get("first_then_second")
+    if not isinstance(sequence, dict):
+        return ""
+    entry = _screen_text(sequence.get("entry_ten_god_label"))
+    entry_face = _screen_text(sequence.get("entry_operation_face"))
+    follow = _screen_text(sequence.get("follow_ten_god_label"))
+    follow_face = _screen_text(sequence.get("follow_operation_face"))
+    if not (entry and entry_face and follow and follow_face):
+        return ""
+    return (
+        f"{entry}{_subject_particle(entry)} 먼저 작용하면 "
+        f"{entry_face}{_subject_particle(entry_face)} 전면에 나오고, "
+        f"{follow}{_subject_particle(follow)} 이어질 때 "
+        f"{follow_face}{_direction_particle(follow_face)} 결과가 굳어집니다."
+    )
+
+
+SCREEN_DOMAIN_LABELS: dict[str, str] = {
+    "money": "재물",
+    "career": "직업",
+    "honor": "명예",
+    "love": "연애",
+    "marriage": "결혼",
+    "social": "대인관계",
+    "personality": "성격",
+    "life": "인생 구간",
+}
+
+
+SCREEN_DOMAIN_PROJECTION_BODIES: dict[str, str] = {
+    "personality": "성격에서는 판단 방식, 표현 성향, 관계 거리가 핵심이 됩니다.",
+    "money": "재물에서는 수입의 발생, 소유로 확정되는 정도, 정산과 권리 기준이 핵심이 됩니다.",
+    "career": "직업에서는 맡는 역할, 책임의 범위, 경력에 남는 평가가 핵심이 됩니다.",
+    "love": "연애에서는 끌림의 기준, 표현 속도, 관계의 거리감이 핵심이 됩니다.",
+    "marriage": "결혼에서는 생활 기준, 책임 분담, 배우자와 맞춰가는 방식이 핵심이 됩니다.",
+    "honor": "명예에서는 평판이 직책과 신뢰로 굳어지는 과정이 핵심이 됩니다.",
+    "social": "대인관계에서는 사람을 받아들이는 거리, 부탁을 처리하는 기준, 관계의 지속성이 핵심이 됩니다.",
+    "life": "인생 구간에서는 초년의 선택 방식, 중년의 책임, 말년의 안정성이 핵심이 됩니다.",
+    "timing": "대운과 세운에서는 성과가 붙는 해와 부담이 커지는 해가 핵심이 됩니다.",
+}
+
+
+SCREEN_DOMAIN_ACTION_RESULTS: dict[str, str] = {
+    "personality": "원칙을 세우고 부담을 정리하게 하며",
+    "money": "수입을 권리와 소유로 확정하게 하며",
+    "career": "책임과 평가가 직함으로 이어지게 하며",
+    "love": "호감보다 신뢰와 기준을 먼저 확인하게 하며",
+    "marriage": "생활 기준과 책임 분담을 분명하게 만들며",
+    "honor": "평판을 공식 신뢰와 책임으로 굳히며",
+    "social": "관계를 정리하고 책임 범위를 분명히 하게 하며",
+    "life": "인생 구간마다 책임과 성취를 쌓는 방식을 만들며",
+    "timing": "성과가 붙는 해와 부담이 커지는 해를 갈라내며",
+}
+
+
+SCREEN_DOMAIN_INTEGRATED_RESULTS: dict[str, str] = {
+    "personality": "판단의 단단함과 표현의 속도를 나누는 기준입니다",
+    "money": "정산, 소유권, 책임 문제가 어떻게 남는지를 가릅니다",
+    "career": "실무 성과가 평가와 권한으로 바뀌는 방식을 가릅니다",
+    "love": "끌림이 신뢰로 이어지는지, 부담으로 남는지를 가릅니다",
+    "marriage": "애정이 생활 기준으로 굳어지는 방식을 가릅니다",
+    "honor": "평판이 일시적 평가에 그칠지 공식 신뢰로 남을지 가릅니다",
+    "social": "호의가 협력으로 남을지 부담으로 남을지 가릅니다",
+    "life": "어느 시기에 성취가 굳고 어느 시기에 조정이 필요한지 가릅니다",
+    "timing": "좋은 해와 조심할 해의 사건 성격을 구분합니다",
+}
+
+
+def _screen_domain_link_labels(values: Any, limit: int = 3) -> list[str]:
+    labels: list[str] = []
+    for value in values or []:
+        label = SCREEN_DOMAIN_LABELS.get(str(value or ""), str(value or "").strip())
+        if label and label not in labels:
+            labels.append(label)
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def _screen_domain_contract_items(domain_contract: Any, limit: int = 3) -> list[dict[str, Any]]:
+    if not isinstance(domain_contract, dict):
+        return []
+    items = domain_contract.get("items")
+    if isinstance(items, list):
+        return [item for item in items[:limit] if isinstance(item, dict)]
+    scores = domain_contract.get("scores")
+    if isinstance(scores, list):
+        return [item for item in scores[:limit] if isinstance(item, dict)]
+    return []
+
+
+def _screen_domain_top_labels(domain_contract: Any, limit: int = 2) -> list[str]:
+    if isinstance(domain_contract, dict):
+        top_labels = [
+            _premium_display_title(label)
+            for label in _compact_text_list(domain_contract.get("top_labels"), limit=limit)
+        ]
+        if top_labels:
+            return top_labels
+    return [
+        _premium_display_title(_screen_text(item.get("label")))
+        for item in _screen_domain_contract_items(domain_contract, limit=limit)
+        if _screen_text(item.get("label"))
+    ][:limit]
+
+
+def _screen_month_pattern_label(gyeokguk: dict[str, Any], month: dict[str, Any]) -> str:
+    branch = _screen_text(gyeokguk.get("month_branch_label") or month.get("month_branch_label"))
+    ten_god = _screen_text(
+        gyeokguk.get("primary_ten_god_label")
+        or gyeokguk.get("month_command_label")
+        or month.get("month_command_label")
+    )
+    if branch and ten_god:
+        return f"{branch}월 {ten_god}"
+    return ten_god or branch
+
+
+def _screen_domain_related_signal(
+    signals: Any,
+    domain_key: str,
+) -> dict[str, Any]:
+    if not isinstance(signals, list):
+        return {}
+    fallback: dict[str, Any] = {}
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        if not fallback:
+            fallback = signal
+        links = set(str(value or "") for value in (signal.get("domain_links") or signal.get("domains") or []))
+        if domain_key in links:
+            return signal
+    return fallback
+
+
+def _screen_domain_layer_sentence(
+    domain_key: str,
+    domain_contract: Any,
+    gyeokguk: dict[str, Any],
+    month: dict[str, Any],
+    temperature: dict[str, Any],
+) -> str:
+    month_pattern = _screen_month_pattern_label(gyeokguk, month)
+    season = _screen_text(temperature.get("season_label"))
+    top_labels = _screen_domain_top_labels(domain_contract, limit=2)
+    contextual = domain_contract.get("contextual_variation") if isinstance(domain_contract, dict) else {}
+    contextual_value = _screen_text(contextual.get("value") if isinstance(contextual, dict) else "")
+    center_action = _screen_domain_related_signal(gyeokguk.get("center_core_actions"), domain_key)
+    flow_action = _screen_domain_related_signal(gyeokguk.get("flow_activated_core_actions"), domain_key)
+    action_label = _screen_action_label([center_action]) or _screen_action_label([flow_action])
+    projection = SCREEN_DOMAIN_PROJECTION_BODIES.get(
+        domain_key,
+        "이 영역에서는 사주의 중심 구조가 생활 속 선택과 사건으로 먼저 드러납니다.",
+    )
+    opening_parts: list[str] = []
+    if month_pattern:
+        opening_parts.append(f"{month_pattern} 기준")
+    if season:
+        opening_parts.append(f"{season} 기운의 속도와 체감")
+    if top_labels:
+        opening_parts.append(f"{' · '.join(top_labels)} 지표")
+    if contextual_value:
+        opening_parts.append(f"{contextual_value} 보정")
+    if action_label:
+        action_subject = f"{action_label}{_subject_particle(action_label)}"
+    else:
+        action_subject = ""
+    if opening_parts:
+        if action_subject:
+            return f"{', '.join(opening_parts)}까지 적용하면 {action_subject} 오행·십신 배합의 중심을 이룹니다."
+        return f"{', '.join(opening_parts)}가 이 영역의 주요 기준입니다."
+    return projection
+
+
+def _screen_domain_action_sentence(
+    domain_key: str,
+    domain_contract: Any,
+    gyeokguk: dict[str, Any],
+    elements: dict[str, Any],
+) -> str:
+    center_action = _screen_domain_related_signal(gyeokguk.get("center_core_actions"), domain_key)
+    flow_action = _screen_domain_related_signal(gyeokguk.get("flow_activated_core_actions"), domain_key)
+    integrated_signal = _screen_domain_related_signal(elements.get("integrated_saju_signals"), domain_key)
+    action_label = _screen_action_label([center_action]) or _screen_action_label([flow_action])
+    integrated_label = _screen_action_label([integrated_signal])
+    action_result = SCREEN_DOMAIN_ACTION_RESULTS.get(domain_key, "이 영역의 결론을 강하게 만들며")
+    integrated_result = SCREEN_DOMAIN_INTEGRATED_RESULTS.get(domain_key, "세부 사건의 실제 양상을 가릅니다")
+    projection = SCREEN_DOMAIN_PROJECTION_BODIES.get(
+        domain_key,
+        "이 영역에서는 사주의 중심 구조가 실제 선택과 사건으로 이어집니다.",
+    ).rstrip(".")
+    projection = projection.replace("핵심이 됩니다", "핵심이 되며")
+    action_subject = _with_subject_particle(action_label) if action_label else ""
+    integrated_subject = _with_subject_particle(integrated_label) if integrated_label else ""
+    if action_label and integrated_label and integrated_label != action_label:
+        projection = f"{projection}, {action_subject} {action_result}, 오행·십신 배합은 {integrated_result}"
+    elif action_label:
+        projection = f"{projection}, {action_subject} {action_result}, 오행·십신 배합은 {integrated_result}"
+    elif integrated_label:
+        projection = f"{projection}, 오행·십신 배합에서는 {integrated_subject} {integrated_result}"
+    elif not projection.endswith("다"):
+        projection = f"{projection}."
+    return projection if projection.endswith(".") else f"{projection}."
+
+
+def _screen_domain_contextual_variation_sentence(domain_contract: Any) -> str:
+    if not isinstance(domain_contract, dict):
+        return ""
+    variation = domain_contract.get("contextual_variation")
+    if not isinstance(variation, dict):
+        return ""
+    body = _screen_clean_action_sentences(
+        [
+            variation.get("body"),
+        ],
+        limit=3,
+    )
+    action = _screen_clean_action_sentences(
+        [
+            variation.get("action"),
+        ],
+        limit=1,
+    )
+    if action and action in body:
+        action = ""
+    return " ".join(part for part in (body, action) if part)
+
+
+def _screen_domain_engine_body(
+    domain_key: str,
+    section: dict[str, Any],
+    domain_contract: Any,
+    gyeokguk: dict[str, Any],
+    month: dict[str, Any],
+    temperature: dict[str, Any],
+    elements: dict[str, Any],
+) -> str:
+    layer_sentence = _screen_domain_layer_sentence(domain_key, domain_contract, gyeokguk, month, temperature)
+    contextual_sentence = _screen_domain_contextual_variation_sentence(domain_contract)
+    action_sentence = _screen_domain_action_sentence(domain_key, domain_contract, gyeokguk, elements)
+    fallback_sentence = _screen_first_value(section.get("summary"), section.get("lead"), section.get("narrative"))
+    return " ".join(
+        part
+        for part in (
+            layer_sentence,
+            action_sentence,
+            contextual_sentence,
+            fallback_sentence,
+        )
+        if part
+    )
+
+
+def _screen_domain_engine_blocks(
+    sections: list[dict[str, Any]],
+    domains: dict[str, Any],
+    gyeokguk: dict[str, Any],
+    month: dict[str, Any],
+    temperature: dict[str, Any],
+    elements: dict[str, Any],
+    *,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    seen_domains: set[str] = set()
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        domain_key = _screen_text(section.get("domain"))
+        if not domain_key or domain_key in seen_domains:
+            continue
+        seen_domains.add(domain_key)
+        domain_contract = domains.get(domain_key) if isinstance(domains, dict) else {}
+        domain_label = _screen_first_value(
+            section.get("domain_label"),
+            SCREEN_DOMAIN_LABELS.get(domain_key),
+            section.get("title"),
+            fallback="분야별 총운",
+        )
+        top_labels = _screen_domain_top_labels(domain_contract, limit=2)
+        value = _screen_first_value(
+            " · ".join(top_labels),
+            section.get("heading"),
+            section.get("headline"),
+            section.get("title"),
+            fallback=domain_label,
+        )
+        blocks.append(
+            _screen_insight_block(
+                domain_label,
+                value,
+                _screen_domain_engine_body(domain_key, section, domain_contract, gyeokguk, month, temperature, elements),
+                tag="영역",
+                evidence=[
+                    _screen_month_pattern_label(gyeokguk, month),
+                    _screen_text(temperature.get("season_label")),
+                ],
+            )
+        )
+        if len(blocks) >= limit:
+            break
+    if blocks:
+        return _screen_compact_blocks(blocks, limit=limit)
+    return []
+
+
+def _screen_integrated_signal_body(action: dict[str, Any]) -> str:
+    if not isinstance(action, dict):
+        return ""
+    if not (
+        action.get("element_direction_key")
+        and action.get("ten_god_direction_key")
+        and action.get("trait_keywords")
+    ):
+        return ""
+    element_direction = _screen_display_token(action.get("element_direction_key"))
+    ten_god_direction = _screen_display_token(action.get("ten_god_direction_key"))
+    traits = _compact_text_list(action.get("trait_keywords"), limit=3)
+    domains = _screen_domain_link_labels(action.get("domain_links"), limit=3)
+    first = (
+        f"오행의 {element_direction}와 십신의 {ten_god_direction}이 겹칩니다."
+        if element_direction and ten_god_direction
+        else ""
+    )
+    second = ""
+    if traits and domains:
+        second = f"{'·'.join(traits)} 성향이 {'·'.join(domains)} 영역에서 선택과 대응 방식으로 나타납니다."
+    elif traits:
+        second = f"{'·'.join(traits)} 성향이 선택 방식으로 드러납니다."
+    return " ".join(part for part in (first, second) if part)
+
+
+def _screen_clean_action_sentences(values: list[Any], *, limit: int = 2) -> str:
+    picked: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "").strip().replace("\n", " "))
+        if not text:
+            continue
+        for raw in text.split("."):
+            sentence = raw.strip()
+            if not sentence:
+                continue
+            if any(token in sentence for token in SCREEN_ACTION_BODY_BLOCKLIST):
+                continue
+            sentence = re.sub(r"^[가-힣·]+:\s*", "", sentence).strip()
+            sentence = _fix_common_particle_text(sentence)
+            if not sentence or sentence in seen:
+                continue
+            seen.add(sentence)
+            picked.append(sentence)
+            if len(picked) >= limit:
+                return " ".join(f"{part}." for part in picked)
+    return " ".join(f"{part}." for part in picked) if picked else ""
+
+
+def _screen_action_body(action: dict[str, Any], fallback: str) -> str:
+    if not isinstance(action, dict):
+        return fallback
+    summary_body = _screen_clean_action_sentences(
+        [
+            action.get("summary_interpretation"),
+            action.get("domain_projection"),
+        ],
+        limit=2,
+    )
+    if summary_body:
+        return summary_body
+    sequence_body = _screen_sequence_body(action)
+    if sequence_body:
+        return sequence_body
+    integrated_body = _screen_integrated_signal_body(action)
+    if integrated_body:
+        return integrated_body
+    body = _screen_clean_action_sentences(
+        [
+            action.get("timing"),
+            action.get("felt_experience"),
+            action.get("behavior_tendency"),
+            action.get("interpretation"),
+            action.get("core_interpretation"),
+            action.get("combined_interpretation"),
+            action.get("effect"),
+            action.get("mechanism"),
+            action.get("decision_reason"),
+        ],
+        limit=2,
+    )
+    return body or fallback
+
+
+def _screen_action_impact_labels(action: dict[str, Any], limit: int = 3) -> list[str]:
+    if not isinstance(action, dict):
+        return []
+    labels: list[str] = []
+    for item in list(action.get("feature_axis_impacts") or []):
+        if not isinstance(item, dict):
+            continue
+        label = _screen_text(item.get("axis_label"))
+        if label and label not in labels:
+            labels.append(label)
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def _screen_contextual_anchor_value(contextual: dict[str, Any]) -> str:
+    anchor = contextual.get("anchor") if isinstance(contextual.get("anchor"), dict) else {}
+    branch = _screen_display_token(anchor.get("month_branch"))
+    ten_god = _screen_text(anchor.get("primary_ten_god_label") or anchor.get("month_command_ten_god"))
+    pattern = _screen_text(anchor.get("primary_pattern_label"))
+    season = _screen_display_token(anchor.get("season_label"))
+    parts = [part for part in (branch, ten_god or pattern, season) if part]
+    return " · ".join(parts)
+
+
+def _screen_contextual_anchor_body(contextual: dict[str, Any]) -> str:
+    anchor = contextual.get("anchor") if isinstance(contextual.get("anchor"), dict) else {}
+    element_context = contextual.get("element_context") if isinstance(contextual.get("element_context"), dict) else {}
+    branch = _screen_display_token(anchor.get("month_branch"))
+    ten_god = _screen_text(anchor.get("primary_ten_god_label") or anchor.get("month_command_ten_god"))
+    day_element = _screen_text(element_context.get("day_master_element_label"))
+    if branch and ten_god and day_element:
+        return f"태어난 달의 바탕이 뚜렷한 사주입니다. {day_element} 기운이 현실에서 어떻게 쓰이는지에 따라 성향과 운의 결이 달라집니다."
+    if branch and ten_god:
+        return "태어난 달이 만든 기운을 중심으로, 성향과 인생의 굴곡을 함께 정리합니다."
+    return "타고난 바탕이 어느 방향으로 삶을 끌고 가는지 먼저 정리합니다."
+
+
+def _screen_contextual_variation_value(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    return _screen_first_value(
+        variation.get("pattern_element_status_label"),
+        variation.get("month_pattern_relation_label"),
+        variation.get("variation_state"),
+        fallback="격국 변주",
+    )
+
+
+def _screen_contextual_variation_body(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    summary = _screen_text(variation.get("judgment_summary"))
+    if summary:
+        phrase = select_tongbyeon_summary_phrase(
+            [
+                summary,
+                variation.get("primary_pattern_label"),
+                variation.get("season_display") or variation.get("season_label"),
+                variation.get("month_pattern_relation_label"),
+            ]
+        )
+        return phrase.line
+    pattern = _screen_text(variation.get("primary_pattern_label"))
+    season = _screen_text(variation.get("season_display") or variation.get("season_label"))
+    element = _screen_text(variation.get("pattern_element_label"))
+    relation = _screen_text(variation.get("month_pattern_relation_label"))
+    if pattern and season and element:
+        body = "같은 타고난 바탕이라도 계절과 기운의 쓰임에 따라 인생의 굴곡이 달라집니다."
+        if relation:
+            body += " 이 사주는 한쪽으로 단순하게 보지 않고, 얻는 복과 조심할 대목을 함께 봐야 합니다."
+        return body
+    return "같은 사주라도 계절, 기운의 균형, 운에서 만나는 시기에 따라 결론이 달라집니다."
+
+
+def _screen_contextual_materiality_value(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    materiality = variation.get("elemental_materiality") if isinstance(variation.get("elemental_materiality"), dict) else {}
+    pair = _screen_text(materiality.get("element_pair_label"))
+    relation = _screen_text(materiality.get("relation_label"))
+    if pair and relation:
+        return f"{pair} 배합 · {relation}"
+    if pair:
+        return f"{pair} 배합"
+    return ""
+
+
+def _screen_contextual_materiality_body(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    materiality = variation.get("elemental_materiality") if isinstance(variation.get("elemental_materiality"), dict) else {}
+    if not materiality:
+        return ""
+    interpretation = _screen_clean_action_sentences(
+        [
+            materiality.get("interpretation"),
+        ],
+        limit=2,
+    )
+    if interpretation:
+        return tongbyeon_surface_text(interpretation)
+    pair = _screen_text(materiality.get("element_pair_label"))
+    keywords = [
+        _screen_text(keyword)
+        for keyword in _compact_text_list(materiality.get("trait_keywords"), limit=3)
+    ]
+    domains = _screen_domain_link_labels(materiality.get("domain_links"), limit=2)
+    parts: list[str] = []
+    if pair and keywords:
+        parts.append(f"타고난 기운은 {' · '.join(keywords)} 쪽으로 성향을 드러냅니다.")
+    elif pair:
+        parts.append("타고난 기운의 배합이 성격과 선택 방식에 영향을 줍니다.")
+    if domains:
+        parts.append(f"{' · '.join(domains)} 영역에서 먼저 확인됩니다.")
+    return tongbyeon_surface_text(" ".join(parts))
+
+
+def _screen_contextual_reception_value(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    reception = variation.get("day_stem_reception") if isinstance(variation.get("day_stem_reception"), dict) else {}
+    day = _screen_text(reception.get("day_master_stem_label"))
+    target = _screen_text(reception.get("target_stem_label"))
+    ten_god = _screen_text(reception.get("target_ten_god_label"))
+    if day and target and ten_god:
+        return f"{day}→{target} · {ten_god}"
+    if day and target:
+        return f"{day}→{target}"
+    return ""
+
+
+def _screen_contextual_reception_body(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    reception = variation.get("day_stem_reception") if isinstance(variation.get("day_stem_reception"), dict) else {}
+    if not reception:
+        return ""
+    body = _screen_clean_action_sentences(
+        [
+            reception.get("core_interpretation"),
+            reception.get("felt_experience"),
+            reception.get("behavior_tendency"),
+        ],
+        limit=2,
+    )
+    if body:
+        return tongbyeon_surface_text(body)
+    day = _screen_text(reception.get("day_master_stem_label"))
+    target = _screen_text(reception.get("target_stem_label"))
+    ten_god = _screen_text(reception.get("target_ten_god_label"))
+    if day and target and ten_god:
+        return "타고난 기운을 받아들이는 방식이 성격과 선택의 차이로 드러납니다."
+    return ""
+
+
+def _screen_contextual_elemental_judgment_value(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    judgment = variation.get("elemental_judgment") if isinstance(variation.get("elemental_judgment"), dict) else {}
+    state = _screen_display_token(judgment.get("state"))
+    score_delta = judgment.get("score_delta")
+    if state and isinstance(score_delta, int):
+        direction = "보강" if score_delta > 0 else "주의" if score_delta < 0 else "중립"
+        return f"{state} · {direction}"
+    return state
+
+
+def _screen_contextual_elemental_judgment_body(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    judgment = variation.get("elemental_judgment") if isinstance(variation.get("elemental_judgment"), dict) else {}
+    components = judgment.get("components") if isinstance(judgment.get("components"), list) else []
+    picked = [
+        component
+        for component in components
+        if isinstance(component, dict) and isinstance(component.get("score_delta"), int)
+    ]
+    picked.sort(key=lambda item: abs(int(item.get("score_delta") or 0)), reverse=True)
+    labels = [
+        _screen_text(item.get("label"))
+        for item in picked[:3]
+        if _screen_text(item.get("label"))
+    ]
+    if labels:
+        first = labels[0]
+        rest = labels[1:]
+        if rest:
+            return "타고난 기운의 균형을 먼저 봅니다. 여러 기준이 맞물리며 재물, 직업, 관계의 강약이 달라집니다."
+        return "타고난 기운의 균형을 먼저 봅니다. 이 기준에 따라 장점과 부담이 갈립니다."
+    return ""
+
+
+def _screen_contextual_action_value(contextual: dict[str, Any]) -> str:
+    action = _first_screen_dict(contextual.get("contextual_actions"))
+    return _screen_first_value(
+        action.get("action_name"),
+        action.get("pair_name"),
+        action.get("pattern_label"),
+        fallback="중심 작용",
+    )
+
+
+def _screen_contextual_action_body(contextual: dict[str, Any]) -> str:
+    action = _first_screen_dict(contextual.get("contextual_actions"))
+    if not action:
+        return "타고난 바탕이 실제 생활에서 어느 운으로 드러나는지 정리합니다."
+    action_name = _screen_first_value(
+        action.get("action_name"),
+        action.get("pair_name"),
+        action.get("pattern_label"),
+        fallback="중심 작용",
+    )
+    return tongbyeon_surface_text(
+        f"{action_name}은 사주의 중심 작용을 보여주는 개념입니다. "
+        "이 개념은 성향, 책임, 사회적 역할, 운의 체감이 어떤 방식으로 이어지는지 설명합니다. "
+        f"당신의 사주에서 {action_name}의 구조와 작용력을 계산하면 아래와 같이 보정됩니다."
+    )
+
+
+def _screen_contextual_domain_value(contextual: dict[str, Any]) -> str:
+    domains = contextual.get("domain_synthesis")
+    if not isinstance(domains, list):
+        return ""
+    labels = [
+        _screen_text(item.get("label") or SCREEN_DOMAIN_LABELS.get(str(item.get("domain") or "")))
+        for item in domains[:3]
+        if isinstance(item, dict)
+    ]
+    return " · ".join(label for label in labels if label)
+
+
+def _screen_contextual_domain_body(contextual: dict[str, Any]) -> str:
+    domains = contextual.get("domain_synthesis")
+    if not isinstance(domains, list) or not domains:
+        return "재물, 직업, 인연, 성격 중 먼저 강하게 드러나는 운을 정리합니다."
+    first = next((item for item in domains if isinstance(item, dict)), {})
+    label = _screen_text(first.get("label") or SCREEN_DOMAIN_LABELS.get(str(first.get("domain") or "")))
+    state = _screen_display_token(first.get("state"))
+    source_count = first.get("source_count")
+    if label and state and source_count:
+        if state == "긍정":
+            state_label = "강점이 먼저 드러나는 영역"
+        elif state in {"주의", "부담"}:
+            state_label = "관리가 필요한 영역"
+        elif state == "혼재":
+            state_label = "성과와 부담이 함께 걸린 영역"
+        else:
+            state_label = f"{state} 성향이 드러나는 영역"
+        return f"{label}은 {state_label}입니다. 타고난 바탕과 운의 움직임을 함께 본 결론입니다."
+    if label and state:
+        return f"{label}은 {state} 성향이 드러납니다. 한 가지 요소가 아니라 전체 운의 결을 함께 본 결과입니다."
+    return "어느 영역에서 복이 먼저 붙고, 어느 영역에서 조심할 일이 생기는지 구분합니다."
+
+
+def _screen_contextual_climate_value(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    climate = variation.get("climate_adjustment") if isinstance(variation.get("climate_adjustment"), dict) else {}
+    element = _screen_text(climate.get("pattern_element_label"))
+    state = _screen_display_token(climate.get("state"))
+    if element and state:
+        return f"{element} · {state}"
+    element_context = contextual.get("element_context") if isinstance(contextual.get("element_context"), dict) else {}
+    useful = _screen_display_list(element_context.get("useful_element_labels"), limit=2)
+    caution = _screen_display_list(element_context.get("caution_element_labels"), limit=2)
+    parts = []
+    if useful:
+        parts.append(f"필요 {' · '.join(useful)}")
+    if caution:
+        parts.append(f"주의 {' · '.join(caution)}")
+    return " / ".join(parts) or "조후 보완"
+
+
+def _screen_contextual_climate_body(contextual: dict[str, Any]) -> str:
+    variation = contextual.get("pattern_variation") if isinstance(contextual.get("pattern_variation"), dict) else {}
+    climate = variation.get("climate_adjustment") if isinstance(variation.get("climate_adjustment"), dict) else {}
+    if climate:
+        interpretation = _screen_text(climate.get("interpretation"))
+        conditions = [
+            _screen_display_token(climate.get("temperature_balance")),
+            _screen_display_token(climate.get("moisture_balance")),
+        ]
+        conditions = [item for item in conditions if item and item != "균형"]
+        parts = [interpretation] if interpretation else []
+        if conditions:
+            parts.append(f"기준 조건은 {' · '.join(conditions)}입니다.")
+        if parts:
+            return " ".join(parts)
+    element_context = contextual.get("element_context") if isinstance(contextual.get("element_context"), dict) else {}
+    temp = _screen_display_token(element_context.get("temperature_balance"))
+    moisture = _screen_display_token(element_context.get("moisture_balance"))
+    strength = _screen_display_token(element_context.get("day_master_strength"))
+    parts = []
+    if temp or moisture:
+        parts.append(f"조후는 {' · '.join(part for part in (temp, moisture) if part)} 쪽으로 기울어 있습니다.")
+    if strength:
+        parts.append(f"일간은 {strength} 기준으로 보아야 합니다.")
+    return " ".join(parts) or "조후 상태는 격국의 성패와 영역별 체감을 보정하는 기준입니다."
+
+
+def _screen_contextual_coverage_value(contextual: dict[str, Any]) -> str:
+    coverage = contextual.get("coverage") if isinstance(contextual.get("coverage"), dict) else {}
+    labels = {
+        "month_anchor": "월령",
+        "gyeokguk_actions": "격국 작용",
+        "role_edges": "십신 생극",
+        "element_edges": "오행 생극",
+        "branch_relations": "지지 관계",
+        "climate": "조후",
+    }
+    active = [label for key, label in labels.items() if coverage.get(key)]
+    return " · ".join(active[:4]) or "반영 범위"
+
+
+def _screen_insight_block(
+    title: str,
+    value: Any,
+    body: str,
+    *,
+    tag: str = "핵심",
+    evidence: list[str] | None = None,
+) -> dict[str, Any]:
+    clean_title = _screen_text(tongbyeon_surface_title(str(title or "").strip()))
+    clean_value = tongbyeon_surface_text(_screen_text(value))
+    clean_body = tongbyeon_surface_text(_compact_factor_sentences(body, limit=2))
+    if not clean_title or (not clean_value and not clean_body):
+        return {}
+    return {
+        "title": clean_title,
+        "value": clean_value,
+        "body": clean_body,
+        "tag": tag,
+        "evidence": [tongbyeon_surface_text(item) for item in _compact_text_list(evidence or [], limit=4)],
+    }
+
+
+def _screen_compact_blocks(blocks: list[dict[str, Any]], limit: int = 4) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        key = (str(block.get("title") or ""), str(block.get("value") or ""))
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        compact.append(block)
+        if len(compact) >= limit:
+            break
+    return compact
+
+
+def _screen_years_label(values: Any, limit: int = 5) -> str:
+    labels: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(values, list):
+        return ""
+    for value in values:
+        if isinstance(value, dict):
+            raw_year = str(value.get("year") or "").strip()
+        else:
+            raw_year = str(value or "").strip()
+        match = re.search(r"(\d{4})", raw_year)
+        label = f"{match.group(1)}년" if match else raw_year
+        if label and label not in seen:
+            seen.add(label)
+            labels.append(label)
+        if len(labels) >= limit:
+            break
+    return " · ".join(labels)
+
+
+def _screen_unique_label_parts(*parts: Any) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = str(part or "").strip().strip(".")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        values.append(text)
+    return values
+
+
+def _screen_timing_domain_label(candidate: dict[str, Any]) -> str:
+    category = timing_lifecycle_category(candidate, kind=str(candidate.get("kind") or "good"))
+    if category:
+        return category
+    title = _screen_text(candidate.get("title") or candidate.get("focus") or candidate.get("focusLine"))
+    raw_domain = _screen_text(candidate.get("domainLabel") or candidate.get("domain_label"))
+    if raw_domain and raw_domain != title:
+        return raw_domain[:-1] if raw_domain.endswith("운") else raw_domain
+    fallback_domain = _screen_text(candidate.get("domain_label"))
+    if fallback_domain and fallback_domain != title:
+        return fallback_domain[:-1] if fallback_domain.endswith("운") else fallback_domain
+    return ""
+
+
+def _screen_timing_candidate_label(candidate: dict[str, Any]) -> str:
+    year = f"{candidate.get('year')}년" if candidate.get("year") else ""
+    age = _screen_text(candidate.get("ageLabel") or candidate.get("age_label"))
+    domain = _screen_timing_domain_label(candidate)
+    focus = _screen_text(candidate.get("focus") or candidate.get("focusLine") or candidate.get("title"))
+    return " · ".join(_screen_unique_label_parts(year, age, domain, focus))
+
+
+def _screen_tongbyeon_timing_candidate_label(candidate: dict[str, Any], *, kind: str) -> str:
+    year = f"{candidate.get('year')}년" if candidate.get("year") else ""
+    age = _screen_text(candidate.get("ageLabel") or candidate.get("age_label"))
+    category = timing_lifecycle_category(candidate, kind=kind)
+    phrase = select_tongbyeon_timing_phrase(candidate, kind=kind)
+    return " · ".join(_screen_unique_label_parts(year, age, category, phrase.title))
+
+
+def _screen_timing_candidate_sentence(candidate: dict[str, Any], *, kind: str) -> str:
+    year = f"{candidate.get('year')}년" if candidate.get("year") else ""
+    age = _screen_text(candidate.get("ageLabel") or candidate.get("age_label"))
+    category = timing_lifecycle_category(candidate, kind=kind)
+    phrase = select_tongbyeon_timing_phrase(candidate, kind=kind)
+    period = " · ".join(part for part in (year, age) if part) or "이 시기"
+    category_part = f"{category} 운에서 " if category else ""
+    return f"{period}에는 {category_part}{phrase.title}입니다. {compose_tongbyeon_timing_sentence(candidate, kind=kind)}"
+
+
+def _screen_timing_candidates_body(candidates: Any, *, kind: str, fallback: str) -> str:
+    if not isinstance(candidates, list):
+        return tongbyeon_surface_text(fallback)
+    picked = [candidate for candidate in candidates[:2] if isinstance(candidate, dict)]
+    if not picked:
+        return tongbyeon_surface_text(fallback)
+    return " ".join(_screen_timing_candidate_sentence(candidate, kind=kind) for candidate in picked)
+
+
+def _analysis_screen_contract(
+    profile_summary: dict[str, Any],
+    sections: list[dict[str, Any]],
+    detail_units: dict[str, Any],
+    engine_contract: dict[str, Any],
+) -> dict[str, Any]:
+    """Map engine output into the card slots used by the 2.0 UI shell."""
+
+    profile = profile_summary if isinstance(profile_summary, dict) else {}
+    section_list = [section for section in sections if isinstance(section, dict)]
+    details = detail_units if isinstance(detail_units, dict) else {}
+    contract = engine_contract if isinstance(engine_contract, dict) else {}
+    gyeokguk = contract.get("gyeokguk") if isinstance(contract.get("gyeokguk"), dict) else {}
+    month = contract.get("month") if isinstance(contract.get("month"), dict) else {}
+    elements = contract.get("elements") if isinstance(contract.get("elements"), dict) else {}
+    temperature = contract.get("temperature") if isinstance(contract.get("temperature"), dict) else {}
+    domains = contract.get("domains") if isinstance(contract.get("domains"), dict) else {}
+    timing = contract.get("timing") if isinstance(contract.get("timing"), dict) else {}
+    contextual = contract.get("gyeokguk_contextual") if isinstance(contract.get("gyeokguk_contextual"), dict) else {}
+    contextual_source_profiles = [
+        profile
+        for profile in contextual.get("source_evidence_profiles") or []
+        if isinstance(profile, dict) and profile.get("source_verified") is True
+    ]
+    ten_gods = contract.get("ten_gods") if isinstance(contract.get("ten_gods"), dict) else {}
+    coverage = contract.get("coverage") if isinstance(contract.get("coverage"), dict) else {}
+
+    primary = profile.get("primary") if isinstance(profile.get("primary"), dict) else {}
+    secondary = profile.get("secondary") if isinstance(profile.get("secondary"), dict) else {}
+    management = profile.get("management") if isinstance(profile.get("management"), dict) else {}
+    domain_section_list = [
+        section
+        for section in section_list
+        if _domain_key(section) not in {"timing", "life", "year_2026", "year_2027"}
+    ]
+    domain_labels = _screen_domain_labels(domain_section_list)
+    center_action = _screen_action_label(gyeokguk.get("center_core_actions"))
+    flow_action = _screen_action_label(gyeokguk.get("flow_activated_core_actions"))
+    single_ten_god_action = _screen_action_label(ten_gods.get("single_actions"))
+    dual_ten_god_action = _screen_action_label(ten_gods.get("dual_actions"))
+    contextual_ten_god_action = _screen_action_label(ten_gods.get("contextual_actions"))
+    element_signal = _screen_action_label(elements.get("element_combination_signals"))
+    integrated_signal = _screen_action_label(elements.get("integrated_saju_signals"))
+    cycle_signal = _screen_action_label(temperature.get("cycle_regulation_signals"))
+    center_action_obj = _first_screen_dict(gyeokguk.get("center_core_actions"))
+    flow_action_obj = _first_screen_dict(gyeokguk.get("flow_activated_core_actions"))
+    single_ten_god_action_obj = _first_screen_dict(ten_gods.get("single_actions"))
+    dual_ten_god_action_obj = _first_screen_dict(ten_gods.get("dual_actions"))
+    contextual_ten_god_action_obj = _first_screen_dict(ten_gods.get("contextual_actions"))
+    element_signal_obj = _first_screen_dict(elements.get("element_combination_signals"))
+    integrated_signal_obj = _first_screen_dict(elements.get("integrated_saju_signals"))
+    ten_god_signal_obj = _first_screen_dict(elements.get("ten_god_interaction_signals"))
+    cycle_signal_obj = _first_screen_dict(temperature.get("cycle_regulation_signals"))
+    active_phase = month.get("active_hidden_phase") if isinstance(month.get("active_hidden_phase"), dict) else {}
+    useful_elements = _screen_display_list(month.get("useful_elements") or temperature.get("useful_elements"), limit=3)
+    caution_elements = _screen_display_list(month.get("caution_elements") or temperature.get("caution_elements"), limit=3)
+    climate_needs = _screen_display_list(temperature.get("climate_needs"), limit=3)
+    timing_section = next((section for section in section_list if _domain_key(section) == "timing"), {})
+    timing_map = timing_section.get("timing_map") if isinstance(timing_section.get("timing_map"), dict) else {}
+    timing_good_candidates = [
+        item for item in list(timing_map.get("goodHighlights") or []) if isinstance(item, dict)
+    ] or [
+        item for item in list(timing.get("good_years") or []) if isinstance(item, dict)
+    ]
+    timing_caution_candidates = [
+        item for item in list(timing_map.get("cautionHighlights") or []) if isinstance(item, dict)
+    ] or [
+        item for item in list(timing.get("caution_years") or []) if isinstance(item, dict)
+    ]
+    good_years_label = _screen_years_label(timing_good_candidates)
+    caution_years_label = _screen_years_label(timing_caution_candidates)
+    summary_headline = _screen_summary_headline(
+        profile,
+        gyeokguk,
+        month,
+        temperature,
+        primary,
+        secondary,
+        management,
+    )
+    domain_blocks = _screen_domain_engine_blocks(
+        domain_section_list,
+        domains,
+        gyeokguk,
+        month,
+        temperature,
+        elements,
+        limit=4,
+    )
+    detail_insight_blocks: dict[str, list[dict[str, Any]]] = {
+        "summary": _screen_compact_blocks(
+            [
+                _screen_insight_block("중심 성향", profile.get("profile_type"), summary_headline, tag="요약"),
+                _screen_insight_block(
+                    "강한 영역",
+                    primary.get("domain_label") or primary.get("label"),
+                    primary.get("caption") or primary.get("detail") or primary.get("value"),
+                    tag="강점",
+                ),
+                _screen_insight_block(
+                    "주의 영역",
+                    management.get("domain_label") or management.get("label"),
+                    management.get("caption") or management.get("detail") or management.get("value"),
+                    tag="주의",
+                ),
+            ]
+        ),
+        "gyeokguk": _screen_compact_blocks(
+            [
+                _screen_insight_block(
+                    "격국의 중심",
+                    gyeokguk.get("primary_ten_god_label") or gyeokguk.get("primary_pattern_label"),
+                    _screen_gyeokguk_center_body(gyeokguk, temperature, month),
+                    tag="주격",
+                    evidence=[gyeokguk.get("month_branch_label"), gyeokguk.get("month_command_label")],
+                ),
+                _screen_insight_block(
+                    "격국 변주",
+                    _screen_contextual_variation_value(contextual),
+                    _screen_contextual_variation_body(contextual),
+                    tag="보정",
+                    evidence=[
+                        _screen_contextual_materiality_value(contextual),
+                        _screen_contextual_elemental_judgment_value(contextual),
+                        _screen_contextual_climate_value(contextual),
+                    ],
+                ),
+                _screen_insight_block(
+                    "중심 작용",
+                    center_action,
+                    _screen_action_body(center_action_obj, "격국 안에서 실제 결과를 만드는 십신 구조입니다."),
+                    tag="작용",
+                    evidence=(
+                        _screen_action_impact_labels(center_action_obj)
+                        + _screen_domain_link_labels(center_action_obj.get("domains"), limit=2)
+                        if isinstance(center_action_obj, dict)
+                        else []
+                    ),
+                ),
+                _screen_insight_block(
+                    "운에서 발동되는 작용",
+                    flow_action,
+                    _screen_action_body(flow_action_obj, "대운과 세운이 원국의 중심 구조를 건드릴 때 드러나는 변화입니다."),
+                    tag="시기",
+                    evidence=(
+                        _screen_action_impact_labels(flow_action_obj)
+                        + _screen_domain_link_labels(flow_action_obj.get("domains"), limit=2)
+                        if isinstance(flow_action_obj, dict)
+                        else []
+                    ),
+                ),
+                _screen_insight_block(
+                    "일간 수용",
+                    _screen_contextual_reception_value(contextual),
+                    _screen_contextual_reception_body(contextual),
+                    tag="일간",
+                    evidence=[
+                        "일간별 천간 수용",
+                    ],
+                ),
+            ],
+            limit=5,
+        ),
+        "ten_gods": _screen_compact_blocks(
+            [
+                _screen_insight_block(
+                    "월령 십신",
+                    ten_gods.get("month_command_label") or ten_gods.get("primary_ten_god_label"),
+                    "월지에서 잡힌 십신은 사주의 사회적 역할과 사건의 방향을 정하는 출발점입니다.",
+                    tag="월령",
+                    evidence=[ten_gods.get("month_branch_label"), ten_gods.get("primary_pattern_label")],
+                ),
+                _screen_insight_block(
+                    "단일 십신 작용",
+                    single_ten_god_action,
+                    _screen_action_body(single_ten_god_action_obj, "한 십신이 격국 안에서 맡는 기본 역할입니다."),
+                    tag="단일",
+                    evidence=(
+                        _screen_action_impact_labels(single_ten_god_action_obj)
+                        + _screen_domain_link_labels(single_ten_god_action_obj.get("domains"), limit=2)
+                        if isinstance(single_ten_god_action_obj, dict)
+                        else []
+                    ),
+                ),
+                _screen_insight_block(
+                    "이중 십신 작용",
+                    dual_ten_god_action,
+                    _screen_action_body(dual_ten_god_action_obj, "두 십신이 이어질 때 사건의 결론과 부담이 함께 달라집니다."),
+                    tag="조합",
+                    evidence=(
+                        _screen_action_impact_labels(dual_ten_god_action_obj)
+                        + _screen_domain_link_labels(dual_ten_god_action_obj.get("domains"), limit=2)
+                        if isinstance(dual_ten_god_action_obj, dict)
+                        else []
+                    ),
+                ),
+                _screen_insight_block(
+                    "격국 중심 작용",
+                    center_action,
+                    _screen_action_body(center_action_obj, "격국에서 실제 결과를 만드는 중심 십신 구조입니다."),
+                    tag="중심",
+                    evidence=(
+                        _screen_action_impact_labels(center_action_obj)
+                        + _screen_domain_link_labels(center_action_obj.get("domains"), limit=2)
+                        if isinstance(center_action_obj, dict)
+                        else []
+                    ),
+                ),
+                _screen_insight_block(
+                    "영역별 투사",
+                    contextual_ten_god_action,
+                    _screen_action_body(contextual_ten_god_action_obj, "십신 작용이 재물, 직업, 관계, 결혼, 성향으로 내려가는 지점입니다."),
+                    tag="영역",
+                    evidence=_screen_display_list(ten_gods.get("action_labels"), limit=3),
+                ),
+            ],
+            limit=5,
+        ),
+        "month": _screen_compact_blocks(
+            [
+                _screen_insight_block(
+                    "월지",
+                    month.get("month_branch_label"),
+                    _screen_month_body(month),
+                    tag="기준",
+                    evidence=[month.get("month_element_label"), month.get("month_command_label")],
+                ),
+                _screen_insight_block(
+                    "지장간 작용",
+                    " · ".join(
+                        part
+                        for part in (
+                            active_phase.get("active_phase_label"),
+                            active_phase.get("active_stem_label"),
+                            active_phase.get("active_ten_god_label"),
+                        )
+                        if part
+                    ),
+                    _screen_hidden_stem_body(active_phase),
+                    tag="내부",
+                    evidence=[active_phase.get("active_element_label") or _screen_display_token(active_phase.get("active_element"))],
+                ),
+                _screen_insight_block(
+                    "월령 보완",
+                    " · ".join(useful_elements),
+                    _screen_month_support_body(useful_elements, temperature),
+                    tag="보완",
+                    evidence=caution_elements,
+                ),
+            ]
+        ),
+        "elements": _screen_compact_blocks(
+            [
+                _screen_insight_block(
+                    "오행 배합",
+                    element_signal,
+                    _screen_action_body(element_signal_obj, "오행 배합은 성향의 결, 관심의 방향, 일을 대하는 방식을 함께 만듭니다."),
+                    tag="배합",
+                ),
+                _screen_insight_block(
+                    "오행·십신 통합",
+                    integrated_signal,
+                    _screen_action_body(integrated_signal_obj, "오행의 성향이 재물, 직업, 관계에서 어떤 역할로 드러나는지 정리합니다."),
+                    tag="통합",
+                ),
+                _screen_insight_block(
+                    "십신 상호작용",
+                    _screen_action_label([ten_god_signal_obj]),
+                    _screen_action_body(ten_god_signal_obj, "십신의 생극은 재물, 직업, 관계에서 결과가 맺히는 방식을 가릅니다."),
+                    tag="십신",
+                ),
+                _screen_insight_block(
+                    "일간·격국 오행",
+                    _screen_contextual_materiality_value(contextual),
+                    _screen_contextual_materiality_body(contextual),
+                    tag="물상",
+                    evidence=[
+                        "일간 오행·격국 오행 배합",
+                    ],
+                ),
+                _screen_insight_block(
+                    "오행 성패",
+                    _screen_contextual_elemental_judgment_value(contextual),
+                    _screen_contextual_elemental_judgment_body(contextual),
+                    tag="보정",
+                    evidence=[
+                        "월령 가중",
+                        "조후 보정",
+                    ],
+                ),
+            ],
+            limit=5,
+        ),
+        "temperature": _screen_compact_blocks(
+            [
+                _screen_insight_block(
+                    "계절",
+                    temperature.get("season_label"),
+                    _screen_temperature_season_body(temperature),
+                    tag="조후",
+                    evidence=[temperature.get("month_element_label")],
+                ),
+                _screen_insight_block(
+                    "온도와 건습",
+                    " · ".join(
+                        part
+                        for part in (
+                            _screen_display_token(temperature.get("temperature_balance")),
+                            _screen_display_token(temperature.get("moisture_balance")),
+                        )
+                        if part
+                    ),
+                    "사주의 온도와 습도는 의욕, 실행 속도, 피로감에 직접 영향을 줍니다. 필요한 기운이 들어올 때 표현과 결정이 한결 분명해집니다.",
+                    tag="균형",
+                ),
+                _screen_insight_block(
+                    "조후 보완",
+                    _screen_contextual_climate_value(contextual),
+                    _screen_contextual_climate_body(contextual),
+                    tag="보완",
+                    evidence=climate_needs,
+                ),
+                _screen_insight_block(
+                    "생극 조절",
+                    cycle_signal,
+                    _screen_action_body(cycle_signal_obj, "상생과 상극이 어느 방향으로 정리되는지에 따라 운의 체감이 달라집니다."),
+                    tag="생극",
+                ),
+            ]
+        ),
+        "contextual": [],
+        "domains": domain_blocks,
+        "timing": _screen_compact_blocks(
+            [
+                _screen_insight_block("좋은 시기", good_years_label, "", tag="연도"),
+                _screen_insight_block(
+                    "조심할 시기",
+                    caution_years_label,
+                    "",
+                    tag="주의",
+                ),
+            ]
+        ),
+        "basis": _screen_compact_blocks(
+            [
+                _screen_insight_block(
+                    "명식 기준",
+                    f"{len((details.get('basis') or {}).get('cards') or [])}개 기준",
+                    "천간, 지지, 지장간, 합충형파해, 대운과 세운을 나누어 판단 기준을 정리합니다.",
+                    tag="기준",
+                )
+            ]
+        ),
+    }
+    detail_menu = [
+        _screen_menu_card(
+            "gyeokguk",
+            "격국 분석",
+            _screen_first_value(gyeokguk.get("primary_ten_god_label"), gyeokguk.get("primary_pattern_label"), fallback="월령 중심 구조"),
+            "格",
+            [
+                "gyeokguk.primary_pattern",
+                "gyeokguk.center_core_actions",
+                "gyeokguk_contextual.pattern_variation.day_stem_reception",
+            ],
+            [
+                {"label": "주격", "value": gyeokguk.get("primary_ten_god_label") or gyeokguk.get("primary_pattern_label")},
+                {"label": "월령 십신", "value": gyeokguk.get("month_command_label")},
+                {"label": "중심 작용", "value": center_action},
+            ],
+        ),
+        _screen_menu_card(
+            "ten_gods",
+            "십신 분석",
+            _screen_first_value(dual_ten_god_action, single_ten_god_action, center_action, fallback="십신 작용"),
+            "十",
+            [
+                "ten_gods.single_actions",
+                "ten_gods.dual_actions",
+                "ten_gods.center_actions",
+                "ten_gods.domain_action_map",
+            ],
+            [
+                {"label": "월령 십신", "value": ten_gods.get("month_command_label") or ten_gods.get("primary_ten_god_label")},
+                {"label": "단일 작용", "value": single_ten_god_action},
+                {"label": "이중 작용", "value": dual_ten_god_action},
+                {"label": "중심 작용", "value": center_action},
+            ],
+        ),
+        _screen_menu_card(
+            "month",
+            "월령 해석",
+            _screen_first_value(month.get("month_branch_label"), month.get("month_element_label"), fallback="계절 기준"),
+            "月",
+            ["month.month_branch", "month.active_hidden_phase"],
+            [
+                {"label": "월지", "value": month.get("month_branch_label")},
+                {"label": "월령 오행", "value": month.get("month_element_label")},
+                {"label": "월령 십신", "value": month.get("month_command_label")},
+            ],
+        ),
+        _screen_menu_card(
+            "elements",
+            "오행 분석",
+            _screen_first_value(element_signal, integrated_signal, fallback="기질 분포"),
+            "五",
+            [
+                "elements.element_combination_signals",
+                "elements.integrated_saju_signals",
+                "gyeokguk_contextual.pattern_variation.elemental_materiality",
+                "gyeokguk_contextual.pattern_variation.elemental_judgment",
+            ],
+            [
+                {"label": "오행 배합", "value": element_signal},
+                {"label": "통합 작용", "value": integrated_signal},
+                {"label": "근거 레이어", "value": " · ".join(_compact_text_list(elements.get("detail_source_layers"), limit=3))},
+            ],
+        ),
+        _screen_menu_card(
+            "temperature",
+            "조후 분석",
+            _screen_first_value(" · ".join(climate_needs), temperature.get("season_label"), fallback="온도 균형"),
+            "水",
+            [
+                "temperature.season",
+                "temperature.climate_needs",
+                "temperature.cycle_regulation_signals",
+                "gyeokguk_contextual.pattern_variation.climate_adjustment",
+            ],
+            [
+                {"label": "계절", "value": temperature.get("season_label")},
+                {"label": "온도", "value": _screen_display_token(temperature.get("temperature_balance"))},
+                {"label": "조후 보완", "value": " · ".join(climate_needs)},
+                {"label": "조절 작용", "value": cycle_signal},
+            ],
+        ),
+        _screen_menu_card(
+            "contextual",
+            "종합 근거",
+            "명리 원문 근거",
+            "綜",
+            [
+                "gyeokguk_contextual.source_evidence_profiles",
+            ],
+            [
+                {
+                    "label": "원문 근거",
+                    "value": f"{len(contextual_source_profiles)}개",
+                },
+            ],
+        ),
+        _screen_menu_card(
+            "domains",
+            "분야별 총운",
+            "재물·직업·인연",
+            "運",
+            ["domains", "analysis_sections"],
+            [
+                {"label": "제공 분야", "value": " · ".join(domain_labels)},
+                {"label": "세부 항목", "value": f"{len(domains)}개 분야"},
+            ],
+        ),
+        _screen_menu_card(
+            "timing",
+            "시기운",
+            "좋은 시기와 조심할 시기",
+            "年",
+            ["timing.good_years", "timing.caution_years", "timing.decade_profile"],
+            [
+                {"label": "주요 작용", "value": flow_action},
+            ],
+        ),
+        _screen_menu_card(
+            "year_2026",
+            "올해운",
+            "2026 병오년",
+            "26",
+            ["analysis_sections.year_2026", "analysis_sections.metric_groups"],
+            [
+                {"label": "기준", "value": "2026 병오년"},
+                {"label": "분석 방식", "value": "연간 지표"},
+            ],
+        ),
+        _screen_menu_card(
+            "year_2027",
+            "내년운",
+            "2027 정미년",
+            "27",
+            ["analysis_sections.year_2027", "analysis_sections.metric_groups"],
+            [
+                {"label": "기준", "value": "2027 정미년"},
+                {"label": "분석 방식", "value": "연간 지표"},
+            ],
+        ),
+        _screen_menu_card(
+            "basis",
+            "명식 기준",
+            "팔자 기준",
+            "命",
+            ["chart.pillarRows", "analysis_detail_units.basis"],
+            [
+                {"label": "기준 카드", "value": f"{len((details.get('basis') or {}).get('cards') or [])}개"},
+            ],
+        ),
+    ]
+    preferred_detail_order = ["domains", "timing", "year_2026", "year_2027", "gyeokguk", "ten_gods", "month", "elements", "temperature", "contextual", "basis"]
+    detail_menu.sort(
+        key=lambda card: (
+            preferred_detail_order.index(str(card.get("key")))
+            if str(card.get("key")) in preferred_detail_order
+            else len(preferred_detail_order)
+        )
+    )
+    domain_summary_cards: list[dict[str, Any]] = []
+    domain_screen_flow = ["전체 결론", "해석과 관리", "강한 지표", "전체 지표"]
+    for section_index, section in enumerate(section_list):
+        domain_key = _domain_key(section)
+        if domain_key in {"timing", "life", "year_2026", "year_2027"}:
+            continue
+        verdict = section.get("section_verdict") if isinstance(section.get("section_verdict"), dict) else {}
+        total_score = section.get("total_score")
+        if not isinstance(total_score, int):
+            total_score = verdict.get("score")
+        if not isinstance(total_score, int):
+            continue
+        representative_metrics = [
+            {
+                "label": _screen_text(metric.get("label"), "지표"),
+                "score": metric.get("score"),
+                "level": _screen_text(metric.get("level") or metric.get("value"), ""),
+            }
+            for metric in list(section.get("representative_metrics") or [])[:4]
+            if isinstance(metric, dict) and isinstance(metric.get("score"), int)
+        ]
+        feature_axes = [axis for axis in list(section.get("feature_axes") or []) if isinstance(axis, dict)]
+        detail_blocks = [block for block in list(section.get("detail_blocks") or []) if isinstance(block, dict)]
+        topic_items = [item for item in list(section.get("topic_items") or []) if isinstance(item, dict)]
+        domain_summary_cards.append(
+            {
+                "domain": domain_key,
+                "target": f"domains:{section_index}",
+                "title": _screen_text(section.get("title") or section.get("domain_label"), domain_key),
+                "total_score": total_score,
+                "level": _screen_text(section.get("total_level") or verdict.get("level"), _contract_level_from_score(total_score)),
+                "strong_label": _screen_text(section.get("strong_metric_label") or verdict.get("strong_label"), "강점"),
+                "strong_score": verdict.get("strong_score"),
+                "strong_level": _screen_text(verdict.get("strong_level"), ""),
+                "watch_label": _screen_text(section.get("watch_metric_label") or verdict.get("watch_label"), "주의 지표"),
+                "watch_score": verdict.get("watch_score"),
+                "watch_level": _screen_text(verdict.get("watch_level"), ""),
+                "interpretation_title": _screen_text(verdict.get("interpretation_title"), "해석"),
+                "interpretation": _screen_text(verdict.get("interpretation"), ""),
+                "action_title": _screen_text(verdict.get("action_title"), "관리할 점"),
+                "action": _screen_text(verdict.get("action"), ""),
+                "basis_title": _screen_text(verdict.get("basis_title"), "판단 근거"),
+                "basis": _screen_text(verdict.get("basis"), ""),
+                "representative_metrics": representative_metrics,
+                "feature_axis_count": len(feature_axes),
+                "detail_block_count": len(detail_blocks),
+                "topic_count": len(topic_items),
+                "screen_flow": domain_screen_flow,
+                "required_section_paths": [
+                    "section_verdict.score",
+                    "representative_metrics",
+                    "feature_axes",
+                    "detail_blocks|topic_items",
+                ],
+            }
+        )
+    timing_summary = {
+        "range": "",
+        "total_score": timing_section.get("total_score") if isinstance(timing_section.get("total_score"), int) else None,
+        "level": _screen_text(timing_section.get("total_level"), ""),
+        "good_period_title": "좋은 시기",
+        "caution_period_title": "조심할 시기",
+        "good_years_label": good_years_label,
+        "caution_years_label": caution_years_label,
+        "good_highlights": [
+            _screen_tongbyeon_timing_candidate_label(item, kind="good")
+            for item in list(timing_map.get("goodHighlights") or [])[:4]
+            if isinstance(item, dict)
+        ],
+        "caution_highlights": [
+            _screen_tongbyeon_timing_candidate_label(item, kind="caution")
+            for item in list(timing_map.get("cautionHighlights") or [])[:4]
+            if isinstance(item, dict)
+        ],
+        "primary_action": flow_action,
+    }
+
+    return {
+        "schema_version": "analysis_screen_contract_v1",
+        "screen_order": ["input", "loading", "report", "detail", "share"],
+        "entry": {
+            "title": "사주 유형 검사",
+            "required_fields": ["birthDate", "birthTime", "gender", "calendarType"],
+            "optional_fields": ["nickname", "relationshipStatus"],
+        },
+        "loading": {
+            "steps": [
+                "명식 기준 정리",
+                "월령·오행 강약 산출",
+                "격국·십신 작용 대조",
+                "시기운 흐름 정리",
+                "화면 카드 구성",
+            ],
+        },
+        "summary": {
+            "title": "종합 사주 리포트",
+            "headline": summary_headline,
+            "cards": [
+                {"label": "중심 성향", "title": _screen_text(profile.get("profile_type"), "종합 성향"), "value": _compact_factor_sentences(summary_headline, limit=1) or "분석 완료"},
+                {"label": "강한 영역", "title": _screen_text(primary.get("domain_label") or primary.get("label"), "강한 영역"), "value": _screen_text(primary.get("label") or primary.get("caption") or primary.get("value"), "확인 필요")},
+                {"label": "동반 강점", "title": _screen_text(secondary.get("domain_label") or secondary.get("label"), "동반 강점"), "value": _screen_text(secondary.get("label") or secondary.get("caption") or secondary.get("value"), "확인 필요")},
+                {"label": "주의 영역", "title": _screen_text(management.get("domain_label") or management.get("label"), "주의 영역"), "value": _screen_text(management.get("label") or management.get("caption") or management.get("value"), "확인 필요")},
+            ],
+        },
+        "domains": {
+            "title": "분야별 총점",
+            "lead": "재물·직업·인연·성격의 강약을 먼저 가릅니다.",
+            "screen_flow": domain_screen_flow,
+            "cards": domain_summary_cards,
+            "card_required_fields": [
+                "domain",
+                "target",
+                "title",
+                "total_score",
+                "level",
+                "strong_label",
+                "watch_label",
+                "representative_metrics",
+                "interpretation",
+                "action",
+                "feature_axis_count",
+                "detail_block_count",
+            ],
+        },
+        "timing": timing_summary,
+        "screen_data_contract": {
+            "input": {
+                "required_request_fields": ["birthDate", "birthTime", "gender", "calendarType"],
+                "required_result_paths": ["request.birthTimeKnown", "chart.pillarRows"],
+                "unknown_birth_time_policy": "hour_pillar_excluded_when_birth_time_unknown",
+            },
+            "loading": {
+                "required_result_paths": ["analysis_engine_contract.coverage", "analysis_screen_contract.loading.steps"],
+                "progress_policy": {
+                    "monotonic": True,
+                    "holds_before_completion": True,
+                    "completion_requires_payload": True,
+                },
+            },
+            "report": {
+                "required_result_paths": [
+                    "analysis_profile_summary",
+                    "analysis_screen_contract.detail_menu",
+                    "analysis_engine_contract.coverage",
+                ],
+                "summary_slots": ["core_identity", "strong_domain", "supporting_domain", "management_domain"],
+                "paid_mvp_policy": {
+                    "paid_enabled": False,
+                    "paid_copy_allowed": False,
+                    "paid_surface_reserved_only": True,
+                },
+            },
+            "detail": {
+                card["key"]: {
+                    "required_result_paths": card["required_contract_paths"],
+                    "primary_value_count": len(card.get("primary_values") or []),
+                    "insight_block_count": len(detail_insight_blocks.get(card["key"], [])),
+                }
+                for card in detail_menu
+            },
+            "share": {
+                "required_result_paths": ["location.href"],
+                "mvp_policy": "share_url_only_without_paid_gate",
+            },
+            "engine_to_screen_matrix": {
+                "gyeokguk": ["gyeokguk", "domains", "timing", "contextual"],
+                "ten_gods": ["ten_gods", "gyeokguk", "domains", "contextual"],
+                "month": ["month", "domains", "contextual"],
+                "elements": ["elements", "temperature", "domains", "contextual"],
+                "temperature": ["temperature", "contextual"],
+                "domains": ["domains"],
+                "timing": ["timing"],
+                "year_2026": ["year_2026"],
+                "year_2027": ["year_2027"],
+                "basis": ["basis"],
+            },
+        },
+        "detail_menu": detail_menu,
+        "detail_screens": {
+            card["key"]: {
+                "title": card["title"],
+                "lead": card["copy"],
+                "required_contract_paths": card["required_contract_paths"],
+                "primary_values": card["primary_values"],
+                "insight_blocks": detail_insight_blocks.get(card["key"], []),
+            }
+            for card in detail_menu
+        },
+        "coverage": {
+            "engine_contract_status": coverage.get("status") or "unknown",
+            "missing_engine_layers": list(coverage.get("missing_layers") or []),
+            "detail_unit_keys": [
+                key
+                for key in ("summary", "domains", "timing", "gyeokguk", "ten_gods", "month", "elements", "temperature", "contextual", "basis")
+                if details.get(key)
+            ],
+        },
+    }
 
 
 DOMAIN_FACTOR_TERMS: dict[str, tuple[str, ...]] = {
@@ -16338,6 +30840,8 @@ def _basis_card_label(source: str, layer: str) -> str:
         return "월령 심화"
     if source == "지지·지장간":
         return "지지·지장간"
+    if source == "지지 배합" or layer == "branch_pair":
+        return "지지 배합"
     if source == "합충형파해":
         return "사건 작용"
     if layer in {"integrated_saju", "ten_god_interaction"}:
@@ -16350,19 +30854,19 @@ def _basis_card_label(source: str, layer: str) -> str:
         return "오행 배합"
     if layer == "stem_reception":
         return "일간 반응"
-    return source or "판정 근거"
+    return source or "해석 근거"
 
 
 PREMIUM_BASIS_ORDER: dict[str, tuple[str, ...]] = {
-    "personality": ("생극·십신", "상생상극", "오행 배합", "일간 반응", "월령 심화", "월령 기준", "지지·지장간", "월령 판정"),
-    "money": ("월령 판정", "월령 심화", "생극·십신", "상생상극", "지지·지장간", "월령 기준", "오행 배합", "일간 반응", "사건 작용"),
-    "career": ("월령 판정", "월령 심화", "지지·지장간", "생극·십신", "상생상극", "월령 기준", "오행 배합", "일간 반응"),
-    "love": ("월령 판정", "월령 심화", "지지·지장간", "사건 작용", "생극·십신", "상생상극", "일간 반응", "월령 기준"),
-    "marriage": ("월령 판정", "월령 심화", "지지·지장간", "사건 작용", "생극·십신", "상생상극", "일간 반응", "월령 기준"),
-    "timing": ("연도 판정", "주의 판정", "판정 범위", "월령 심화", "생극·십신", "상생상극", "사건 작용", "월령 기준", "지지·지장간"),
+    "personality": ("생극·십신", "상생상극", "오행 배합", "일간 반응", "월령 심화", "월령 해석", "월령 기준", "지지·지장간"),
+    "money": ("월령 해석", "월령 심화", "생극·십신", "상생상극", "지지·지장간", "월령 기준", "오행 배합", "일간 반응", "사건 작용"),
+    "career": ("월령 해석", "월령 심화", "지지·지장간", "생극·십신", "상생상극", "월령 기준", "오행 배합", "일간 반응"),
+    "love": ("월령 해석", "월령 심화", "지지·지장간", "사건 작용", "생극·십신", "상생상극", "일간 반응", "월령 기준"),
+    "marriage": ("월령 해석", "월령 심화", "지지·지장간", "사건 작용", "생극·십신", "상생상극", "일간 반응", "월령 기준"),
+    "timing": ("연도 해석", "주의 연도", "분석 범위", "월령 심화", "생극·십신", "상생상극", "사건 작용", "월령 기준", "지지·지장간"),
     "life": ("지지·지장간", "월령 심화", "월령 기준", "생극·십신", "상생상극", "오행 배합", "일간 반응"),
-    "honor": ("월령 판정", "월령 심화", "생극·십신", "상생상극", "지지·지장간", "월령 기준"),
-    "social": ("월령 판정", "월령 심화", "지지·지장간", "사건 작용", "생극·십신", "상생상극", "일간 반응"),
+    "honor": ("월령 해석", "월령 심화", "생극·십신", "상생상극", "지지·지장간", "월령 기준"),
+    "social": ("월령 해석", "월령 심화", "지지·지장간", "사건 작용", "생극·십신", "상생상극", "일간 반응"),
 }
 
 
@@ -16418,8 +30922,7 @@ def _timing_basis_cards_for_section(section: dict[str, Any]) -> list[dict[str, A
         )
 
     def event_labels(events: list[dict[str, Any]]) -> str:
-        labels = [event_label(event) for event in events[:3]]
-        return " / ".join(label for label in labels if label)
+        return _candidate_year_only_list(events[:5], "")
 
     good_keywords = str(timing_map.get("goodKeywords") or "").strip()
     caution_keywords = str(timing_map.get("cautionKeywords") or "").strip()
@@ -16429,11 +30932,11 @@ def _timing_basis_cards_for_section(section: dict[str, Any]) -> list[dict[str, A
     if good_events:
         cards.append(
             {
-                "label": "연도 판정",
-                "title": "상승 연도",
+                "label": "연도 해석",
+                "title": "좋은 시기",
                 "body": (
-                    f"상승 연도: {event_labels(good_events)}. "
-                    f"핵심: {good_domains or '상승 분야'} · {good_keywords or '성과'}."
+                    f"좋은 시기: {event_labels(good_events)}. "
+                    f"핵심: {good_domains or '좋은 흐름'} · {good_keywords or '성과'}."
                 ),
                 "_score": 140,
                 "_index": 0,
@@ -16442,30 +30945,16 @@ def _timing_basis_cards_for_section(section: dict[str, Any]) -> list[dict[str, A
     if caution_events:
         cards.append(
             {
-                "label": "주의 판정",
-                "title": "주의 연도",
+                "label": "조심할 시기",
+                "title": "조심할 시기",
                 "body": (
-                    f"주의 연도: {event_labels(caution_events)}. "
-                    f"핵심: {caution_domains or '주의 분야'} · {caution_keywords or '책임'}."
+                    f"조심할 시기: {event_labels(caution_events)}. "
+                    f"핵심: {caution_domains or '조심할 영역'} · {caution_keywords or '책임'}."
                 ),
                 "_score": 138,
                 "_index": 1,
             }
         )
-    range_label = str(timing_map.get("rangeLabel") or profile.get("range") or "20세~79세").strip()
-    decisive = str(profile.get("decisiveAgeBands") or "").strip()
-    cards.append(
-        {
-            "label": "판정 범위",
-            "title": range_label,
-            "body": (
-                f"판정 범위: {range_label}. "
-                f"집중 구간: {decisive or range_label}."
-            ),
-            "_score": 126,
-            "_index": 2,
-        }
-    )
     return cards
 
 
@@ -16500,10 +30989,10 @@ SOURCE_READING_DOMAIN_TITLES: dict[str, dict[str, str]] = {
 def _source_reading_basis_label(source_type: str) -> str:
     source = str(source_type or "").strip()
     if source == "day_stem_month_branch":
-        return "월령 판정"
+        return "월령 해석"
     if source == "day_pillar":
-        return "일주 판정"
-    return "원국 판정"
+        return "일주 해석"
+    return "원국 해석"
 
 
 def _source_reading_basis_title(point: dict[str, Any], domain: str) -> str:
@@ -16516,7 +31005,7 @@ def _source_reading_basis_title(point: dict[str, Any], domain: str) -> str:
         return f"월령으로 본 {label.replace('월령 ', '')}"
     if label:
         return label
-    return "세부 판정"
+    return "세부 해석"
 
 
 def _source_reading_basis_intro(
@@ -16544,13 +31033,13 @@ def _source_reading_basis_intro(
         command_label = str(context.get("month_command_label") or "").strip()
         if pattern_label:
             if command_label:
-                return f"{day_stem}일간이 {month_branch}월에서 {pattern_label}으로 잡히는 명식입니다. {domain_label} 판단은 월지 본기 {command_label}와 {month_branch}월의 계절 작용에서 먼저 드러납니다."
-            return f"{day_stem}일간이 {month_branch}월에서 {pattern_label}으로 잡히는 명식입니다. {domain_label} 판단은 {month_branch}월의 계절 작용에서 먼저 드러납니다."
+                return f"{day_stem}일간이 {month_branch}월에서 {pattern_label}으로 잡히는 명식입니다. {domain_label} 해석은 월지 본기 {command_label}와 {month_branch}월의 계절 작용에서 먼저 드러납니다."
+            return f"{day_stem}일간이 {month_branch}월에서 {pattern_label}으로 잡히는 명식입니다. {domain_label} 해석은 {month_branch}월의 계절 작용에서 먼저 드러납니다."
         if command_label:
-            return f"{day_stem}일간이 {month_branch}월 {command_label} 월령을 만난 기준에서 {domain_label}의 실제 작용을 판정합니다."
-        return f"{day_stem}일간이 {month_branch}월령을 만난 기준에서 {domain_label}의 실제 작용을 판정합니다."
+            return f"{day_stem}일간이 {month_branch}월 {command_label} 월령을 만난 기준에서 {domain_label}의 실제 작용을 해석합니다."
+        return f"{day_stem}일간이 {month_branch}월령을 만난 기준에서 {domain_label}의 실제 작용을 해석합니다."
     if source_type == "day_pillar" and source_key:
-        return f"{source_key}일주의 생활 성정이 {domain_label} 판단에 직접 반영됩니다."
+        return f"{source_key}일주의 생활 성정이 {domain_label} 해석에 직접 반영됩니다."
     return ""
 
 
@@ -16733,7 +31222,7 @@ def _premium_basis_cards_for_section(
             }
         )
 
-    order = PREMIUM_BASIS_ORDER.get(domain, ("월령 판정", "상생상극", "지지·지장간", "월령 기준"))
+    order = PREMIUM_BASIS_ORDER.get(domain, ("월령 해석", "상생상극", "지지·지장간", "월령 기준"))
 
     def sort_key(card: dict[str, Any]) -> tuple[int, int, int]:
         label = str(card.get("label") or "")
@@ -16790,6 +31279,8 @@ PUBLIC_TIMING_EVENT_KEYS = (
     "periodLabel",
     "domain",
     "domainLabel",
+    "categoryLabel",
+    "sourceDomainLabel",
     "kind",
     "variant",
     "eventKey",
@@ -16803,10 +31294,14 @@ PUBLIC_TIMING_EVENT_KEYS = (
     "structureKeywords",
     "daeunPillar",
     "daeunStemTenGod",
+    "daeunStemTenGodLabel",
     "daeunBranchTenGod",
+    "daeunBranchTenGodLabel",
     "yearPillar",
     "yearStemTenGod",
+    "yearStemTenGodLabel",
     "yearBranchTenGod",
+    "yearBranchTenGodLabel",
     "kindLabel",
     "keywordItems",
     "summary",
@@ -16857,8 +31352,10 @@ def _public_timing_decades(groups: Any) -> list[dict[str, Any]]:
             for key, value in group.items()
             if key not in {"activationContext", "scoreParts", "basisCodes", "counterSignals", "branchInteractions"}
         }
-        for nested_key in ("good", "caution"):
-            if isinstance(next_group.get(nested_key), dict):
+        for nested_key in ("good", "caution", "goodHighlights", "cautionHighlights"):
+            if isinstance(next_group.get(nested_key), list):
+                next_group[nested_key] = _public_timing_event_list(next_group.get(nested_key))
+            elif isinstance(next_group.get(nested_key), dict):
                 next_group[nested_key] = _public_timing_event(next_group[nested_key])
         public_groups.append(next_group)
     return public_groups
@@ -16874,12 +31371,43 @@ def _public_timing_map(timing_map: Any) -> dict[str, Any]:
     }
     for key in ("goodHighlights", "cautionHighlights", "pastCheck", "futureCheck"):
         public_map[key] = _public_timing_event_list(public_map.get(key))
+    public_map["decadeHighlights"] = _public_timing_decades(public_map.get("decadeHighlights"))
     public_map["domainYearHighlights"] = _public_timing_domain_years(public_map.get("domainYearHighlights"))
+    public_cards: list[dict[str, Any]] = []
+    for card in public_map.get("publicSummaryCards") or []:
+        if not isinstance(card, dict):
+            continue
+        public_cards.append(
+            {
+                "label": str(card.get("label") or "").strip(),
+                "title": str(card.get("title") or "").strip(),
+                "yearAge": str(card.get("yearAge") or "").strip(),
+                "value": str(card.get("value") or "").strip(),
+                "body": str(card.get("body") or "").strip(),
+                "keywords": [
+                    str(item).strip()
+                    for item in list(card.get("keywords") or [])
+                    if str(item).strip()
+                ][:4],
+                "structureKeywords": [
+                    str(item).strip()
+                    for item in list(card.get("structureKeywords") or [])
+                    if str(item).strip()
+                ][:4],
+                "activationLabel": str(card.get("activationLabel") or "").strip(),
+                "daeunPillar": str(card.get("daeunPillar") or "").strip(),
+                "yearPillar": str(card.get("yearPillar") or "").strip(),
+                "tone": str(card.get("tone") or "neutral").strip() or "neutral",
+            }
+        )
+    if public_cards:
+        public_map["publicSummaryCards"] = public_cards
     return public_map
 
 
 def _public_premium_section(section: dict[str, Any]) -> dict[str, Any]:
     next_section = dict(section)
+    next_section.pop("_contextual_variation_score_key", None)
     caution_label = _clean_caution_label(str(next_section.get("caution_label") or ""), "")
     if caution_label:
         next_section["caution_label"] = caution_label
@@ -16901,19 +31429,313 @@ def _public_premium_section(section: dict[str, Any]) -> dict[str, Any]:
         next_section["timing_events"] = _public_timing_event_list(next_section.get("timing_events"))
         next_section["timing_map"] = _public_timing_map(next_section.get("timing_map"))
         next_section["timing_decades"] = _public_timing_decades(next_section.get("timing_decades"))
-    return next_section
+    public_section = _ensure_public_section_contract(next_section)
+    if isinstance(public_section.get("detail_blocks"), list):
+        cleaned_blocks: list[dict[str, Any]] = []
+        for block in public_section.get("detail_blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            next_block = dict(block)
+            for key in ("basis_summary", "basis", "evidence"):
+                if next_block.get(key):
+                    next_block[key] = _dedupe_keyword_basis_text(next_block.get(key))
+            cleaned_blocks.append(next_block)
+        public_section["detail_blocks"] = cleaned_blocks
+    screen_item_contract = _premium_screen_item_contract(public_section)
+    if screen_item_contract:
+        public_section["screen_item_contract"] = screen_item_contract
+    for internal_key in (
+        "domain_decision_facets",
+        "timing_decision_facets",
+        "output_goal_coverage",
+    ):
+        public_section.pop(internal_key, None)
+    return public_section
 
 
 def _public_premium_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [_public_premium_section(section) for section in sections]
+    return [
+        _public_premium_section(section)
+        for section in sections
+        if str(section.get("domain") or "") != "life"
+    ]
+
+
+def _initial_public_metric(metric: dict[str, Any], index: int, domain: str) -> dict[str, Any]:
+    score = metric.get("score")
+    bounded_score = _bounded_metric_score(score)
+    polarity = str(metric.get("polarity") or "positive").strip().lower()
+    if polarity not in {"positive", "risk"}:
+        polarity = "positive"
+    quality_score = _public_metric_quality_score(metric)
+    if not isinstance(quality_score, int):
+        quality_score = (
+            100 - bounded_score
+            if polarity == "risk" and isinstance(bounded_score, int)
+            else bounded_score
+        )
+    level = str(metric.get("level") or metric.get("value") or "")
+    if isinstance(quality_score, int) and not level:
+        level = _contract_level_from_score(quality_score)
+    label = str(metric.get("label") or metric.get("title") or "").strip()
+    summary = str(metric.get("summary") or metric.get("meaning") or metric.get("body") or "").strip()
+    display_label, display_summary = (
+        PRODUCT_RISK_DISPLAY_MAP.get(label, (label, summary))
+        if domain in PRODUCT_DOMAIN_METRIC_SPECS and polarity == "risk"
+        else (label, summary)
+    )
+    if domain in PRODUCT_DOMAIN_METRIC_SPECS:
+        display_label, display_summary = PRODUCT_METRIC_DISPLAY_MAP.get(
+            label,
+            (display_label, display_summary),
+        )
+    public_score = quality_score if isinstance(quality_score, int) else 62
+    result = {
+        "key": str(metric.get("key") or f"initial_{domain}_{index}"),
+        "label": _premium_display_title(display_label) if display_label else f"지표 {index + 1}",
+        "source_label": label if display_label != label else str(metric.get("source_label") or ""),
+        "score": public_score,
+        "display_score": public_score,
+        "quality_score": public_score,
+        "level": level or _contract_level_from_score(public_score),
+        "value": level or _contract_level_from_score(public_score),
+        "summary": display_summary,
+        "meaning": display_summary,
+        "source": str(metric.get("source") or "initial_metric"),
+        "score_direction": "higher_is_better",
+        "display_axis": "높을수록 안정적으로 작용함",
+        "polarity": polarity,
+    }
+    if polarity == "risk":
+        result["risk_intensity_score"] = 100 - public_score
+        result["source_raw_score"] = bounded_score if isinstance(bounded_score, int) else None
+    return result
+
+
+def _initial_public_premium_section(section: dict[str, Any]) -> dict[str, Any]:
+    prepared = _public_premium_section(section)
+    domain = _domain_key(prepared)
+    source_metrics = (
+        list(prepared.get("feature_axes") or [])
+        if domain in PRODUCT_DOMAIN_METRIC_SPECS
+        else _public_contract_metrics_from_section(prepared)
+    )
+    metrics = [
+        _initial_public_metric(metric, index, domain)
+        for index, metric in enumerate(source_metrics[:12])
+        if isinstance(metric, dict)
+    ]
+    metrics = _dedupe_public_metrics_by_label(metrics, limit=12)
+    score = _representative_score_from_public_metrics(prepared, metrics)
+    if not isinstance(score, int):
+        score = _product_metric_fallback_score(prepared)
+    level = _contract_level_from_score(score)
+    verdict = _section_verdict_from_public_metrics(prepared, metrics, score) if metrics else {}
+    if not verdict:
+        verdict = {"score": score, "level": level}
+    return {
+        "domain": domain,
+        "domain_label": prepared.get("domain_label") or prepared.get("heading") or prepared.get("title") or "",
+        "title": prepared.get("title") or prepared.get("heading") or prepared.get("domain_label") or "",
+        "heading": prepared.get("heading") or prepared.get("title") or "",
+        "lead": prepared.get("lead") or prepared.get("headline") or "",
+        "summary": prepared.get("summary") or prepared.get("narrative") or "",
+        "score": score,
+        "strength_score": score,
+        "total_score": score,
+        "level": level,
+        "score_label": level,
+        "total_level": level,
+        "total_score_label": level,
+        "section_verdict": verdict,
+        "strong_metric_label": verdict.get("strong_label") or "",
+        "watch_metric_label": verdict.get("watch_label") or "",
+        "representative_metrics": metrics[:4],
+        "feature_axes": metrics,
+        "metric_count": len(metrics),
+        "detail_deferred": True,
+    }
+
+
+def _initial_public_premium_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        _initial_public_premium_section(section)
+        for section in sections
+        if str(section.get("domain") or "") not in {"life", "timing", "year_2026", "year_2027"}
+    ]
+
+
+def _sanitize_public_detail_block(domain: str, block: dict[str, Any]) -> dict[str, Any]:
+    next_block = dict(block)
+    if not any(
+        isinstance(next_block.get(key), str) and str(next_block.get(key) or "").strip()
+        for key in ("basis_summary", "basis", "evidence")
+    ):
+        fallback_basis = _detail_block_basis_summary(domain, next_block)
+        if fallback_basis:
+            next_block["basis_summary"] = fallback_basis
+    for key in ("basis_summary", "basis", "evidence"):
+        raw_text = next_block.get(key)
+        if raw_text in (None, "", [], {}):
+            continue
+        text = str(raw_text or "").strip()
+        if not text:
+            next_block.pop(key, None)
+            continue
+        if _detail_block_text_has_internal_terms(text) or _detail_block_basis_summary_should_upgrade(text, next_block):
+            replacement = _detail_block_basis_summary(domain, next_block)
+            if replacement:
+                text = replacement
+        text = _dedupe_keyword_basis_text(text)
+        if text:
+            next_block[key] = text
+        else:
+            next_block.pop(key, None)
+    return next_block
+
+
+def _dedupe_public_source_scores(values: Any) -> Any:
+    if not isinstance(values, list):
+        return values
+
+    cleaned: list[Any] = []
+    positions: dict[str, int] = {}
+    for item in values:
+        if not isinstance(item, dict):
+            cleaned.append(item)
+            continue
+        label = str(item.get("label") or "").strip()
+        label_key = _compact_match_key(label)
+        if not label_key:
+            cleaned.append(item)
+            continue
+        previous_index = positions.get(label_key)
+        if previous_index is None:
+            positions[label_key] = len(cleaned)
+            cleaned.append(item)
+            continue
+
+        previous = cleaned[previous_index]
+        if not isinstance(previous, dict):
+            continue
+        previous_fit = float(previous.get("engine_signal_fit") or 0.0)
+        current_fit = float(item.get("engine_signal_fit") or 0.0)
+        if current_fit > previous_fit:
+            cleaned[previous_index] = item
+    return cleaned
+
+
+def _sanitize_public_detail_sections(value: Any, domain: str = "") -> Any:
+    if isinstance(value, list):
+        return [_sanitize_public_detail_sections(item, domain) for item in value]
+    if not isinstance(value, dict):
+        return value
+    next_value = dict(value)
+    current_domain = str(next_value.get("domain") or domain or "").strip()
+    if isinstance(next_value.get("detail_blocks"), list):
+        cleaned_blocks: list[dict[str, Any]] = []
+        for block in next_value.get("detail_blocks") or []:
+            if isinstance(block, dict):
+                cleaned_blocks.append(_sanitize_public_detail_block(current_domain, block))
+        next_value["detail_blocks"] = cleaned_blocks
+    for key, item in list(next_value.items()):
+        if key == "detail_blocks":
+            continue
+        if isinstance(item, (dict, list)):
+            next_value[key] = _sanitize_public_detail_sections(item, current_domain)
+
+    if isinstance(next_value.get("source_labels"), list):
+        next_value["source_labels"] = _compact_unique_texts(
+            [str(item).strip() for item in next_value.get("source_labels") or [] if str(item).strip()],
+            limit=4,
+        )
+    if isinstance(next_value.get("source_scores"), list):
+        next_value["source_scores"] = _dedupe_public_source_scores(next_value.get("source_scores"))
+    return next_value
+
+
+def _sanitize_public_payload(
+    value: Any,
+    domain: str = "",
+    _memo: dict[tuple[int, str], Any] | None = None,
+) -> Any:
+    """Sanitize public detail data and internal markers in one traversal."""
+
+    if isinstance(value, str):
+        return _clean_internal_public_markers(value)
+    memo = {} if _memo is None else _memo
+    memo_key = (id(value), str(domain or ""))
+    if memo_key in memo:
+        return memo[memo_key]
+    if isinstance(value, list):
+        cleaned_items: list[Any] = []
+        memo[memo_key] = cleaned_items
+        seen_texts: set[str] = set()
+        for item in value:
+            cleaned_item = _sanitize_public_payload(item, domain, memo)
+            if isinstance(cleaned_item, str):
+                key = cleaned_item.strip()
+                if not key or key in seen_texts:
+                    continue
+                seen_texts.add(key)
+            cleaned_items.append(cleaned_item)
+        return cleaned_items
+    if isinstance(value, tuple):
+        # The legacy detail sanitizer intentionally left tuple containers
+        # untouched; only the final internal-marker pass traversed them.
+        cleaned_tuple = tuple(_clean_internal_public_markers(item) for item in value)
+        memo[memo_key] = cleaned_tuple
+        return cleaned_tuple
+    if not isinstance(value, dict):
+        return value
+
+    next_value = dict(value)
+    current_domain = str(next_value.get("domain") or domain or "").strip()
+    memo_key = (id(value), current_domain)
+    if memo_key in memo:
+        return memo[memo_key]
+    memo[memo_key] = next_value
+    if isinstance(next_value.get("detail_blocks"), list):
+        cleaned_blocks: list[dict[str, Any]] = []
+        for block in next_value.get("detail_blocks") or []:
+            if isinstance(block, dict):
+                cleaned_blocks.append(
+                    _clean_internal_public_markers(
+                        _sanitize_public_detail_block(current_domain, block)
+                    )
+                )
+        next_value["detail_blocks"] = cleaned_blocks
+
+    for key, item in list(next_value.items()):
+        if key == "detail_blocks":
+            continue
+        if isinstance(item, (dict, list)):
+            next_value[key] = _sanitize_public_payload(item, current_domain, memo)
+        elif isinstance(item, str):
+            next_value[key] = _clean_internal_public_markers(item)
+        elif isinstance(item, tuple):
+            next_value[key] = tuple(_clean_internal_public_markers(entry) for entry in item)
+
+    if isinstance(next_value.get("source_labels"), list):
+        next_value["source_labels"] = _compact_unique_texts(
+            [str(item).strip() for item in next_value.get("source_labels") or [] if str(item).strip()],
+            limit=4,
+        )
+    if isinstance(next_value.get("source_scores"), list):
+        next_value["source_scores"] = _dedupe_public_source_scores(next_value.get("source_scores"))
+    return next_value
 
 
 def _prepare_judgment_card_payload(
     report: dict[str, Any],
     chart_summary: dict[str, Any],
     product_payload: dict[str, Any] | None = None,
+    *,
+    defer_detail: bool = False,
 ) -> dict[str, Any]:
     prepared = dict(report)
+    requested_tier = str((product_payload or {}).get("requested_product_tier") or prepared.get("product_tier") or "free")
+    engine_tier = str(prepared.get("product_tier") or "free")
     product_items = list((product_payload or {}).get("items", []))
     mobile_cards = [
         _normalize_mobile_card(dict(card), dict(product_items[index]) if index < len(product_items) else None)
@@ -16949,8 +31771,9 @@ def _prepare_judgment_card_payload(
             dict(prepared.get("domain_decision_facets") or {}),
             dict(prepared.get("timing_decision_facets") or {}),
             dict(prepared.get("output_goal_coverage") or {}),
+            life_feature_summary.get("gyeokguk_contextual_context"),
         )
-        if str(prepared.get("product_tier") or "free") == "premium"
+        if engine_tier == "premium"
         else []
     )
     if premium_sections:
@@ -16960,24 +31783,101 @@ def _prepare_judgment_card_payload(
             month_anchor_context,
         )
         premium_sections = _attach_premium_product_stories(premium_sections)
+        premium_sections = _attach_contextual_variations_to_sections(
+            premium_sections,
+            life_feature_summary.get("gyeokguk_contextual_context"),
+        )
+        premium_sections = _attach_expert_projections_to_sections(
+            premium_sections,
+            life_feature_summary,
+            product_items,
+        )
     premium_profile_summary = _premium_profile_summary(premium_sections) if premium_sections else {}
-    public_premium_sections = _public_premium_sections(premium_sections) if premium_sections else []
-    is_premium = str(prepared.get("product_tier") or "free") == "premium"
+    if defer_detail:
+        public_premium_sections = _initial_public_premium_sections(premium_sections) if premium_sections else []
+    else:
+        public_premium_sections = _public_premium_sections(premium_sections) if premium_sections else []
+    if not defer_detail:
+        public_premium_sections.extend(_build_annual_report_sections(public_premium_sections, chart_summary))
+    if defer_detail:
+        public_premium_sections = [
+            section
+            for section in public_premium_sections
+            if str(section.get("domain") or "") not in {"timing", "year_2026", "year_2027"}
+        ]
+        analysis_detail_units = {}
+    else:
+        analysis_detail_units = _analysis_detail_units(prepared_factor_sections)
+    is_premium = engine_tier == "premium"
     premium_profile_cards = list(premium_profile_summary.get("cards") or []) if is_premium else []
     premium_profile_panels = list(premium_profile_summary.get("profile_panels") or []) if is_premium else []
+    profile_contract = dict(
+        (product_payload or {}).get("premium_profile_contract")
+        or prepared.get("premium_profile_contract")
+        or {}
+    )
     prepared["title"] = "AI 사주 : 이현"
     prepared["overview"] = str(premium_profile_summary.get("headline") or "") or _product_overview(mobile_cards)
-    prepared["premium_profile_summary"] = premium_profile_summary
-    prepared["premium_profile_panels"] = premium_profile_panels
-    prepared["premium_profile_cards"] = premium_profile_cards
-    prepared["premium_profile_contract"] = dict((product_payload or {}).get("premium_profile_contract") or prepared.get("premium_profile_contract") or {})
+    prepared["premium_profile_summary"] = {}
+    prepared["premium_profile_panels"] = []
+    prepared["premium_profile_cards"] = []
+    prepared["premium_profile_contract"] = profile_contract
+    prepared["analysis_profile_summary"] = premium_profile_summary
+    prepared["analysis_profile_panels"] = premium_profile_panels
+    prepared["analysis_profile_cards"] = premium_profile_cards
+    prepared["analysis_profile_contract"] = profile_contract
+    analysis_engine_contract = {} if defer_detail else _analysis_engine_contract(
+        life_feature_summary,
+        analysis_detail_units,
+        prepared_factor_sections,
+    )
+    if not defer_detail:
+        contextual_contract = analysis_engine_contract.get("gyeokguk_contextual")
+        source_profiles = (
+            list(contextual_contract.get("source_evidence_profiles") or [])
+            if isinstance(contextual_contract, dict)
+            else []
+        )
+        analysis_detail_units["contextual"] = {
+            "title": "종합 근거",
+            "lead": "",
+            "cards": source_profiles,
+            "source_layers": list(
+                dict.fromkeys(
+                    str(profile.get("source_file") or "")
+                    for profile in source_profiles
+                    if isinstance(profile, dict) and profile.get("source_file")
+                )
+            ),
+        }
+    prepared["analysis_detail_units"] = analysis_detail_units
+    prepared["analysis_engine_contract"] = analysis_engine_contract
+    prepared["analysis_screen_contract"] = (
+        {
+            "summary": {
+                "headline": premium_profile_summary.get("headline") or prepared.get("overview") or "",
+            },
+            "detail_menu": [],
+            "loading": {"deferred": True},
+        }
+        if defer_detail
+        else _analysis_screen_contract(
+            premium_profile_summary,
+            public_premium_sections,
+            analysis_detail_units,
+            analysis_engine_contract,
+        )
+    )
     prepared["free_profile_preview"] = {} if is_premium else _free_profile_preview(mobile_cards)
     prepared["mobile_cards"] = [] if is_premium else mobile_cards
-    prepared["premium_sections"] = public_premium_sections
+    prepared["premium_sections"] = []
+    prepared["analysis_sections"] = public_premium_sections
     prepared["web_sections"] = []
     prepared["reading_sections"] = []
     prepared["factor_sections"] = prepared_factor_sections
-    prepared["catalog_entries"] = _judgment_catalog_entries(str(prepared.get("product_tier") or "free"))
+    prepared["catalog_entries"] = _judgment_catalog_entries(engine_tier)
+    prepared["engine_product_tier"] = engine_tier
+    prepared["product_tier"] = requested_tier
     for internal_key in (
         "domain_decision_facets",
         "timing_decision_facets",
@@ -16986,15 +31886,17 @@ def _prepare_judgment_card_payload(
         "premium_detail_sections",
     ):
         prepared.pop(internal_key, None)
-    return _clean_customer_copy_value(prepared)
+    public_payload = _restore_product_metric_labels(_clean_customer_copy_value(prepared))
+    return _sanitize_public_payload(public_payload)
 
 
-def build_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def build_report_payload(payload: dict[str, Any], *, defer_detail: bool = False) -> dict[str, Any]:
     """Build a UI-ready fortune result payload from form input."""
 
-    tier = _as_text(payload, "tier", "free") or "free"
-    if tier not in SUPPORTED_TIERS:
+    requested_tier = _as_text(payload, "tier", "free") or "free"
+    if requested_tier not in SUPPORTED_TIERS:
         raise ValueError("상품 등급 값이 올바르지 않습니다.")
+    engine_tier = "premium" if requested_tier == PUBLIC_MVP_TIER else requested_tier
     relationship_status = _as_text(payload, "relationshipStatus", "unknown") or "unknown"
     if relationship_status not in SUPPORTED_RELATIONSHIP_STATUSES:
         raise ValueError("관계 상태 값이 올바르지 않습니다.")
@@ -17014,15 +31916,28 @@ def build_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
         relationship_status,
         target_year,
         leap_lunar_month,
+        # 현재 웹 상품은 시기운과 올해·내년운을 연도 단위로 제공한다.
+        # 80년 전체의 월·분기 하위 흐름은 화면에 쓰이지 않을 뿐 아니라
+        # 총운 지표의 의미 근거에 월별 신호를 섞으므로 여기서는 계산하지 않는다.
+        False,
     )
     product = build_product_output(
         analysis,
-        tier=tier,  # type: ignore[arg-type]
-        item_limit_override=72 if tier == "premium" else None,
+        tier=engine_tier,  # type: ignore[arg-type]
+        item_limit_override=72 if engine_tier == "premium" else None,
         include_candidate_sections=False,
     )
     product_payload = product.to_dict()
+    product_payload["requested_product_tier"] = requested_tier
     life_feature_summary = product_payload.setdefault("life_feature_summary", {})
+    if not isinstance(life_feature_summary, dict):
+        life_feature_summary = {}
+        product_payload["life_feature_summary"] = life_feature_summary
+    if analysis.expert_adjudication is not None:
+        life_feature_summary["expert_domain_projections"] = {
+            str(domain): asdict(projection)
+            for domain, projection in analysis.expert_adjudication.domain_projections.items()
+        }
     cycle_regulation_context = (
         life_feature_summary.get("cycle_regulation_context")
         if isinstance(life_feature_summary, dict)
@@ -17044,15 +31959,18 @@ def build_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
     timing_flow_signals = list(analysis.flow_signals)
     timing_event_packets = list(analysis.event_packets)
     if isinstance(life_feature_summary, dict):
-        life_feature_summary["timing_decision_facets"] = build_timing_decision_payload_from_flows(
-            timing_flow_signals,
-            birth_year=birth_year,
-            target_years=timing_target_years,
-            event_packets=timing_event_packets,
-        )
+        timing_decision_facets = life_feature_summary.get("timing_decision_facets")
+        if not isinstance(timing_decision_facets, dict) or not timing_decision_facets:
+            timing_decision_facets = build_timing_decision_payload_from_flows(
+                timing_flow_signals,
+                birth_year=birth_year,
+                target_years=timing_target_years,
+                event_packets=timing_event_packets,
+            )
+            life_feature_summary["timing_decision_facets"] = timing_decision_facets
         life_feature_summary["output_goal_coverage"] = _refresh_output_goal_coverage_timing(
             life_feature_summary.get("output_goal_coverage"),
-            life_feature_summary["timing_decision_facets"],
+            timing_decision_facets,
         )
     chart_payload = _chart_summary(
         chart,
@@ -17060,12 +31978,34 @@ def build_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
         birth_year,
         timing_flow_signals,
         birth_time_known=birth_time_known,
+        gender=gender,
     )
-    report_payload = _prepare_judgment_card_payload(
-        _product_report_seed(product_payload),
-        chart_payload,
-        product_payload,
+    signal_cache_names = (
+        "item_signal_fit",
+        "item_signal_materials",
+        "item_evidence_term_sets",
+        "evidence_terms",
+        "term_match_results",
     )
+    previous_signal_caches = {
+        name: getattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, name, None)
+        for name in signal_cache_names
+    }
+    for name in signal_cache_names:
+        setattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, name, {})
+    try:
+        report_payload = _prepare_judgment_card_payload(
+            _product_report_seed(product_payload),
+            chart_payload,
+            product_payload,
+            defer_detail=defer_detail,
+        )
+    finally:
+        for name, previous_cache in previous_signal_caches.items():
+            if previous_cache is None:
+                delattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, name)
+            else:
+                setattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, name, previous_cache)
 
     visible_chart_payload = dict(chart_payload)
     visible_chart_payload.pop("timingAnnualRows", None)
@@ -17073,7 +32013,8 @@ def build_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "request": {
-            "tier": tier,
+            "tier": requested_tier,
+            "engineTier": engine_tier,
             "targetYear": target_year,
             "relationshipStatus": relationship_status,
             "birthTimeKnown": birth_time_known,

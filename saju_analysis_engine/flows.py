@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import Any
 
 from saju_birth_engine.models import BirthChartResult, DaeunEntry, Pillar
@@ -26,6 +27,9 @@ from .ten_gods import main_hidden_stem, ten_god_for
 
 
 CONNECTIVE_BRANCH_RELATIONS = {"six_combine", "three_harmony", "three_harmony_half", "three_meeting"}
+
+# 신살은 발동 맥락과 설명 근거를 보조하지만 연간 길흉 점수를 직접 결정하지 않는다.
+ANNUAL_AUXILIARY_DIRECT_SCORE_WEIGHTS: dict[str, float] = {}
 
 
 def _clip(value: float) -> int:
@@ -64,11 +68,27 @@ def _day_group_sal_targets(day_branch_key: str) -> dict[str, str]:
     return {}
 
 
+FLOW_TEN_GOD_PROBABILITY_EFFECTS: dict[str, dict[str, float]] = {
+    "wealth": {"money": 12.0},
+    "output": {"money": 9.0, "career": 7.0},
+    "officer": {"career": 9.0},
+    "resource": {"career": 5.0, "marriage": 2.0},
+    "peer": {"money": 8.0, "career": 4.0},
+}
+
+
 def _apply_ten_god_score(domain_scores: dict[str, dict[str, Any]], ten_god: str, weight: float, basis_prefix: str, gender: str | None) -> None:
     group = TEN_GOD_GROUPS[ten_god]
     for domain in DOMAIN_ORDER:
         domain_scores[domain].setdefault("basis_codes", [])
         domain_scores[domain].setdefault("counter_signals", [])
+
+    # Probability is manifestation strength, not favorability. A wealth flow can
+    # therefore make both income and competition events more concrete. Keep the
+    # assignment domain-specific so unrelated areas do not inherit one common
+    # annual probability.
+    for domain, effect in FLOW_TEN_GOD_PROBABILITY_EFFECTS.get(group, {}).items():
+        domain_scores[domain]["probability"] += effect * weight
 
     if group == "wealth":
         domain_scores["money"]["opportunity"] += 18 * weight
@@ -77,6 +97,8 @@ def _apply_ten_god_score(domain_scores: dict[str, dict[str, Any]], ten_god: str,
         if gender == "male":
             domain_scores["love"]["opportunity"] += 13 * weight
             domain_scores["marriage"]["opportunity"] += 16 * weight if ten_god == "jeong_jae" else 10 * weight
+            domain_scores["love"]["probability"] += 5 * weight
+            domain_scores["marriage"]["probability"] += 6 * weight
             domain_scores["love"]["basis_codes"].append(f"{basis_prefix}_male_spouse_star")
             domain_scores["marriage"]["basis_codes"].append(f"{basis_prefix}_male_spouse_star")
     elif group == "output":
@@ -95,6 +117,8 @@ def _apply_ten_god_score(domain_scores: dict[str, dict[str, Any]], ten_god: str,
         if gender == "female":
             domain_scores["love"]["opportunity"] += 13 * weight
             domain_scores["marriage"]["opportunity"] += 16 * weight if ten_god == "jeong_gwan" else 10 * weight
+            domain_scores["love"]["probability"] += 5 * weight
+            domain_scores["marriage"]["probability"] += 6 * weight
             domain_scores["love"]["basis_codes"].append(f"{basis_prefix}_female_spouse_star")
             domain_scores["marriage"]["basis_codes"].append(f"{basis_prefix}_female_spouse_star")
     elif group == "resource":
@@ -441,17 +465,37 @@ def _flow_activation_context(
 
     relation_hits = []
     daeun_annual_relation_hits = []
+    event_relation_hits = []
+    event_relation_keys: set[tuple[str, str, tuple[str, ...]]] = set()
     for interaction in interactions:
         positions = list(getattr(interaction, "positions", []) or [])
+        relation_polarity = branch_relation_polarity(
+            structure.element_profile,
+            interaction,
+            structure.pattern_profile,
+        )
         relation_payload = {
             "relation_type": str(getattr(interaction, "relation_type", "") or ""),
             "basis_code": str(getattr(interaction, "basis_code", "") or ""),
             "positions": positions,
+            "polarity": str(relation_polarity.polarity or "mixed"),
+            "intensity": str(getattr(interaction, "intensity", "moderate") or "moderate"),
+            "intrinsic_friction": float(relation_polarity.intrinsic_friction or 0.0),
+            "effective_friction": float(relation_polarity.effective_friction or 0.0),
         }
         if "month" in positions:
             relation_hits.append(relation_payload)
         if {"daeun", "year_flow"}.issubset(set(positions)):
             daeun_annual_relation_hits.append(relation_payload)
+        if "year_flow" in positions:
+            event_key = (
+                relation_payload["relation_type"],
+                relation_payload["basis_code"],
+                tuple(positions),
+            )
+            if event_key not in event_relation_keys:
+                event_relation_keys.add(event_key)
+                event_relation_hits.append(relation_payload)
 
     basis_codes: list[str] = []
     counter_signals: list[str] = []
@@ -518,6 +562,7 @@ def _flow_activation_context(
         "anchor_hits": anchor_hits,
         "relation_hits": relation_hits,
         "daeun_annual_relation_hits": daeun_annual_relation_hits,
+        "event_relation_hits": event_relation_hits,
         "source_directions": directions,
         "compound_direction": compound_direction,
         "useful_hit_count": useful_hit_count,
@@ -574,11 +619,28 @@ def _apply_interaction_score(domain_scores: dict[str, dict[str, Any]], structure
         source=basis_code,
         elements=list(polarity.activated_elements),
         positions=[*interaction.positions, "flow_relation"],
-        weight=1.0 if "month" in interaction.positions else 0.58,
+        # Relation polarity below already assigns domain-specific opportunity,
+        # change, and risk. Month governance is retained here as evidence only;
+        # scoring it again for every natal/daeun relation caused charts with
+        # several interactions to saturate all domain opportunities together.
+        weight=0.0,
     )
     support_code = f"{basis_code}_useful_relation"
     burden_code = f"{basis_code}_burden_relation"
     overuse_code = f"{basis_code}_overuse_relation"
+    friction_code = f"{basis_code}_structural_friction"
+
+    def apply_structural_friction(base_risk_by_domain: dict[str, float]) -> None:
+        """Keep relation cost visible without reversing a useful activation."""
+
+        friction = float(polarity.effective_friction or 0.0)
+        if friction <= 0.0:
+            return
+        for domain, base_risk in base_risk_by_domain.items():
+            if domain not in domain_scores or base_risk <= 0.0:
+                continue
+            domain_scores[domain]["risk"] += max(1.0, base_risk * friction)
+            domain_scores[domain]["counter_signals"].append(friction_code)
 
     def apply_overuse(weight: float = 1.0) -> None:
         if not polarity.overuse_elements:
@@ -636,6 +698,7 @@ def _apply_interaction_score(domain_scores: dict[str, dict[str, Any]], structure
             domain_scores["money"]["risk"] += 3 * connect_weight
     elif relation_type == "clash":
         if supportive:
+            friction_domains: dict[str, float] = {}
             if touches_day:
                 domain_scores["love"]["opportunity"] += 9
                 domain_scores["marriage"]["opportunity"] += 8
@@ -643,11 +706,17 @@ def _apply_interaction_score(domain_scores: dict[str, dict[str, Any]], structure
                 domain_scores["marriage"]["change"] += 18
                 domain_scores["love"]["basis_codes"].append(support_code)
                 domain_scores["marriage"]["basis_codes"].append(support_code)
+                friction_domains.update({"love": 16.0, "marriage": 18.0})
             if touches_month:
                 domain_scores["career"]["opportunity"] += 7
                 domain_scores["career"]["change"] += 18
                 domain_scores["career"]["basis_codes"].append(support_code)
+                friction_domains["career"] = 12.0
+            for domain in interaction.domain_links:
+                if domain in domain_scores and domain not in friction_domains:
+                    friction_domains[domain] = 7.0
             domain_scores["money"]["change"] += 6
+            apply_structural_friction(friction_domains)
             apply_overuse()
             return
         if touches_day:
@@ -671,16 +740,23 @@ def _apply_interaction_score(domain_scores: dict[str, dict[str, Any]], structure
     elif relation_type in {"punishment", "harm", "break", "self_punishment"}:
         risk_add = 12 if relation_type == "punishment" else 8
         if supportive:
+            friction_domains: dict[str, float] = {}
             if touches_day:
                 domain_scores["love"]["opportunity"] += 5
                 domain_scores["marriage"]["opportunity"] += 5
                 domain_scores["love"]["basis_codes"].append(support_code)
                 domain_scores["marriage"]["basis_codes"].append(support_code)
+                friction_domains.update({"love": float(risk_add), "marriage": float(risk_add)})
             if touches_month:
                 domain_scores["career"]["opportunity"] += 5
                 domain_scores["career"]["basis_codes"].append(support_code)
+                friction_domains["career"] = float(risk_add)
+            for domain in interaction.domain_links:
+                if domain in domain_scores and domain not in friction_domains:
+                    friction_domains[domain] = max(4.0, risk_add * 0.58)
             for domain in DOMAIN_ORDER:
                 domain_scores[domain]["change"] += 2
+            apply_structural_friction(friction_domains)
             apply_overuse()
             return
         adjusted_risk = max(4, risk_add - 3) if mixed else risk_add
@@ -726,7 +802,7 @@ def _initial_domain_scores() -> dict[str, dict[str, Any]]:
             "opportunity": 42.0,
             "risk": 34.0,
             "change": 36.0,
-            "probability": 0.0,
+            "probability": 42.0,
             "basis_codes": [],
             "counter_signals": [],
         }
@@ -740,7 +816,7 @@ def _finalize_domain_scores(domain_scores: dict[str, dict[str, Any]]) -> dict[st
         opportunity = _clip_opportunity(data["opportunity"])
         risk = _clip(data["risk"])
         change = _clip(data["change"])
-        probability = _clip(opportunity * 0.58 + change * 0.27 - max(0, risk - 62) * 0.2 + 13 + float(data.get("probability", 0.0) or 0.0))
+        probability = _clip(float(data.get("probability", 42.0) or 42.0))
         finalized[domain] = {
             "opportunity": opportunity,
             "risk": risk,
@@ -781,7 +857,8 @@ QUARTERS = [
 ]
 
 
-def _saju_month_periods(target_year: int, timezone_offset_minutes: int) -> list[dict[str, str]]:
+@lru_cache(maxsize=256)
+def _saju_month_periods(target_year: int, timezone_offset_minutes: int) -> tuple[dict[str, str], ...]:
     starts = [
         {
             "name": item["name"],
@@ -808,7 +885,7 @@ def _saju_month_periods(target_year: int, timezone_offset_minutes: int) -> list[
                 "end": end_local.replace(tzinfo=None).isoformat(timespec="minutes"),
             }
         )
-    return periods
+    return tuple(periods)
 
 
 def _sub_period_signals(
@@ -850,8 +927,12 @@ def _sub_period_signals(
                 basis_codes.append(code)
             if interaction.relation_type in CONNECTIVE_BRANCH_RELATIONS and polarity.polarity == "mixed":
                 counter_signals.append(f"{code}_mixed_relation")
-            if interaction.relation_type in {"clash", "punishment", "harm", "break", "self_punishment"} and polarity.polarity != "supportive":
-                counter_signals.append(code)
+            if interaction.relation_type in {"clash", "punishment", "harm", "break", "self_punishment"}:
+                counter_signals.append(
+                    f"{code}_structural_friction"
+                    if polarity.polarity == "supportive"
+                    else code
+                )
             if polarity.polarity in {"supportive", "mixed"}:
                 basis_codes.append(f"{code}_useful_relation")
 
@@ -983,19 +1064,20 @@ def build_flow_signals(
                 counter_signals.append(f"year_{interaction.basis_code}")
             if interaction.relation_type in CONNECTIVE_BRANCH_RELATIONS and polarity.polarity == "mixed":
                 counter_signals.append(f"year_{interaction.basis_code}_mixed_relation")
-            if interaction.relation_type in {"clash", "punishment", "harm", "break", "self_punishment"} and polarity.polarity != "supportive":
-                counter_signals.append(f"year_{interaction.basis_code}")
+            if interaction.relation_type in {"clash", "punishment", "harm", "break", "self_punishment"}:
+                relation_code = f"year_{interaction.basis_code}"
+                counter_signals.append(
+                    f"{relation_code}_structural_friction"
+                    if polarity.polarity == "supportive"
+                    else relation_code
+                )
             if polarity.polarity in {"supportive", "mixed"}:
                 basis_codes.append(f"year_{interaction.basis_code}_useful_relation")
 
         if sal_targets.get("peach_blossom") == year_pillar.branch_key:
-            domain_scores["love"]["opportunity"] += 12
-            domain_scores["love"]["change"] += 8
             domain_scores["love"]["basis_codes"].append("annual_peach_blossom")
             domain_scores["marriage"]["basis_codes"].append("annual_peach_blossom")
         if sal_targets.get("travel_horse") == year_pillar.branch_key:
-            domain_scores["career"]["change"] += 10
-            domain_scores["money"]["change"] += 6
             domain_scores["career"]["basis_codes"].append("annual_travel_horse")
 
         daeun_pillar_label = None
@@ -1040,8 +1122,13 @@ def build_flow_signals(
                     counter_signals.append(f"daeun_{interaction.basis_code}")
                 if interaction.relation_type in CONNECTIVE_BRANCH_RELATIONS and polarity.polarity == "mixed":
                     counter_signals.append(f"daeun_{interaction.basis_code}_mixed_relation")
-                if interaction.relation_type in {"clash", "punishment", "harm", "break", "self_punishment"} and polarity.polarity != "supportive":
-                    counter_signals.append(f"daeun_{interaction.basis_code}")
+                if interaction.relation_type in {"clash", "punishment", "harm", "break", "self_punishment"}:
+                    relation_code = f"daeun_{interaction.basis_code}"
+                    counter_signals.append(
+                        f"{relation_code}_structural_friction"
+                        if polarity.polarity == "supportive"
+                        else relation_code
+                    )
                 if polarity.polarity in {"supportive", "mixed"}:
                     basis_codes.append(f"daeun_{interaction.basis_code}_useful_relation")
 
@@ -1056,8 +1143,12 @@ def build_flow_signals(
                     counter_signals.append(cross_basis_code)
                 if interaction.relation_type in CONNECTIVE_BRANCH_RELATIONS and polarity.polarity == "mixed":
                     counter_signals.append(f"{cross_basis_code}_mixed_relation")
-                if interaction.relation_type in {"clash", "punishment", "harm", "break", "self_punishment"} and polarity.polarity != "supportive":
-                    counter_signals.append(cross_basis_code)
+                if interaction.relation_type in {"clash", "punishment", "harm", "break", "self_punishment"}:
+                    counter_signals.append(
+                        f"{cross_basis_code}_structural_friction"
+                        if polarity.polarity == "supportive"
+                        else cross_basis_code
+                    )
                 if polarity.polarity in {"supportive", "mixed"}:
                     basis_codes.append(f"{cross_basis_code}_useful_relation")
 
@@ -1085,13 +1176,19 @@ def build_flow_signals(
 
         pattern_useful_elements, pattern_caution_elements = _pattern_elements(structure)
         for source, element, weight in flow_element_sources:
+            # The year and daeun pillars were already scored as complete units
+            # above. Re-evaluating every visible and hidden element here made
+            # the same month-governance support accumulate several times and
+            # pushed unrelated domains toward the opportunity ceiling. Keep
+            # the source-level governance codes for evidence, but do not add a
+            # second score adjustment.
             _apply_flow_governance_score(
                 domain_scores,
                 structure,
                 source=source,
                 elements=[element],
                 positions=[source, "flow"],
-                weight=weight * 0.5,
+                weight=0.0,
             )
             if source.startswith("daeun"):
                 for domain in DOMAIN_ORDER:

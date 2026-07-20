@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from itertools import combinations
+from typing import Any, Iterable
 
 from saju_birth_engine.models import BirthChartResult
+from saju_birth_engine.pillars import year_pillar_for_gregorian_year
 
 from .constants import POSITION_DOMAINS
 from .models import AuxiliaryMiscSignal, AuxiliaryProfile
@@ -87,6 +89,21 @@ TWELVE_SINSAL_MEANINGS = {
     "peach_blossom": "시선, 매력, 관계 접점이 밖으로 드러나는 보조 신호",
     "travel_horse": "이동, 외부 활동, 영역 확장이 커지는 보조 신호",
     "huagai": "경험을 거두어 지식, 예술, 전문성으로 정리하는 보조 신호",
+}
+
+TWELVE_SINSAL_DOMAINS = {
+    "geopsal": ["career", "money", "social"],
+    "jaesal": ["career", "honor", "social"],
+    "cheonsal": ["personality", "life"],
+    "jisal": ["career", "social", "life"],
+    "yeonsal": ["love", "social", "honor"],
+    "wolsal": ["personality", "career"],
+    "mangsin_sal": ["social", "honor"],
+    "jangseong_sal": ["career", "honor", "personality"],
+    "banan_sal": ["career", "honor"],
+    "yeokma_sal": ["career", "life"],
+    "yukhae_sal": ["life", "social"],
+    "hwagae_sal": ["personality", "career"],
 }
 
 SINSAL_BRANCH_TABLE = {
@@ -514,6 +531,65 @@ def _make_misc_signal(
     )
 
 
+def _make_twelve_shinsal_signal(
+    key: str,
+    formula_name: str,
+    positions: list[str],
+    pillar_labels: dict[str, str],
+    *,
+    extra_basis: list[str],
+) -> AuxiliaryMiscSignal:
+    clean_positions = list(dict.fromkeys(positions))
+    return AuxiliaryMiscSignal(
+        key=key,
+        label=TWELVE_SINSAL_LABELS[key],
+        grade="B",
+        lineage="12신살",
+        formula_name=formula_name,
+        positions=clean_positions,
+        pillar_labels=[pillar_labels[position] for position in clean_positions if position in pillar_labels],
+        domains=list(TWELVE_SINSAL_DOMAINS.get(key, [])),
+        intensity=_intensity_for_positions(clean_positions),
+        allowed_use="근거 전용",
+        meaning=TWELVE_SINSAL_MEANINGS[key],
+        caution="12신살은 월령·격국·십신의 본체 판단을 대신하지 않습니다.",
+        basis_codes=[f"twelve_shinsal:{key}", f"formula:{formula_name}", *extra_basis],
+    )
+
+
+def _build_twelve_shinsal_signals(
+    chart: BirthChartResult,
+    day_sal_by_position: dict[str, list[str]],
+    year_sal_by_position: dict[str, list[str]],
+) -> list[AuxiliaryMiscSignal]:
+    labels = _pillar_labels(chart)
+    signals: list[AuxiliaryMiscSignal] = []
+    for key in TWELVE_SINSAL_ORDER:
+        day_positions = [position for position, values in day_sal_by_position.items() if key in values]
+        if day_positions:
+            signals.append(
+                _make_twelve_shinsal_signal(
+                    key,
+                    "day_branch_group_twelve_shinsal",
+                    day_positions,
+                    labels,
+                    extra_basis=[f"reference_branch:day:{chart.day_pillar.branch_key}"],
+                )
+            )
+        year_positions = [position for position, values in year_sal_by_position.items() if key in values]
+        if year_positions:
+            signals.append(
+                _make_twelve_shinsal_signal(
+                    key,
+                    "year_branch_group_twelve_shinsal",
+                    year_positions,
+                    labels,
+                    extra_basis=[f"reference_branch:year:{chart.year_pillar.branch_key}"],
+                )
+            )
+    return signals
+
+
 def _positions_matching_branch(branch_positions: dict[str, str], targets: set[str]) -> list[str]:
     return [position for position, branch in branch_positions.items() if branch in targets]
 
@@ -789,6 +865,203 @@ def _build_misc_shinsal_signals(chart: BirthChartResult) -> list[AuxiliaryMiscSi
     return list(deduped.values())
 
 
+def _annual_structure_positions(structure: Any) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    position_signals = getattr(structure, "position_signals", {}) or {}
+    branch_positions: dict[str, str] = {}
+    stem_positions: dict[str, str] = {}
+    for position, signal in position_signals.items():
+        branch_key = str(getattr(signal, "branch_key", "") or "")
+        stem_key = str(getattr(signal, "stem_key", "") or "")
+        if branch_key:
+            branch_positions[str(position)] = branch_key
+        if stem_key:
+            stem_positions[str(position)] = stem_key
+    pillar_labels = {
+        str(position): str(label)
+        for position, label in dict(getattr(structure, "four_pillars", {}) or {}).items()
+        if str(label)
+    }
+    return branch_positions, stem_positions, pillar_labels
+
+
+def _sexagenary_index_from_keys(stem_key: str, branch_key: str) -> int:
+    stem_order = ("gap", "eul", "byeong", "jeong", "mu", "gi", "gyeong", "sin", "im", "gye")
+    branch_order = ("ja", "chuk", "in", "myo", "jin", "sa", "o", "mi", "sin", "yu", "sul", "hae")
+    try:
+        stem_index = stem_order.index(stem_key)
+        branch_index = branch_order.index(branch_key)
+    except ValueError:
+        return 0
+    for index in range(60):
+        if index % 10 == stem_index and index % 12 == branch_index:
+            return index
+    return 0
+
+
+def build_annual_shinsal_signals(
+    structure: Any,
+    target_years: Iterable[int],
+) -> list[AuxiliaryMiscSignal]:
+    """Calculate annual auxiliary activations without feeding metric scores.
+
+    The returned signals are evidence-only observations. They intentionally do
+    not enter any domain score, metric keyword selector, or annual total.
+    """
+
+    branch_positions, stem_positions, pillar_labels = _annual_structure_positions(structure)
+    if not branch_positions or not stem_positions:
+        return []
+    day_signal = (getattr(structure, "position_signals", {}) or {}).get("day")
+    year_signal = (getattr(structure, "position_signals", {}) or {}).get("year")
+    month_signal = (getattr(structure, "position_signals", {}) or {}).get("month")
+    day_stem = str(getattr(day_signal, "stem_key", "") or getattr(structure, "day_master_stem", "") or "")
+    day_branch = str(getattr(day_signal, "branch_key", "") or "")
+    year_stem = str(getattr(year_signal, "stem_key", "") or "")
+    year_branch = str(getattr(year_signal, "branch_key", "") or "")
+    month_branch = str(getattr(month_signal, "branch_key", "") or getattr(structure, "month_branch", "") or "")
+    day_pillar_index = _sexagenary_index_from_keys(day_stem, day_branch)
+    signals: list[AuxiliaryMiscSignal] = []
+
+    def append_misc(
+        key: str,
+        formula_name: str,
+        positions: list[str],
+        labels: dict[str, str],
+        year: int,
+        *,
+        extra_basis: list[str] | None = None,
+        intensity: str = "moderate",
+    ) -> None:
+        signals.append(
+            _make_misc_signal(
+                key,
+                formula_name,
+                positions,
+                labels,
+                intensity=intensity,
+                extra_basis=[
+                    f"target_year:{year}",
+                    "exposure_scope:comprehensive_basis_only",
+                    *(extra_basis or []),
+                ],
+            )
+        )
+
+    for raw_year in target_years:
+        year = int(raw_year)
+        pillar = year_pillar_for_gregorian_year(year)
+        annual_position = f"annual_{year}"
+        labels = dict(pillar_labels)
+        labels[annual_position] = f"{year}년 {pillar.label}"
+
+        for reference_name, reference_branch in (("day", day_branch), ("year", year_branch)):
+            _, targets = _group_and_targets(reference_branch)
+            for key in TWELVE_SINSAL_ORDER:
+                if targets.get(key) != pillar.branch_key:
+                    continue
+                signals.append(
+                    _make_twelve_shinsal_signal(
+                        key,
+                        f"annual_{reference_name}_branch_group_twelve_shinsal",
+                        [annual_position],
+                        labels,
+                        extra_basis=[
+                            f"target_year:{year}",
+                            f"reference_branch:{reference_name}:{reference_branch}",
+                            "exposure_scope:comprehensive_basis_only",
+                        ],
+                    )
+                )
+
+        def branch_hit(key: str, formula_name: str, targets: set[str], *, extra_basis: list[str] | None = None) -> None:
+            if pillar.branch_key in targets:
+                append_misc(key, formula_name, [annual_position], labels, year, extra_basis=extra_basis)
+
+        def stem_hit(key: str, formula_name: str, target: str) -> None:
+            if pillar.stem_key == target:
+                append_misc(key, formula_name, [annual_position], labels, year)
+
+        if day_stem in LUGOD_BRANCH_BY_DAY_STEM:
+            branch_hit("lugod", "annual_day_stem_lugod", {LUGOD_BRANCH_BY_DAY_STEM[day_stem]})
+            branch_hit("geumyeo", "annual_day_stem_geumyeo", {GEUMYEO_BRANCH_BY_DAY_STEM[day_stem]})
+            branch_hit("cheoneul_day", "annual_day_stem_cheoneul", CHEONEUL_BRANCHES_BY_STEM[day_stem])
+            branch_hit("taegeuk", "annual_day_stem_taegeuk", TAEGEUK_BRANCHES_BY_STEM[day_stem])
+            branch_hit("moonchang_modern", "annual_day_stem_moonchang_modern", {MOONCHANG_MODERN_BRANCH_BY_DAY_STEM[day_stem]})
+            branch_hit("moonchang_classic", "annual_day_stem_moonchang_classic_ohangjeonggi", {MOONCHANG_CLASSIC_BRANCH_BY_DAY_STEM[day_stem]})
+            branch_hit("hakdang", "annual_day_stem_hakdang_sagwan", HAKDANG_BRANCHES_BY_DAY_STEM[day_stem])
+            branch_hit("gukin", "annual_day_stem_gukin", {GUKIN_BRANCH_BY_DAY_STEM[day_stem]})
+            branch_hit("hongyeom", "annual_day_stem_hongyeom", {HONGYEOM_BRANCH_BY_DAY_STEM[day_stem]})
+        if year_stem in CHEONEUL_BRANCHES_BY_STEM:
+            branch_hit("cheoneul_year", "annual_year_stem_cheoneul", CHEONEUL_BRANCHES_BY_STEM[year_stem])
+
+        if month_branch in CHEONDEOK_TARGET_BY_MONTH_BRANCH:
+            target_kind, target_key = CHEONDEOK_TARGET_BY_MONTH_BRANCH[month_branch]
+            if (target_kind == "stem" and pillar.stem_key == target_key) or (
+                target_kind == "branch" and pillar.branch_key == target_key
+            ):
+                append_misc("cheondeok", "annual_month_branch_cheondeok", [annual_position], labels, year)
+        woldeok_stem = WOLDEOK_STEM_BY_MONTH_GROUP.get(_month_group(month_branch))
+        if woldeok_stem:
+            stem_hit("woldeok", "annual_month_group_woldeok", woldeok_stem)
+
+        for key, target_branch in HONGLAN_CHEONHUI_BY_YEAR_BRANCH.get(year_branch, {}).items():
+            branch_hit(key, f"annual_year_branch_{key}", {target_branch})
+        if day_stem in YANGIN_STRICT_BRANCH_BY_DAY_STEM:
+            branch_hit("yangin_strict", "annual_day_stem_yangin_strict", {YANGIN_STRICT_BRANCH_BY_DAY_STEM[day_stem]})
+        if day_stem in YANGIN_EXPANDED_BRANCH_BY_DAY_STEM:
+            branch_hit("yangin_expanded", "annual_day_stem_yangin_expanded_yin", {YANGIN_EXPANDED_BRANCH_BY_DAY_STEM[day_stem]})
+
+        gongmang_formula, gongmang_branches = _gongmang_targets(day_pillar_index)
+        branch_hit("gongmang", f"annual_day_pillar_{gongmang_formula}", gongmang_branches)
+        for key, target_branch in _year_direction_group(year_branch).items():
+            branch_hit(key, f"annual_year_branch_direction_{key}", {target_branch})
+        branch_hit("cheonra", "annual_branch_fixed_cheonra", {"sul", "hae"})
+        branch_hit("jimang", "annual_branch_fixed_jimang", {"jin", "sa"})
+        branch_hit("cheonmun", "annual_branch_sul_hae_cheonmun", {"sul", "hae"})
+
+        for key, pair_rules in (("gwimun", GWIMUN_PAIRS), ("wonjin", WONJIN_PAIRS)):
+            for natal_position, natal_branch in branch_positions.items():
+                if frozenset((natal_branch, pillar.branch_key)) in pair_rules:
+                    append_misc(
+                        key,
+                        f"annual_branch_pair_{key}",
+                        [natal_position, annual_position],
+                        labels,
+                        year,
+                        extra_basis=[f"natal_position:{natal_position}", f"branch_pair:{natal_branch}:{pillar.branch_key}"],
+                    )
+
+        if pillar.stem_key in HYEONCHIM_STEMS or pillar.branch_key in HYEONCHIM_BRANCHES:
+            append_misc("hyeonchim", "annual_stem_branch_shape_hyeonchim", [annual_position], labels, year)
+
+        combined_cheolshoe = set(branch_positions.values()) | {pillar.branch_key}
+        if CHEOLSHOE_BRANCHES.issubset(combined_cheolshoe):
+            matched_positions = [
+                position for position, branch in branch_positions.items() if branch in CHEOLSHOE_BRANCHES
+            ]
+            matched_positions.append(annual_position)
+            append_misc(
+                "cheolshoe",
+                "annual_myo_yu_sul_full_cheolshoe",
+                list(dict.fromkeys(matched_positions)),
+                labels,
+                year,
+                extra_basis=["full_set:myo_yu_sul", "promotion_candidate:safe_misc"],
+            )
+
+    deduped: dict[tuple[str, str, tuple[str, ...], tuple[str, ...]], AuxiliaryMiscSignal] = {}
+    for signal in signals:
+        deduped[
+            (
+                signal.key,
+                signal.formula_name,
+                tuple(signal.positions),
+                tuple(signal.basis_codes),
+            )
+        ] = signal
+    return list(deduped.values())
+
+
 def build_auxiliary_profile(chart: BirthChartResult) -> AuxiliaryProfile:
     day_stem_key = chart.day_pillar.stem_key
     year_branch_key = chart.year_pillar.branch_key
@@ -811,5 +1084,10 @@ def build_auxiliary_profile(chart: BirthChartResult) -> AuxiliaryProfile:
         year_branch_group=year_group_name,
         day_sal_by_position=day_sal_by_position,
         year_sal_by_position=year_sal_by_position,
+        twelve_shinsal_signals=_build_twelve_shinsal_signals(
+            chart,
+            day_sal_by_position,
+            year_sal_by_position,
+        ),
         misc_shinsal_signals=_build_misc_shinsal_signals(chart),
     )

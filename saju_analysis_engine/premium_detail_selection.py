@@ -63,6 +63,10 @@ def build_premium_detail_selection(
     feature_axes_by_domain = _feature_axes_by_domain(analysis)
     axis_scores_by_domain = _axis_scores_by_domain(analysis)
     packet_scores_by_domain = _packet_scores_by_domain(analysis)
+    merged_context_by_domains: dict[
+        tuple[str, ...],
+        tuple[list[str], list[str], list[str], list[dict[str, Any]]],
+    ] = {}
 
     candidates: list[PremiumDetailMatch] = []
     for rule in _PREMIUM_DETAIL_RULES:
@@ -70,10 +74,16 @@ def build_premium_detail_selection(
         if entry is None:
             continue
         domains = _source_domains(rule)
-        code_space = _merged(code_space_by_domain, domains)
-        event_terms = _merged(event_terms_by_domain, domains)
-        feature_axes = _merged(feature_axes_by_domain, domains)
-        axis_scores = _merged_axis_scores(axis_scores_by_domain, domains)
+        merged_context = merged_context_by_domains.get(domains)
+        if merged_context is None:
+            merged_context = (
+                _merged(code_space_by_domain, domains),
+                _merged(event_terms_by_domain, domains),
+                _merged(feature_axes_by_domain, domains),
+                _merged_axis_scores(axis_scores_by_domain, domains),
+            )
+            merged_context_by_domains[domains] = merged_context
+        code_space, event_terms, feature_axes, axis_scores = merged_context
         score = _score_rule(
             rule,
             packet_scores_by_domain,
@@ -318,8 +328,12 @@ def _select_by_domain_and_group(
 def _code_space_by_domain(analysis: AnalysisResult) -> dict[str, list[str]]:
     by_domain: dict[str, list[str]] = {}
     global_terms = _structure_terms(analysis)
+    global_terms_added: set[str] = set()
     for packet in analysis.event_packets:
-        terms = _packet_terms(packet) + global_terms
+        terms = _packet_terms(packet)
+        if packet.domain not in global_terms_added:
+            terms.extend(global_terms)
+            global_terms_added.add(packet.domain)
         by_domain.setdefault(packet.domain, []).extend(terms)
     for domain in list(by_domain):
         by_domain[domain] = _dedupe_texts(by_domain[domain])
@@ -349,7 +363,12 @@ def _event_terms_by_domain(analysis: AnalysisResult) -> dict[str, list[str]]:
 
 def _feature_axes_by_domain(analysis: AnalysisResult) -> dict[str, list[str]]:
     by_domain: dict[str, list[str]] = {}
+    seen_axis_lists: set[tuple[str, int]] = set()
     for packet in analysis.event_packets:
+        axis_list_key = (packet.domain, id(packet.feature_axes))
+        if axis_list_key in seen_axis_lists:
+            continue
+        seen_axis_lists.add(axis_list_key)
         terms: list[str] = []
         for axis in packet.feature_axes:
             if not isinstance(axis, dict):
@@ -368,7 +387,12 @@ def _feature_axes_by_domain(analysis: AnalysisResult) -> dict[str, list[str]]:
 
 def _axis_scores_by_domain(analysis: AnalysisResult) -> dict[str, list[dict[str, Any]]]:
     by_domain: dict[str, list[dict[str, Any]]] = {}
+    seen_axis_lists: set[tuple[str, int]] = set()
     for packet in analysis.event_packets:
+        axis_list_key = (packet.domain, id(packet.feature_axes))
+        if axis_list_key in seen_axis_lists:
+            continue
+        seen_axis_lists.add(axis_list_key)
         axes: list[dict[str, Any]] = []
         for axis in packet.feature_axes:
             if not isinstance(axis, dict):

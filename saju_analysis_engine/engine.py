@@ -8,6 +8,7 @@ from saju_birth_engine.models import BirthChartResult
 from .calibration import apply_calibration_to_packets, build_calibration_profile
 from .constants import DOMAIN_ORDER
 from .domains import build_event_packets
+from .expert_adjudication import apply_expert_projection_to_packets, build_expert_priority_adjudication
 from .flows import build_flow_signals
 from .models import AnalysisResult, Domain, PastEventAnswer, RelationshipStatus
 from .structure import build_chart_structure
@@ -32,12 +33,12 @@ def _birth_year_from_chart(chart: BirthChartResult) -> int | None:
 
 
 def _default_target_years(chart: BirthChartResult) -> list[int]:
-    """Use the adult-life span as the default for comprehensive products."""
+    """Use the Korean-age adult-life span as the default for comprehensive products."""
 
     birth_year = _birth_year_from_chart(chart)
     if birth_year is None:
         return []
-    return list(range(birth_year + 20, birth_year + 80))
+    return list(range(birth_year + 19, birth_year + 79))
 
 
 def analyze_chart(
@@ -82,8 +83,15 @@ def analyze_chart(
         )
         if unsupported_event_domains:
             raise ValueError(f"Unsupported past_event domain: {', '.join(unsupported_event_domains)}")
-    flow_signals = build_flow_signals(chart, structure, years, include_sub_periods=include_sub_periods)
+    flow_signals = build_flow_signals(
+        chart,
+        structure,
+        years,
+        include_sub_periods=include_sub_periods,
+    )
+    expert_adjudication = build_expert_priority_adjudication(chart, structure, flow_signals)
     packets = build_event_packets(chart, structure, flow_signals, selected_domains, relationship_status)
+    packets = apply_expert_projection_to_packets(packets, flow_signals, expert_adjudication)
     calibration_profile = build_calibration_profile(past_event_answers)
     packets = apply_calibration_to_packets(packets, calibration_profile)
 
@@ -103,7 +111,11 @@ def analyze_chart(
             "domains": selected_domains,
             "calibration_status": calibration_profile.status,
             "relationship_status": relationship_status,
+            "include_sub_periods": include_sub_periods,
             "birth_engine_boundary_sensitive": chart.boundary_sensitive,
             "daeun_boundary_sensitive": chart.daeun_boundary_sensitive,
+            "expert_adjudication_version": expert_adjudication.version,
+            "expert_summary": expert_adjudication.summary,
         },
+        expert_adjudication=expert_adjudication,
     )

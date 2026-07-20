@@ -6,8 +6,9 @@ from itertools import combinations
 
 from saju_birth_engine.models import BirthChartResult
 
-from .constants import POSITION_DOMAINS
-from .models import BranchInteraction
+from .constants import BRANCH_METADATA, ELEMENT_CONTROLS, ELEMENT_GENERATES, POSITION_DOMAINS
+from .element_combinations import element_pair_rule
+from .models import BranchInteraction, BranchPairCombination
 
 
 def _pair(a: str, b: str) -> tuple[str, str]:
@@ -64,6 +65,14 @@ PUNISHMENT = {
 }
 
 SELF_PUNISHMENT_BRANCHES = {"jin", "o", "yu", "hae"}
+
+ELEMENT_LABELS = {
+    "wood": "목",
+    "fire": "화",
+    "earth": "토",
+    "metal": "금",
+    "water": "수",
+}
 
 THREE_HARMONY = [
     ({"sin", "ja", "jin"}, "water", "water_trine"),
@@ -125,6 +134,80 @@ def _natal_positions(chart: BirthChartResult) -> dict[str, str]:
 
 def find_natal_interactions(chart: BirthChartResult) -> list[BranchInteraction]:
     return find_interactions(_natal_positions(chart))
+
+
+def _element_direction(first: str, second: str) -> tuple[str, str, str, str]:
+    if first == second:
+        return "same", first, second, f"{ELEMENT_LABELS[first]} 동기"
+    if ELEMENT_GENERATES[first] == second:
+        return "generates", first, second, f"{ELEMENT_LABELS[first]}생{ELEMENT_LABELS[second]}"
+    if ELEMENT_GENERATES[second] == first:
+        return "generates", second, first, f"{ELEMENT_LABELS[second]}생{ELEMENT_LABELS[first]}"
+    if ELEMENT_CONTROLS[first] == second:
+        return "controls", first, second, f"{ELEMENT_LABELS[first]}극{ELEMENT_LABELS[second]}"
+    return "controls", second, first, f"{ELEMENT_LABELS[second]}극{ELEMENT_LABELS[first]}"
+
+
+def build_natal_branch_pairs(
+    chart: BirthChartResult,
+    interactions: list[BranchInteraction] | None = None,
+) -> list[BranchPairCombination]:
+    position_to_branch = _natal_positions(chart)
+    formal_interactions = interactions if interactions is not None else find_interactions(position_to_branch)
+    pairs: list[BranchPairCombination] = []
+    for (position_a, branch_a), (position_b, branch_b) in combinations(position_to_branch.items(), 2):
+        positions = [position_a, position_b]
+        branches = [branch_a, branch_b]
+        first_element = str(BRANCH_METADATA[branch_a]["element"])
+        second_element = str(BRANCH_METADATA[branch_b]["element"])
+        element_relation, source_element, target_element, relation_label = _element_direction(
+            first_element,
+            second_element,
+        )
+        rule = element_pair_rule(first_element, second_element)
+        related_formal = [
+            item
+            for item in formal_interactions
+            if len(item.positions) == 2
+            and set(item.positions) == set(positions)
+            and sorted(item.branches) == sorted(branches)
+        ]
+        formal_types = list(dict.fromkeys(item.relation_type for item in related_formal))
+        formal_strengths = {item.intensity for item in related_formal}
+        if "strong" in formal_strengths:
+            intensity = "strong"
+        elif "moderate" in formal_strengths or {"month", "day"}.intersection(positions):
+            intensity = "moderate"
+        else:
+            intensity = "mild"
+        domains = _domains_for_positions(positions)
+        for domain in list(rule.get("domain_links") or []):
+            if domain not in domains:
+                domains.append(domain)
+        basis_codes = [
+            f"branch_pair_{position_a}_{position_b}_{branch_a}_{branch_b}",
+            f"branch_pair_element_{source_element}_{element_relation}_{target_element}",
+        ]
+        basis_codes.extend(item.basis_code for item in related_formal)
+        pairs.append(
+            BranchPairCombination(
+                pair_id=f"branch_pair_{position_a}_{position_b}",
+                branches=branches,
+                positions=positions,
+                elements=[first_element, second_element],
+                element_relation=element_relation,
+                relation_label=relation_label,
+                source_element=source_element,
+                target_element=target_element,
+                formal_relation_types=formal_types,
+                intensity=intensity,
+                domain_links=domains,
+                basis_codes=list(dict.fromkeys(basis_codes)),
+                trait_keywords=list(rule.get("trait_keywords") or []),
+                interpretation=str(rule.get("interpretation") or ""),
+            )
+        )
+    return pairs
 
 
 def find_interactions(position_to_branch: dict[str, str]) -> list[BranchInteraction]:

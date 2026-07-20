@@ -345,7 +345,11 @@ def _reality_status(profile: MonthGovernanceProfile, elements: list[str], ten_go
     if profile.month_element in elements or profile.month_command_ten_god in ten_gods:
         if any("month" in item for item in positions):
             return "month_command_direct"
-    if any(stem in profile.protruded_hidden_stems for stem in profile.protruded_hidden_stems):
+    relevant_protruded = any(
+        STEM_METADATA.get(stem, {}).get("element") in elements
+        for stem in profile.protruded_hidden_stems
+    )
+    if relevant_protruded:
         if any(profile.element_fits[element].month_authority == "month_hidden_protruded" for element in elements if element in profile.element_fits):
             return "protruded_month_hidden_stem"
     max_reality = max((profile.element_fits[element].reality_score for element in elements if element in profile.element_fits), default=0)
@@ -406,8 +410,11 @@ def evaluate_month_governed_signal(
         fit = profile.role_fits.get(group)
         if not fit:
             continue
-        support_score += max(0, fit.support_score - 1)
-        pressure_score += max(0, fit.pressure_score - 1)
+        # A role fit is derived from its corresponding element fit.  When both
+        # are supplied they are one piece of evidence and must be counted once.
+        if fit.element not in clean_elements:
+            support_score += max(0, fit.support_score - 1)
+            pressure_score += max(0, fit.pressure_score - 1)
         basis_codes.extend(fit.basis_codes)
         counter_signals.extend(fit.counter_signals)
 

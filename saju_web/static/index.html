@@ -1,22 +1,30 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="ko">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI 사주 : 이현</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>사주 이현 | 사주 유형 분석</title>
+    <meta name="description" content="생년월일과 태어난 시간을 바탕으로 사주 유형과 분야별 운세를 정리합니다." />
     <link rel="canonical" href="https://aisajuleehyeon.com/" />
     <meta property="og:url" content="https://aisajuleehyeon.com/" />
-    <link rel="icon" href="/favicon.ico?v=navy-hyeon-favicon-v1" sizes="any" />
-    <link rel="icon" href="/favicon.png?v=navy-hyeon-favicon-v1" type="image/png" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=navy-hyeon-favicon-v1" />
-    <meta name="theme-color" content="#f7f6f1" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="사주 이현" />
+    <meta property="og:locale" content="ko_KR" />
+    <meta property="og:title" content="사주 이현 | 사주 유형 분석" />
+    <meta property="og:description" content="생년월일과 태어난 시간을 바탕으로 사주 유형과 분야별 운세를 정리합니다." />
+    <meta property="og:image" content="https://aisajuleehyeon.com/favicon.png?v=ui-product-v1" />
+    <meta property="og:image:width" content="512" />
+    <meta property="og:image:height" content="512" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="사주 이현 | 사주 유형 분석" />
+    <meta name="twitter:description" content="생년월일과 태어난 시간을 바탕으로 사주 유형과 분야별 운세를 정리합니다." />
+    <meta name="twitter:image" content="https://aisajuleehyeon.com/favicon.png?v=ui-product-v1" />
+    <link rel="icon" href="/favicon.ico?v=ui-v2" sizes="any" />
+    <link rel="icon" href="/favicon.png?v=ui-v2" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=ui-v2" />
+    <meta name="theme-color" content="#061522" />
     <meta name="google-adsense-account" content="ca-pub-6995816794025550" />
     <meta name="naver-site-verification" content="0b2c8ed5e37b54ad174ecd2e256157b96345b2db" />
-    <script
-      async
-      src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6995816794025550"
-      crossorigin="anonymous"
-    ></script>
     <script>
       try {
         const returnView =
@@ -30,157 +38,198 @@
             localStorage.getItem("leehyeon:coupangLeftAt") ||
             0
         );
-        const isFreshReturn = Number.isFinite(leftAt) && leftAt > 0 && Date.now() - leftAt <= 10 * 60 * 1000;
         const reportRaw =
-          sessionStorage.getItem("leehyeon:lastPremiumReport") ||
-          localStorage.getItem("leehyeon:lastPremiumReport");
-        let hasRecentReport = false;
-        if (reportRaw) {
-          const saved = JSON.parse(reportRaw);
-          const savedAt = Number(saved && saved.savedAt);
-          hasRecentReport =
-            Boolean(saved && saved.payload && saved.payload.ok) &&
-            Number.isFinite(savedAt) &&
-            savedAt > 0 &&
-            Date.now() - savedAt <= 10 * 60 * 1000;
-        }
-        const hash = window.location.hash.replace("#", "");
-        const wantsReport = hash === "premium" || hash === "basis" || hash === "report" || hash === "summary" || hash === "detail" || hash === "catalog" || hash === "judgment";
-        if ((returnView === "premium" && pageVisited === "1" && isFreshReturn) || wantsReport || hasRecentReport) {
+          sessionStorage.getItem("leehyeon:v2:lastReport") ||
+          localStorage.getItem("leehyeon:v2:lastReport");
+        const report = reportRaw ? JSON.parse(reportRaw) : null;
+        const now = Date.now();
+        const freshDeparture =
+          returnView === "premium" &&
+          pageVisited === "1" &&
+          Number.isFinite(leftAt) &&
+          leftAt > 0 &&
+          now - leftAt <= 10 * 60 * 1000;
+        const freshReport =
+          report &&
+          report.version === "v2-report-v1" &&
+          report.payload &&
+          report.payload.ok &&
+          Number.isFinite(Number(report.savedAt)) &&
+          now - Number(report.savedAt) <= 10 * 60 * 1000;
+        if (freshDeparture && freshReport) {
           document.documentElement.classList.add("is-restoring-premium");
         }
       } catch (_error) {}
     </script>
-    <link rel="stylesheet" href="/styles.css?v=seo-entry-v185" />
-    <link rel="stylesheet" href="/inkwash.css?v=share-ui-v187" />
+    <script
+      async
+      src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-6995816794025550"
+      crossorigin="anonymous"
+    ></script>
+  <link rel="stylesheet" href="/styles-v2.css?v=production-release-v48" />
   </head>
-  <body data-view="home">
-    <header class="topbar">
-      <div>
-        <h1>AI 사주 : 이현</h1>
-      </div>
-    </header>
-
-    <main class="app-shell">
-      <aside class="input-panel" aria-label="출생 정보 입력">
-        <details class="input-disclosure" open>
-          <summary>
-            <strong id="input-summary-text">출생 정보</strong>
-          </summary>
-          <form id="birth-form" class="input-form">
-            <div class="form-head">
-              <h2>생년월일 입력</h2>
+  <body>
+    <div class="site-stage" id="app">
+      <section class="screen screen-splash is-active" data-screen="splash" aria-label="시작 화면">
+        <div class="splash-card">
+          <div class="splash-emblem" aria-hidden="true">
+            <div class="moon-mark"></div>
+            <div class="manse-disk">
+              <b>命</b>
+              <span>子</span><span>丑</span><span>寅</span><span>卯</span>
+              <span>辰</span><span>巳</span><span>午</span><span>未</span>
+              <span>申</span><span>酉</span><span>戌</span><span>亥</span>
             </div>
-
-            <label class="field" for="birth-date">
-              <span>생년월일</span>
-              <input id="birth-date" name="birthDate" type="text" inputmode="numeric" autocomplete="bday" placeholder="예: 19990101" aria-label="생년월일" required />
-            </label>
-
-            <label class="field" for="birth-time">
-              <span>태어난 시간</span>
-              <select id="birth-time" name="birthTime" aria-label="태어난 시간" required>
-                <option value="" disabled selected>시간 선택</option>
-                <option value="unknown">시간 모름</option>
-                <option value="ja">자시 (23:30~01:30)</option>
-                <option value="chuk">축시 (01:30~03:30)</option>
-                <option value="in">인시 (03:30~05:30)</option>
-                <option value="myo">묘시 (05:30~07:30)</option>
-                <option value="jin">진시 (07:30~09:30)</option>
-                <option value="sa">사시 (09:30~11:30)</option>
-                <option value="o">오시 (11:30~13:30)</option>
-                <option value="mi">미시 (13:30~15:30)</option>
-                <option value="sin">신시 (15:30~17:30)</option>
-                <option value="yu">유시 (17:30~19:30)</option>
-                <option value="sul">술시 (19:30~21:30)</option>
-                <option value="hae">해시 (21:30~23:30)</option>
-              </select>
-            </label>
-
-            <label class="field" for="birth-gender">
-              <span>성별</span>
-              <select id="birth-gender" name="gender" aria-label="성별">
-                <option value="male" selected>남자</option>
-                <option value="female">여자</option>
-              </select>
-            </label>
-
-            <input name="tier" type="hidden" value="premium" />
-            <input name="calendarType" type="hidden" value="solar" />
-            <input name="relationshipStatus" type="hidden" value="unknown" />
-            <input name="targetYear" type="hidden" value="2026" />
-
-            <div class="submit-button-grid" aria-label="분석 결과 보기">
-              <button class="primary-button submit-button is-premium" type="submit" data-submit-tier="premium">
-                무료 사주 분석 결과 보기
-              </button>
-            </div>
-            <a class="service-blog-button input-blog-button" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
-              사주명리 공간 : 이현 블로그
-            </a>
-            <button class="service-blog-button input-share-button" type="button" data-share-site="true">
-              <span class="share-icon-stack" aria-hidden="true">
-                <span class="share-icon is-kakao"></span>
-                <span class="share-icon is-instagram"></span>
-              </span>
-              <span>공유하기</span>
-            </button>
-          </form>
-        </details>
-        <section id="side-summary" class="side-summary" aria-label="사주 기준 요약"></section>
-      </aside>
-
-      <section class="result-panel" aria-label="무료 사주 분석 결과">
-        <div id="status" class="status" aria-live="polite"></div>
-
-        <section id="home-view" class="app-view is-active" aria-label="무료 사주 분석 홈">
-          <section id="fortune-spotlight" class="fortune-spotlight" aria-label="추천 운세"></section>
-          <section id="home-funnel" class="home-funnel" aria-label="무료 운세와 프리미엄 안내"></section>
-        </section>
-
-        <section id="judgment-view" class="app-view" aria-label="종합운 화면">
-          <div class="screen-head">
-            <button class="screen-back" type="button" data-view-target="home">홈으로</button>
-            <div>
-              <p class="eyebrow">무료 운세</p>
-              <h2>무료 운세 결과</h2>
+            <div class="splash-elements">
+              <span>木</span><span>火</span><span>土</span><span>金</span><span>水</span>
             </div>
           </div>
-          <div id="summary" class="screen-body"></div>
-        </section>
-
-        <section id="premium-view" class="app-view" aria-label="프리미엄 운세 화면">
-          <div class="screen-head">
-            <button class="screen-back" type="button" data-input-target="birth">출생 정보 수정</button>
-            <div>
-              <p class="eyebrow">프리미엄 운세</p>
-              <h2>프리미엄 운세 결과</h2>
-            </div>
-          </div>
-          <div id="premium" class="screen-body"></div>
-        </section>
-
-        <section id="basis-view" class="app-view" aria-label="명식 근거 화면">
-          <div class="screen-head">
-            <button class="screen-back" type="button" data-view-target="home">홈으로</button>
-            <div>
-              <p class="eyebrow">사주 원국</p>
-              <h2>팔자와 대운·세운입니다.</h2>
-              <p>명식, 대운, 세운을 분석의 보조 근거로 표시합니다.</p>
-            </div>
-          </div>
-          <section id="manse-board" class="manse-board" aria-label="만세력 보드"></section>
-          <div id="factors" class="screen-body"></div>
-        </section>
+          <div class="brand-seal">사주 이현</div>
+          <p>태어난 순간의 결을 보다</p>
+          <div class="splash-thread" aria-hidden="true"><i></i><b></b><i></i></div>
+        </div>
       </section>
-    </main>
 
-    <nav class="mobile-action-bar" aria-label="빠른 이동">
-      <button type="button" data-input-target="birth">정보 수정</button>
-      <button type="button" data-view-target="premium">결과</button>
-      <button type="button" data-view-target="basis">명식</button>
-    </nav>
+      <section class="screen screen-home" data-screen="home" aria-label="사주 정보 입력">
+        <header class="home-hero">
+          <div class="hero-orbit" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <p class="eyebrow">사주 유형 검사</p>
+          <h1>
+            <span>당신의 사주 유형을</span>
+            <span>확인하세요</span>
+          </h1>
+          <p class="hero-copy">당신의 사주를 영역별 세부 유형으로 나누어 분석해 드립니다.</p>
+        </header>
 
-    <script src="/app.js?v=share-ui-v188" type="module"></script>
+        <form id="birth-form" class="v2-form">
+          <h2>분석에 필요한 정보를 입력하세요.</h2>
+          <p>생년월일과 출생 시간을 기준으로 사주 유형과 분야별 흐름을 정리합니다.</p>
+
+          <label class="field" for="nickname-input">
+            <span>이름 또는 닉네임</span>
+            <input id="nickname-input" name="nickname" type="text" placeholder="예: 이현" autocomplete="name" />
+          </label>
+
+          <div class="field">
+            <span>성별</span>
+            <div class="segmented" role="radiogroup" aria-label="성별">
+              <label><input type="radio" name="gender" value="male" checked /><span>남성</span></label>
+              <label><input type="radio" name="gender" value="female" /><span>여성</span></label>
+            </div>
+          </div>
+
+          <label class="field" for="birth-date-input">
+            <span>생년월일</span>
+            <input id="birth-date-input" name="birthDate" type="text" inputmode="numeric" placeholder="예: 19990101" required />
+          </label>
+
+          <div class="field">
+            <label for="birth-time-select">출생 시간</label>
+            <select id="birth-time-select" name="birthTime" required>
+              <option value="" disabled selected>시간 선택</option>
+              <option value="unknown">시간 모름</option>
+              <option value="ja">자시 (23:30~01:30)</option>
+              <option value="chuk">축시 (01:30~03:30)</option>
+              <option value="in">인시 (03:30~05:30)</option>
+              <option value="myo">묘시 (05:30~07:30)</option>
+              <option value="jin">진시 (07:30~09:30)</option>
+              <option value="sa">사시 (09:30~11:30)</option>
+              <option value="o">오시 (11:30~13:30)</option>
+              <option value="mi">미시 (13:30~15:30)</option>
+              <option value="sin">신시 (15:30~17:30)</option>
+              <option value="yu">유시 (17:30~19:30)</option>
+              <option value="sul">술시 (19:30~21:30)</option>
+              <option value="hae">해시 (21:30~23:30)</option>
+            </select>
+          </div>
+
+          <input type="hidden" name="calendarType" value="solar" />
+          <input type="hidden" name="tier" value="public_mvp" />
+          <input type="hidden" name="relationshipStatus" value="unknown" />
+          <input type="hidden" name="targetYear" value="2026" />
+
+          <button class="gold-button" type="submit">사주 유형 검사 시작하기</button>
+          <p class="input-trust-note">
+            <span>입력한 정보는 사주 분석에만 사용됩니다.</span>
+            <a href="/privacy/">개인정보 처리방침</a>
+          </p>
+          <a class="subtle-link blog-entry-button" href="https://place-leehyeon.tistory.com/" target="_blank" rel="noopener noreferrer">
+            <span>사주명리 공간 : 이현 블로그</span>
+          </a>
+        </form>
+      </section>
+
+      <section class="screen screen-loading" data-screen="loading" aria-live="polite" aria-label="분석 로딩">
+        <div class="loading-orbit" aria-hidden="true">
+          <span>甲</span><span>乙</span><span>丙</span><span>丁</span><span>戊</span><span>己</span><span>庚</span><span>辛</span><span>壬</span><span>癸</span>
+          <b>사주를 분석하고 <br />있습니다</b>
+        </div>
+        <div class="loading-panel">
+          <strong id="loading-percent">8%</strong>
+          <div class="loading-bar"><i id="loading-fill"></i></div>
+          <p id="loading-message">명식의 기준을 세우고 있습니다.</p>
+        </div>
+      </section>
+
+      <section class="screen screen-report" data-screen="report" aria-label="사주 분석 결과">
+        <header class="report-appbar">
+          <button type="button" class="icon-button" data-action="back-home" aria-label="입력으로 돌아가기">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7" /></svg>
+          </button>
+          <strong id="report-title">사주 분석 결과</strong>
+          <div class="appbar-actions">
+            <button type="button" class="icon-button" data-action="share" aria-label="공유하기">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V5" /><path d="m7 10 5-5 5 5" /><path d="M5 14v5h14v-5" /></svg>
+            </button>
+            <button type="button" class="icon-button" data-action="open-basis" aria-label="근거 보기">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6z" /><path d="M9 8h6" /><path d="M9 12h6" /><path d="M9 16h4" /></svg>
+            </button>
+          </div>
+        </header>
+
+        <main id="report-root" class="report-root"></main>
+      </section>
+
+      <section class="screen screen-detail" data-screen="detail" aria-label="상세 분석">
+        <header class="report-appbar light">
+          <button type="button" class="icon-button" data-action="back-report" aria-label="결과로 돌아가기">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7" /></svg>
+          </button>
+          <strong id="detail-title">상세 분석</strong>
+          <div class="appbar-actions">
+            <button type="button" class="icon-button" data-action="share" aria-label="공유하기">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V5" /><path d="m7 10 5-5 5 5" /><path d="M5 14v5h14v-5" /></svg>
+            </button>
+          </div>
+        </header>
+        <main id="detail-root" class="detail-root"></main>
+      </section>
+
+      <nav class="bottom-nav is-hidden" aria-label="하단 메뉴">
+        <button type="button" data-action="go-home">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5" /><path d="M7 10.5V20h10v-9.5" /><path d="M10 20v-5h4v5" /></svg>
+          정보
+        </button>
+        <button type="button" data-action="go-report" class="is-active">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6z" /><path d="M9 8h6" /><path d="M9 12h6" /><path d="M9 16h4" /></svg>
+          결과
+        </button>
+        <button type="button" data-action="open-timing">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6z" /><path d="M8 2v4" /><path d="M16 2v4" /><path d="M6 9h12" /><path d="M9 13h2" /><path d="M13 13h2" /></svg>
+          시기
+        </button>
+        <button type="button" data-action="open-basis">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6z" /><path d="M9 8h6" /><path d="M9 12h6" /><path d="M9 16h4" /></svg>
+          근거
+        </button>
+      </nav>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/metric-user-descriptions.js?v=metric-copy-v31"></script>
+  <script src="/annual-metric-descriptions.js?v=annual-axis-v30"></script>
+    <script src="/app-v2.js?v=production-release-v48" type="module"></script>
   </body>
 </html>

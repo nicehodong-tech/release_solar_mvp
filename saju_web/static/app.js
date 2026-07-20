@@ -2847,16 +2847,16 @@ function renderPremiumDomainScoreSummary(section) {
   const weakest = [...metrics].sort((a, b) => a.score - b.score)[0];
   const strongestLevel = strongest ? premiumMetricLevel(strongest.score) : null;
   const weakestLevel = weakest ? premiumMetricLevel(weakest.score) : null;
-  const strongestLineLabel = strongestLevel && premiumMetricToneFromLevel(strongestLevel.label) === "strong" ? "강점" : "높은 항목";
-  const weakestLineLabel = weakestLevel && premiumMetricToneFromLevel(weakestLevel.label) === "watch" ? "주의" : "점검";
+  const strongestLineLabel = "높은 항목";
+  const weakestLineLabel = "낮은 항목";
   const title = premiumNavTitle(section);
   return `
-    <section class="premium-domain-score-summary is-${escapeHtml(tone)} domain-${escapeHtml(domain)}" aria-label="${escapeHtml(`${title} 총점`)}">
+    <section class="premium-domain-score-summary is-${escapeHtml(tone)} domain-${escapeHtml(domain)}" aria-label="${escapeHtml(`${title} 지표 평균`)}">
       <div class="premium-domain-score-symbol" aria-hidden="true">${escapeHtml(premiumDomainSymbol(domain))}</div>
       <div class="premium-domain-score-main">
-        <span>${escapeHtml(`${title} 총점`)}</span>
+        <span>${escapeHtml(`${title} 지표 평균`)}</span>
         <strong>${escapeHtml(`${Math.round(score)}점`)}</strong>
-        <b>${escapeHtml(level.label)}</b>
+        <b>${escapeHtml(`${level.label} ${Math.round(score)}점`)}</b>
       </div>
       <div class="premium-domain-score-lines">
         ${strongest ? `<p><em>${escapeHtml(strongestLineLabel)}</em>${escapeHtml(strongest.title)} ${escapeHtml(strongestLevel.label)}</p>` : ""}
@@ -2867,6 +2867,10 @@ function renderPremiumDomainScoreSummary(section) {
 }
 
 function premiumDomainTotalScore(section, metrics = null) {
+  const sectionScore = Number(section?.total_score ?? section?.score);
+  if (Number.isFinite(sectionScore)) {
+    return Math.max(0, Math.min(100, Math.round(sectionScore)));
+  }
   const rawPool = Array.isArray(metrics) ? metrics : premiumVisualMetricPool(section);
   let pool = rawPool.filter((item) => !premiumMetricIsTimingLike(item));
   if (!pool.length) pool = rawPool;
@@ -2874,23 +2878,28 @@ function premiumDomainTotalScore(section, metrics = null) {
   if (!scores.length) {
     return Number(section?.strength_score || 56) || 56;
   }
-  const sorted = [...scores].sort((a, b) => b - a);
-  const top = sorted.slice(0, Math.min(4, sorted.length));
-  const bottom = sorted.slice(-Math.min(2, sorted.length));
   const average = scores.reduce((sum, score) => sum + score, 0) / scores.length;
-  const topAverage = top.reduce((sum, score) => sum + score, 0) / top.length;
-  const bottomAverage = bottom.reduce((sum, score) => sum + score, 0) / bottom.length;
-  return Math.max(0, Math.min(100, Math.round(average * 0.45 + topAverage * 0.38 + bottomAverage * 0.17)));
+  return Math.max(0, Math.min(100, Math.round(average)));
 }
 
 function premiumMetricToneFromLevel(label) {
-  if (label === "위험" || label === "주의") {
+  if (label === "낮음" || label === "다소 낮음") {
     return "watch";
   }
-  if (label === "좋음" || label === "매우 좋음") {
+  if (label === "높음" || label === "다소 높음") {
     return "strong";
   }
   return "neutral";
+}
+
+function premiumMetricTone(item) {
+  const score = Number.isFinite(Number(item?.score)) ? Number(item.score) : 50;
+  if (item?.polarity === "risk") {
+    if (score >= 65) return "watch";
+    if (score < 45) return "strong";
+    return "neutral";
+  }
+  return premiumMetricToneFromLevel(premiumMetricLevel(score).label);
 }
 
 function premiumDomainSymbol(domain) {
@@ -2963,7 +2972,7 @@ function premiumDomainCauseSentence(domain, strongest, weakest) {
 
 function premiumDomainAdviceSentence(domain, strongest, weakest) {
   const weakTitle = weakest?.title || "";
-  const weakText = weakTitle || "주의 항목";
+  const weakText = weakTitle || "보완 항목";
   const templates = {
     personality: `먼저 조정할 항목은 ${weakText}입니다. 바로 반응하기보다 기준을 먼저 정하십시오. 말투보다 순서가 성격의 장점을 살립니다.`,
     money: `먼저 관리할 항목은 ${weakText}입니다. 명의, 몫, 지급일, 보증처럼 나중에 말이 바뀌기 쉬운 부분을 초기에 정해야 합니다.`,
@@ -3590,29 +3599,18 @@ function premiumMetricLevel(score) {
   const value = Number.isFinite(Number(score)) ? Number(score) : 56;
   const percent = Math.max(14, Math.min(96, Math.round(value)));
   if (value >= 80) {
-    return { label: "매우 좋음", percent };
+    return { label: "높음", percent };
   }
   if (value >= 65) {
-    return { label: "좋음", percent };
+    return { label: "다소 높음", percent };
   }
   if (value >= 45) {
     return { label: "보통", percent };
   }
   if (value >= 30) {
-    return { label: "주의", percent };
+    return { label: "다소 낮음", percent };
   }
-  return { label: "위험", percent };
-}
-
-function premiumMetricIsNegativeAxis(value) {
-  const text = cleanCustomerLabel(value || "");
-  if (!text) {
-    return false;
-  }
-  if (/(관리력|안정성|경계력|방어력|조정력|대응력|회복성|유지력|감별력|확보력|운영력|자산화|수익화|창출력|형성력|축적력|전환력|적응력|가능성|기준성)$/u.test(text)) {
-    return false;
-  }
-  return /(주의|손실|위기|이별|부담|갈등|손상|리스크|위험|새기 쉬|돈이 새|결정권 없는 책임|기록이 없|정산 문제|몫 문제|책임은 많은데)/u.test(text);
+  return { label: "낮음", percent };
 }
 
 function premiumMetricDefinition(domain, title) {
@@ -3858,15 +3856,15 @@ function premiumVisualMetricPool(section) {
     if (!hasNumericScore && !String(rawMetricValue || "").trim()) {
       return;
     }
-    const negativeAxis = premiumMetricIsNegativeAxis(rawTitle);
     const numericScore = hasNumericScore ? Math.max(0, Math.min(100, rawScore)) : 56;
     const score = Number.isFinite(rawScore)
-      ? (negativeAxis ? 100 - numericScore : numericScore)
+      ? numericScore
       : premiumMetricScoreFromValue(rawMetricValue, item.tone || item.role || "");
     const level = premiumMetricLevel(score);
     const toneText = String(item.tone || item.role || "").toLowerCase();
+    const polarity = String(item.polarity || "intensity");
     const tone = hasNumericScore
-      ? premiumMetricToneFromLevel(level.label)
+      ? premiumMetricTone({ score, polarity })
       : (toneText.includes("watch") || toneText.includes("risk"))
         ? "watch"
         : (toneText.includes("strong") || toneText.includes("good"))
@@ -3884,6 +3882,7 @@ function premiumVisualMetricPool(section) {
       level: level.label,
       percent: level.percent,
       tone,
+      polarity,
       definition,
       highText: profile?.high || "",
       lowText: profile?.low || "",
@@ -3936,19 +3935,15 @@ function premiumMetricSourcePriority(sourceKind) {
 function premiumRepresentativeMetrics(section) {
   const pool = premiumVisualMetricPool(section);
   const representativePool = pool.filter((item) => !premiumMetricIsTimingLike(item));
-  const metricTone = (item) => premiumMetricToneFromLevel(premiumMetricLevel(item.score).label);
-  const strongTarget = Math.min(3, representativePool.filter((item) => metricTone(item) === "strong").length);
-  const watchTarget = Math.min(3, representativePool.filter((item) => metricTone(item) === "watch").length);
-  let selectedKeys = new Set();
-  let strong = representativePool
-    .filter((item) => metricTone(item) === "strong")
+  const selectedKeys = new Set();
+  const strong = [...representativePool]
     .sort((a, b) => b.score - a.score)
-    .slice(0, strongTarget);
+    .slice(0, Math.min(3, representativePool.length));
   strong.forEach((item) => selectedKeys.add(item.key));
-  let watch = representativePool
-    .filter((item) => metricTone(item) === "watch" && !selectedKeys.has(item.key))
+  const watch = representativePool
+    .filter((item) => !selectedKeys.has(item.key))
     .sort((a, b) => a.score - b.score)
-    .slice(0, watchTarget);
+    .slice(0, Math.min(3, Math.max(0, representativePool.length - strong.length)));
   return {
     strong,
     watch,
@@ -3976,11 +3971,11 @@ function renderPremiumVisualMetricBoard(section) {
         <strong>핵심 지표</strong>
       </header>
       <ol class="premium-metric-scale" aria-label="5단계 지표 기준">
-        <li>위험</li><li>주의</li><li>보통</li><li>좋음</li><li>매우 좋음</li>
+        <li>낮음</li><li>다소 낮음</li><li>보통</li><li>다소 높음</li><li>높음</li>
       </ol>
       <div class="premium-visual-metric-columns">
-        ${renderPremiumVisualMetricColumn("강점 항목", model.strong, "strong")}
-        ${renderPremiumVisualMetricColumn("주의 항목", model.watch, "watch")}
+        ${renderPremiumVisualMetricColumn("높은 항목", model.strong, "high")}
+        ${renderPremiumVisualMetricColumn("낮은 항목", model.watch, "low")}
       </div>
       ${renderPremiumVisualDetailDrawer(section, model)}
     </section>
@@ -4015,7 +4010,7 @@ function renderPremiumVisualDetailMetricCard(item) {
   const score = Number.isFinite(Number(item.score)) ? Math.max(0, Math.min(100, Number(item.score))) : 56;
   const level = premiumMetricLevel(score);
   const width = Math.max(8, Math.min(100, level.percent));
-  const tone = premiumMetricToneFromLevel(level.label);
+  const tone = premiumMetricTone(item);
   const highText = premiumMetricOutcomeText(item.highText || "");
   const lowText = premiumMetricOutcomeText(item.lowText || "");
   return `
@@ -4025,7 +4020,7 @@ function renderPremiumVisualDetailMetricCard(item) {
       </div>
       <div class="premium-visual-detail-card-meta">
         <span>지표 수준</span>
-        <b>${escapeHtml(level.label)}</b>
+        <b>${escapeHtml(`${level.label} ${Math.round(score)}점`)}</b>
       </div>
       <div class="premium-visual-meter" aria-label="${escapeHtml(`${item.title} ${level.label}`)}">
         <i style="width:${width}%"></i>
@@ -4048,35 +4043,30 @@ function renderPremiumVisualMetricColumn(title, items, tone) {
   return `
     <div class="premium-visual-metric-column is-${escapeHtml(tone)}">
       <h4>${escapeHtml(title)}</h4>
-      ${items.map((item) => renderPremiumVisualMetricCard(item, tone)).join("")}
+      ${items.map((item) => renderPremiumVisualMetricCard(item)).join("")}
     </div>
   `;
 }
 
 function renderPremiumVisualMetricCard(item, fallbackTone = "neutral") {
-  const tone = fallbackTone === "watch"
-    ? "watch"
-    : fallbackTone === "strong"
-      ? "strong"
-      : item.tone === "watch"
-        ? "watch"
-        : item.tone === "strong"
-          ? "strong"
-          : "neutral";
+  const tone = fallbackTone === "watch" || fallbackTone === "strong"
+    ? fallbackTone
+    : premiumMetricTone(item);
   const rawScore = Number.isFinite(Number(item.score)) ? Math.max(0, Math.min(100, Number(item.score))) : 56;
   const displayScore = rawScore;
   const displayLevel = premiumMetricLevel(displayScore);
   const width = Math.max(8, Math.min(100, displayLevel.percent));
   const levelCaption = "지표 수준";
-  const noteLabel = tone === "watch" ? "낮게 나오면" : "높게 나오면";
-  const noteText = premiumMetricOutcomeText(tone === "watch" ? item.lowText : item.highText);
+  const isLow = displayScore < 45;
+  const noteLabel = isLow ? "낮게 나오면" : "높게 나오면";
+  const noteText = premiumMetricOutcomeText(isLow ? item.lowText : item.highText);
   return `
     <article class="premium-visual-metric-card is-${escapeHtml(tone)}">
       <header>
         <strong>${escapeHtml(item.title)}</strong>
         <div class="premium-visual-metric-level">
           <span>${escapeHtml(levelCaption)}</span>
-          <b>${escapeHtml(displayLevel.label)}</b>
+          <b>${escapeHtml(`${displayLevel.label} ${Math.round(displayScore)}점`)}</b>
         </div>
       </header>
       <div class="premium-visual-meter" aria-label="${escapeHtml(`${item.title} ${levelCaption} ${displayLevel.label}`)}">

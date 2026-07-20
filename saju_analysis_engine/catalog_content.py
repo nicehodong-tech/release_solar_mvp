@@ -1,4 +1,4 @@
-﻿"""Customer-facing content blocks for product catalog entries.
+"""Customer-facing content blocks for product catalog entries.
 
 The catalog is the promise shown in menus. These blocks make each menu entry
 open into a distinct customer-facing unit without recalculating the chart.

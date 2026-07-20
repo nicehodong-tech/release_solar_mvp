@@ -5,6 +5,7 @@ from __future__ import annotations
 from itertools import combinations
 from typing import Any
 
+from saju_birth_engine.constants import STEMS
 from saju_birth_engine.models import BirthChartResult
 
 from .constants import (
@@ -34,6 +35,7 @@ STEM_HANJA = {
     "im": "壬",
     "gye": "癸",
 }
+STEM_KEY_BY_HANJA = {str(item["hanja"]): str(item["key"]) for item in STEMS}
 
 ELEMENT_LABELS = {
     "wood": "목",
@@ -150,9 +152,9 @@ SPECIFIC_ELEMENT_SET_RULES: dict[tuple[str, ...], dict[str, Any]] = {
         "domain_links": ["money", "marriage"],
         "trait_keywords": ["현금 보존", "자금 통제", "생활비 관리", "감정 절제"],
         "interpretation": (
-            "土水 배합은 돈, 정보, 감정의 움직임을 현실의 기준으로 막고 관리하는 구성입니다. "
+            "土水 배합은 돈, 정보, 감정의 움직임을 현실의 기준 안에 두고 조절하는 구성입니다. "
             "재물에서는 현금 보존, 지출 통제, 채무 관리에 강하게 작용하고, 결혼에서는 생활비와 "
-            "가계 기준을 분명히 해야 안정됩니다."
+            "가계 기준이 분명할수록 안정됩니다."
         ),
     },
     ("metal", "wood"): {
@@ -247,8 +249,8 @@ GENERIC_RELATION_RULES = {
     },
     "same_element_density": {
         "domain_links": ["career", "money"],
-        "trait_keywords": ["성향 반복", "동질성", "집중"],
-        "interpretation": "같은 오행이 겹쳐 해당 오행의 성향이 반복되고 한 방향으로 집중됩니다.",
+        "trait_keywords": ["동일 오행 집중", "성향 강화", "판단의 일관성"],
+        "interpretation": "같은 오행이 겹치면 해당 오행의 장점과 부담이 모두 선명해집니다.",
     },
     "element_mixed": {
         "domain_links": ["career"],
@@ -256,6 +258,80 @@ GENERIC_RELATION_RULES = {
         "interpretation": "오행이 직접 생극으로만 정리되지 않아 다른 글자와 위치 조건을 함께 보아야 합니다.",
     },
 }
+
+
+SAME_ELEMENT_DENSITY_RULES: dict[str, dict[str, Any]] = {
+    "wood": {
+        "source_rule": "동일 오행 물상 기본값: 목목",
+        "domain_links": ["career", "personality", "love"],
+        "trait_keywords": ["성장 지향", "기획 확장", "배움", "관계 확대"],
+        "interpretation": (
+            "木의 성질이 겹치면 성장, 기획, 배움, 확장 욕구가 강해집니다. "
+            "새 일을 시작하고 관계를 넓히는 감각은 좋지만, 결과를 마감하는 기준이 약하면 "
+            "계획이 늘어지고 결실이 늦어질 수 있습니다."
+        ),
+    },
+    "fire": {
+        "source_rule": "동일 오행 물상 기본값: 화화",
+        "domain_links": ["reputation", "love", "career"],
+        "trait_keywords": ["표현성", "주목도", "평판 민감", "빠른 반응"],
+        "interpretation": (
+            "火의 성질이 겹치면 표현, 주목, 속도, 평판에 민감해집니다. "
+            "사람 앞에서 존재감이 드러나고 분위기를 움직이는 능력이 좋지만, 과열되면 "
+            "감정 소모와 성급한 노출이 커질 수 있습니다."
+        ),
+    },
+    "earth": {
+        "source_rule": "동일 오행 물상 기본값: 토토",
+        "domain_links": ["money", "marriage", "career"],
+        "trait_keywords": ["책임 지속", "관리 성향", "자산 보관", "생활 기반"],
+        "interpretation": (
+            "土의 성질이 겹치면 책임, 보관, 관리, 생활 기반을 중시합니다. "
+            "돈과 일에서는 맡은 것을 오래 유지하고 안정시키는 능력이 생기지만, 지나치면 "
+            "변화가 늦고 부담을 혼자 끌어안기 쉽습니다."
+        ),
+    },
+    "metal": {
+        "source_rule": "동일 오행 물상 기본값: 금금",
+        "domain_links": ["career", "reputation", "money"],
+        "trait_keywords": ["판단 기준", "검증", "문서·절차", "전문성"],
+        "interpretation": (
+            "金의 성질이 겹치면 판단 기준, 절차 의식, 결과를 검증하는 태도가 강해집니다. "
+            "직업에서는 품질, 문서, 회계, 심사, 전략처럼 정확도가 필요한 영역으로 나타나고, "
+            "지나치면 관계를 판단과 평가의 언어로 대하기 쉽습니다."
+        ),
+    },
+    "water": {
+        "source_rule": "동일 오행 물상 기본값: 수수",
+        "domain_links": ["career", "money", "personality"],
+        "trait_keywords": ["정보 감각", "계산", "관찰", "변화 대응"],
+        "interpretation": (
+            "水의 성질이 겹치면 정보, 계산, 관찰, 이동성이 강해집니다. "
+            "상황을 빠르게 읽고 선택지를 넓히는 감각이 좋지만, 과하면 결정을 미루거나 "
+            "생각이 여러 방향으로 흩어질 수 있습니다."
+        ),
+    },
+}
+
+
+def same_element_density_rule(element: str) -> dict[str, Any]:
+    rule = SAME_ELEMENT_DENSITY_RULES.get(str(element or ""))
+    if rule:
+        return {
+            "relation_type": "same_element_density",
+            "source_rule": rule["source_rule"],
+            "domain_links": list(rule["domain_links"]),
+            "trait_keywords": list(rule["trait_keywords"]),
+            "interpretation": str(rule["interpretation"]),
+        }
+    generic = GENERIC_RELATION_RULES["same_element_density"]
+    return {
+        "relation_type": "same_element_density",
+        "source_rule": "generic_same_element_density",
+        "domain_links": list(generic["domain_links"]),
+        "trait_keywords": list(generic["trait_keywords"]),
+        "interpretation": str(generic["interpretation"]),
+    }
 
 
 def _birth_time_unknown(chart: BirthChartResult) -> bool:
@@ -280,6 +356,33 @@ def _canonical_stems(stems: list[str]) -> list[str]:
 def _canonical_elements(elements: list[str]) -> tuple[str, ...]:
     unique_elements = list(dict.fromkeys(element for element in elements if element))
     return tuple(sorted(unique_elements, key=lambda element: ELEMENT_ORDER.index(element)))
+
+
+def element_pair_rule(first_element: str, second_element: str) -> dict[str, Any]:
+    element_key = _canonical_elements([first_element, second_element])
+    if first_element == second_element:
+        return same_element_density_rule(first_element)
+    payload = SPECIFIC_ELEMENT_SET_RULES.get(element_key)
+    if payload:
+        return {
+            "relation_type": str(payload["relation_type"]),
+            "source_rule": str(payload["source_rule"]),
+            "domain_links": list(payload["domain_links"]),
+            "trait_keywords": list(payload["trait_keywords"]),
+            "interpretation": str(payload["interpretation"]),
+        }
+    relation_type = "element_generation" if (
+        ELEMENT_GENERATES[first_element] == second_element
+        or ELEMENT_GENERATES[second_element] == first_element
+    ) else "element_control"
+    payload = GENERIC_RELATION_RULES[relation_type]
+    return {
+        "relation_type": relation_type,
+        "source_rule": "generic_element_relation",
+        "domain_links": list(payload["domain_links"]),
+        "trait_keywords": list(payload["trait_keywords"]),
+        "interpretation": str(payload["interpretation"]),
+    }
 
 
 def _combination_key(stems: list[str]) -> str:
@@ -327,6 +430,14 @@ def _rule_payload(stems: list[str], relation_type: str) -> dict[str, Any]:
     element_key = _canonical_elements(elements)
     if element_key in SPECIFIC_ELEMENT_SET_RULES:
         return SPECIFIC_ELEMENT_SET_RULES[element_key]
+    if relation_type == "same_element_density" and element_key:
+        rule = same_element_density_rule(element_key[0])
+        return {
+            "source_rule": rule["source_rule"],
+            "domain_links": rule["domain_links"],
+            "trait_keywords": rule["trait_keywords"],
+            "interpretation": f"{_hanja_key(stems)} 배합은 {rule['interpretation']}",
+        }
     rule = GENERIC_RELATION_RULES[relation_type]
     return {
         "source_rule": "generic_element_relation",
@@ -434,6 +545,7 @@ def _signal(
         counter_signals=[],
         trait_keywords=list(payload["trait_keywords"]),
         interpretation=str(payload["interpretation"]),
+        ordered_stems=list(stems),
         monthly_variant_note=_month_variant_note(chart, stems, relation_type),
         day_master_variant_note=_day_master_variant_note(chart, stems, relation_type),
     )
@@ -457,7 +569,9 @@ def _visible_entries(chart: BirthChartResult) -> list[dict[str, Any]]:
 def _hidden_entries(chart: BirthChartResult) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for position, pillar in _pillars(chart).items():
-        for index, (stem_key, hidden_weight) in enumerate(BRANCH_HIDDEN_STEMS[pillar.branch_key]):
+        hidden_stems = _full_hidden_stem_keys(chart, position, pillar.branch_key)
+        for index, stem_key in enumerate(hidden_stems):
+            hidden_weight = _hidden_stem_weight(pillar.branch_key, stem_key)
             entries.append(
                 {
                     "position": f"{position}:hidden:{index}",
@@ -468,6 +582,69 @@ def _hidden_entries(chart: BirthChartResult) -> list[dict[str, Any]]:
                 }
             )
     return entries
+
+
+def _full_hidden_stem_keys(chart: BirthChartResult, position: str, branch_key: str) -> list[str]:
+    raw_values = list(getattr(chart, "hidden_stems", {}).get(position, []) or [])
+    resolved: list[str] = []
+    for value in raw_values:
+        stem_key = STEM_KEY_BY_HANJA.get(str(value), str(value))
+        if stem_key in STEM_METADATA and stem_key not in resolved:
+            resolved.append(stem_key)
+    if resolved:
+        return resolved
+    return [stem_key for stem_key, _ in BRANCH_HIDDEN_STEMS[branch_key]]
+
+
+def _hidden_stem_weight(branch_key: str, stem_key: str) -> float:
+    for candidate, weight in BRANCH_HIDDEN_STEMS[branch_key]:
+        if candidate == stem_key:
+            return float(weight)
+    # 자오묘유의 여기는 기존 강약 계산을 흔들지 않도록 보조값으로 둔다.
+    return 0.2
+
+
+def _visible_element_representatives(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    position_priority = {"day": 0, "month": 1, "hour": 2, "year": 3}
+    selected: dict[str, dict[str, Any]] = {}
+    for entry in sorted(
+        entries,
+        key=lambda item: position_priority.get(str(item["position"]).split(":", 1)[0], 9),
+    ):
+        element = STEM_METADATA[str(entry["stem"])]["element"]
+        selected.setdefault(element, entry)
+    return [selected[element] for element in ELEMENT_ORDER if element in selected]
+
+
+def _month_hidden_visible_signals(
+    chart: BirthChartResult,
+    visible_entries: list[dict[str, Any]],
+) -> list[ElementCombinationSignal]:
+    month_pillar = chart.month_pillar
+    hidden_stems = _full_hidden_stem_keys(chart, "month", month_pillar.branch_key)
+    visible_representatives = _visible_element_representatives(visible_entries)
+    visible_stems = {str(entry["stem"]) for entry in visible_entries}
+    signals: list[ElementCombinationSignal] = []
+    for hidden_index, hidden_stem in enumerate(hidden_stems):
+        hidden_entry = {
+            "position": f"month:hidden:{hidden_index}",
+            "source": "hidden",
+            "stem": hidden_stem,
+            "branch": month_pillar.branch_key,
+            "weight": POSITION_BRANCH_WEIGHTS["month"] * _hidden_stem_weight(month_pillar.branch_key, hidden_stem),
+        }
+        for visible_entry in visible_representatives:
+            visible_position = str(visible_entry["position"]).split(":", 1)[0]
+            signals.append(
+                _signal(
+                    chart,
+                    layer="month_hidden_visible",
+                    entries=[hidden_entry, visible_entry],
+                    signal_suffix=f"{hidden_index}_{visible_position}",
+                    strength="high" if hidden_stem in visible_stems else "moderate",
+                )
+            )
+    return _dedupe_signals(signals)
 
 
 def _heavenly_stem_signals(chart: BirthChartResult, entries: list[dict[str, Any]]) -> list[ElementCombinationSignal]:
@@ -561,6 +738,7 @@ def iter_element_combination_signals(profile: ElementCombinationProfile) -> list
         list(profile.heavenly_stem_signals)
         + list(profile.hidden_stem_signals)
         + list(profile.stem_branch_signals)
+        + list(profile.month_hidden_visible_signals)
     )
 
 
@@ -600,12 +778,22 @@ def build_element_combination_profile(chart: BirthChartResult) -> ElementCombina
     heavenly_stem_signals = _heavenly_stem_signals(chart, visible_entries)
     hidden_stem_signals = _hidden_stem_signals(chart, hidden_entries)
     stem_branch_signals = _stem_branch_signals(chart)
-    all_signals = _dedupe_signals(heavenly_stem_signals + hidden_stem_signals + stem_branch_signals)
+    month_hidden_visible_signals = _month_hidden_visible_signals(chart, visible_entries)
+    all_signals = _dedupe_signals(
+        heavenly_stem_signals
+        + hidden_stem_signals
+        + stem_branch_signals
+        + month_hidden_visible_signals
+    )
     top_signal_ids = [signal.signal_id for signal in sorted(all_signals, key=_signal_rank)[:10]]
+    for signal in month_hidden_visible_signals:
+        if signal.signal_id not in top_signal_ids:
+            top_signal_ids.append(signal.signal_id)
     return ElementCombinationProfile(
         heavenly_stem_signals=heavenly_stem_signals,
         hidden_stem_signals=hidden_stem_signals,
         stem_branch_signals=stem_branch_signals,
+        month_hidden_visible_signals=month_hidden_visible_signals,
         top_signal_ids=top_signal_ids,
         domain_notes=_domain_notes(all_signals),
         summary_sentences=_summary_sentences(all_signals),

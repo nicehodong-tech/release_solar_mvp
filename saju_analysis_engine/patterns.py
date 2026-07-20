@@ -345,18 +345,25 @@ def build_pattern_profile(
     useful, caution = build_useful_element_candidates(element_profile, month_command_ten_god)
     regular_pattern = REGULAR_PATTERN_BY_TEN_GOD.get(month_command_ten_god, "")
 
-    if candidates:
-        primary = candidates[0].name
-        confidence = candidates[0].confidence
+    regular_candidate = next(
+        (item for item in candidates if item.role == "regular_pattern_candidate"),
+        None,
+    )
+    functional_candidate = next(
+        (item for item in candidates if item.role != "special_pattern_watch"),
+        None,
+    )
+    lead_candidate = regular_candidate or functional_candidate
+    if lead_candidate is not None:
+        primary = lead_candidate.name
+        confidence = lead_candidate.confidence
     else:
         primary = "mixed_balanced_structure"
         confidence = "medium"
 
-    if candidates and candidates[0].role == "regular_pattern_candidate":
+    if regular_candidate is not None:
         pattern_family = "regular"
-    elif candidates and candidates[0].role == "special_pattern_watch":
-        pattern_family = "special_watch"
-    elif candidates and candidates[0].role in {"primary_candidate", "secondary_candidate", "condition_candidate"}:
+    elif functional_candidate is not None:
         pattern_family = "functional"
     else:
         pattern_family = "mixed"
@@ -376,7 +383,9 @@ def build_pattern_profile(
         notes.append(f"moisture_priority:{element_profile.moisture_balance}")
     if ten_god_profile.important_pairs:
         notes.extend(f"pair:{item}" for item in ten_god_profile.important_pairs)
-    if not candidates:
+    if special_pattern_flags:
+        notes.append("special_pattern_watch_requires_separate_confirmation")
+    if lead_candidate is None:
         notes.append("no_single_pattern_dominates")
 
     return PatternProfile(

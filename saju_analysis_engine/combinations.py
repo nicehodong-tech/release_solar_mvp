@@ -97,7 +97,7 @@ RELATION_INTERPRETATIONS = {
     "officer_resource_self_chain": "책임과 평가가 학습, 자격, 자기 관리로 흡수되는 관인상생 계열의 작용이 있습니다.",
     "peer_output_wealth_chain": "동료, 실행력, 생산성이 수익 조건으로 이어질 수 있어 일의 규모를 키우는 데 유리합니다.",
     "output_wealth_officer_chain": "생산성과 수익이 사회적 책임 또는 직위로 이어질 수 있습니다.",
-    "resource_peer_support": "지식과 보호가 자기 주장이나 동료 관계를 키웁니다. 자기 기준도 쉽게 굳어집니다.",
+    "resource_peer_support": "지식과 보호가 자기 기준과 책임 의식을 강하게 만들고, 사람 사이의 주장과 역할 문제를 함께 드러냅니다.",
     "officer_self_pressure": "책임, 규칙, 평가가 당신을 직접 압박하므로 직업 책임감과 긴장감이 함께 커집니다.",
     "officer_peer_pressure": "규칙과 경쟁심이 함께 있어 조직, 동료, 금전 판단에서 긴장과 비교가 생기기 쉽습니다.",
     "peer_wealth_competition": "비겁과 재성이 맞물려 돈을 벌 기회와 나눠야 할 부담이 함께 생깁니다.",

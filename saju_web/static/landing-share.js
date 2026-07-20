@@ -21,11 +21,11 @@ function landingShareIconHtml() {
 }
 
 function landingShareText() {
-  const title = document.querySelector("h1")?.textContent?.trim() || "무료 사주 분석";
+  const title = document.querySelector("h1")?.textContent?.trim() || "사주 유형 분석";
   const description =
     document.querySelector('meta[name="description"]')?.content?.trim() ||
-    "생년월일을 입력하면 정통 명리 이론을 기반으로 무료 사주 분석을 확인할 수 있습니다.";
-  return ["AI 사주 : 이현", title, description].filter(Boolean).join("\n");
+    "생년월일과 태어난 시간을 바탕으로 사주 유형과 분야별 운세를 확인할 수 있습니다.";
+  return ["사주 이현", title, description].filter(Boolean).join("\n");
 }
 
 function showLandingShareToast(message) {
@@ -76,7 +76,7 @@ async function shareLandingPage() {
   const url = landingCanonicalUrl();
   const text = landingShareText();
   const shareData = {
-    title: document.title || "AI 사주 : 이현 무료 사주 분석",
+    title: document.title || "사주 이현 | 사주 유형 분석",
     text,
     url,
   };

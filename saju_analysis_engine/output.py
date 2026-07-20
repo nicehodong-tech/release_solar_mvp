@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal, ROUND_HALF_UP
 import re
 
 from .models import (
@@ -16,7 +17,7 @@ from .models import (
 from .constants import DOMAIN_ORDER
 from .manifest import build_engine_manifest
 from .catalog_content import CURRENT_FORTUNE_YEAR, attach_catalog_content_blocks
-from .judgment_core import build_domain_judgment_context
+from .judgment_core import PATTERN_LABELS, build_domain_judgment_context
 from .product_catalog import TIER_DEFINITIONS, catalog_payload_for_tier, tier_definition
 from .premium_category_topics import (
     premium_product_surface_contract,
@@ -24,12 +25,31 @@ from .premium_category_topics import (
 )
 from .output_goals import output_goal_contracts
 from .rendering import DOMAIN_LABELS, PHASE_LABELS
+from .timing_scoring import timing_activation_modifier, timing_base_score
 from .section_candidate_output import build_candidate_report_sections
 from .section_selection import build_section_selection
 from .premium_detail_selection import build_premium_detail_selection
 from .source_personality_profiles import source_personality_profile_payload
 from .source_reading_profiles import source_reading_profile_payload
-from .auxiliary import TWELVE_SINSAL_LABELS, TWELVE_SINSAL_MEANINGS
+from .auxiliary import (
+    TWELVE_SINSAL_LABELS,
+    TWELVE_SINSAL_MEANINGS,
+    build_annual_shinsal_signals,
+)
+from .features import DOMAIN_AXIS_LINKS, GYEOKGUK_CLASSICAL_AXIS_EFFECTS, GYEOKGUK_DOMAIN_ALIASES
+from .gyeokguk_ten_god_actions import (
+    CLASSICAL_ACTION_MECHANICS,
+    CLASSICAL_ACTION_MECHANIC_TEXTS,
+    TEN_GOD_EXACT_ACTION_PROFILE,
+    TEN_GOD_EXACT_NUANCE,
+)
+from .gyeokguk_dual_ten_god_actions import TEN_GOD_OPERATION_FACE
+from .keyword_profiles import (
+    annotate_shinsal_structure_alignment,
+    branch_relation_keyword_profiles,
+    shinsal_keyword_profiles,
+)
+from .metric_adjudication import adjudicate_natal_metric
 
 
 PROHIBITED_DETERMINISTIC_TERMS = {
@@ -833,6 +853,315 @@ def _warning_labels(warnings: list[str]) -> list[str]:
     return list(dict.fromkeys(_warning_label(warning) for warning in warnings))
 
 
+GYEOKGUK_CLASSICAL_ACTION_PREFIXES: tuple[str, ...] = (
+    "gyeokguk_single_classical_action:",
+    "gyeokguk_dual_classical_action:",
+    "gyeokguk_dual_first_single_classical_action:",
+    "gyeokguk_dual_second_single_classical_action:",
+)
+
+GYEOKGUK_FACET_DOMAIN_ALIASES: dict[str, set[str]] = {
+    "money": {"money"},
+    "career": {"career", "honor", "reputation"},
+    "love": {"love", "relationship", "social"},
+    "marriage": {"marriage"},
+    "personality": {"personality", "social"},
+}
+
+GYEOKGUK_CYCLE_CLASSICAL_TAG_HINTS: dict[str, set[str]] = {
+    "output_generates_wealth": {"siksang_saengjae"},
+    "generates_output_to_wealth": {"siksang_saengjae", "bigeop_generates_siksang"},
+    "output_generates_wealth_then_officer": {
+        "siksang_saengjae",
+        "jaesaenggwan",
+        "jaeseong_generates_gwanseong",
+    },
+    "wealth_generates_officer": {"jaesaenggwan", "jaeseong_generates_gwanseong"},
+    "generates_wealth_to_officer": {"jaesaenggwan", "jaeseong_generates_gwanseong"},
+    "wealth_generates_officer_controls_peer": {
+        "jaesaenggwan",
+        "jaeseong_generates_gwanseong",
+        "gwanseong_controls_bigeop",
+    },
+    "controls_peer_to_wealth": {"bigeop_jaengjae", "bigeop_controls_wealth", "gwanseong_controls_bigeop"},
+    "peer_to_wealth": {"bigeop_jaengjae", "bigeop_controls_wealth"},
+    "controls_officer_to_peer": {"gwanseong_controls_bigeop"},
+    "wealth_controls_resource": {"jaegeukin", "wealth_controls_resource"},
+    "controls_wealth_to_resource": {"jaegeukin", "wealth_controls_resource"},
+    "officer_generates_resource": {"gwanin_sangsaeng", "gwanseong_generates_inseong", "salin_sangsaeng"},
+    "controls_resource_to_output": {"inseong_dosik", "inseong_controls_output"},
+    "output_controls_officer": {"siksin_jesal", "siksang_controls_gwanseong", "sanggwan_gyeongwan"},
+    "element_generates": {
+        "siksang_saengjae",
+        "jaesaenggwan",
+        "gwanin_sangsaeng",
+        "salin_sangsaeng",
+        "bigeop_generates_siksang",
+        "inseong_generates_bigeop",
+    },
+}
+
+
+def _gyeokguk_classical_tags_from_basis(basis_codes: list[str]) -> list[str]:
+    tags: list[str] = []
+    for code in list(basis_codes or []):
+        text = str(code)
+        for prefix in GYEOKGUK_CLASSICAL_ACTION_PREFIXES:
+            if text.startswith(prefix):
+                tags.append(text.removeprefix(prefix))
+                break
+    return list(dict.fromkeys(tags))
+
+
+def _gyeokguk_match_classical_tags(match: object) -> list[str]:
+    direct_tags = [str(tag) for tag in list(getattr(match, "classical_action_tags", []) or [])]
+    component_tags = [
+        str(tag)
+        for tag in [
+            *list(getattr(match, "first_single_classical_action_tags", []) or []),
+            *list(getattr(match, "second_single_classical_action_tags", []) or []),
+        ]
+    ]
+    basis_tags = _gyeokguk_classical_tags_from_basis(
+        [str(code) for code in list(getattr(match, "basis_codes", []) or [])]
+    )
+    return list(dict.fromkeys([*direct_tags, *component_tags, *basis_tags]))
+
+
+def _gyeokguk_center_axis_from_match(source: str, match: object, tags: list[str]) -> dict[str, object]:
+    tag_set = {str(tag) for tag in list(tags or [])}
+    if source == "single":
+        resolution_state = str(getattr(match, "pattern_resolution_state", "") or "")
+        grade_state = str(getattr(match, "role_grade", "") or "")
+    else:
+        resolution_state = str(getattr(match, "combination_resolution_state", "") or "")
+        grade_state = str(getattr(match, "chain_grade", "") or "")
+
+    hard_pagyeok = (
+        "pagyeok" in resolution_state
+        or "disease" in resolution_state
+        or grade_state in {"risk_chain", "compounded_burden_chain", "danger", "breaker", "core_overload"}
+    )
+    if "byeongyak" in resolution_state or "medicine" in resolution_state or grade_state in {
+        "medicine_chain",
+        "breaker_or_medicine",
+    }:
+        return {"code": "byeongyak_medicine", "label": "병약 조절", "score": 13}
+    if hard_pagyeok:
+        return {"code": "pagyeok_or_disease", "label": "파격·병증", "score": 12}
+    if "seonggyeok" in resolution_state or grade_state in {
+        "constructive_chain",
+        "supportive_chain",
+        "core",
+        "support",
+        "source",
+    }:
+        caution_tags = {
+            "sanggwan_gyeongwan",
+            "bigeop_jaengjae",
+            "inseong_dosik",
+            "jaeda_sinyak_risk",
+            "gwansal_honhap",
+            "gwansal_overload",
+            "inbi_overload",
+            "siksang_overload",
+            "jaesaengsal",
+        }
+        if bool(tag_set & caution_tags):
+            return {"code": "seonggyeok_with_caution", "label": "성격 작용·병증 점검", "score": 12}
+        return {"code": "seonggyeok", "label": "성격 작용", "score": 12}
+    if "conditional" in resolution_state or "mixed" in resolution_state or grade_state in {"conditional_chain", "mixed_chain", "mixed"}:
+        return {"code": "conditional_axis", "label": "조건부 성패", "score": 7}
+    return {"code": "secondary_axis", "label": "보조 작용", "score": 4}
+
+
+def _gyeokguk_action_title(source: str, match: object) -> str:
+    if source == "dual":
+        return str(getattr(match, "exact_pair_name", "") or getattr(match, "exact_pair_key", "") or getattr(match, "rule_key", ""))
+    ten_god = str(getattr(match, "acting_ten_god", "") or "")
+    return f"{TEN_GOD_LABELS.get(ten_god, ten_god)} 중심 작용" if ten_god else str(getattr(match, "rule_key", ""))
+
+
+def _prepare_gyeokguk_action_matches(gyeokguk_profile: object | None) -> list[dict[str, object]]:
+    """Normalize invariant gyeokguk match metadata once per chart."""
+
+    if gyeokguk_profile is None:
+        return []
+    matches: list[tuple[str, object]] = [
+        *[
+            ("dual", match)
+            for match in list(getattr(gyeokguk_profile, "dual_ten_god_action_matches", []) or [])
+        ],
+        *[
+            ("single", match)
+            for match in list(getattr(gyeokguk_profile, "ten_god_action_matches", []) or [])
+        ],
+    ]
+    prepared: list[dict[str, object]] = []
+    for source, match in matches:
+        tags = _gyeokguk_match_classical_tags(match)
+        prepared.append(
+            {
+                "source": source,
+                "match": match,
+                "tags": tags,
+                "tag_set": frozenset(str(tag) for tag in tags),
+                "match_domains": frozenset(
+                    str(item) for item in list(getattr(match, "domain_priority", []) or [])
+                ),
+                "center_axis": _gyeokguk_center_axis_from_match(source, match, tags),
+                "context_state": str(getattr(match, "context_judgment_state", "") or ""),
+                "month_fit_state": str(getattr(match, "month_fit_state", "") or ""),
+                "presence_score": int(getattr(match, "presence_score", 0) or 0),
+                "domain_projections": getattr(match, "domain_projections", {}) or {},
+                "title": _gyeokguk_action_title(source, match),
+            }
+        )
+    return prepared
+
+
+def _domain_facet_gyeokguk_action_sources(
+    *,
+    gyeokguk_profile: object | None,
+    domain: str,
+    rule: dict[str, object],
+    basis_codes: list[str],
+    counter_signals: list[str],
+    prepared_matches: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    if gyeokguk_profile is None:
+        return []
+
+    rule_cycle_tags = {str(tag) for tag in list(rule.get("cycle_tags") or [])}
+    desired_tags = {
+        tag
+        for cycle_tag in rule_cycle_tags
+        for tag in GYEOKGUK_CYCLE_CLASSICAL_TAG_HINTS.get(cycle_tag, set())
+    }
+    code_text = " ".join([*basis_codes, *counter_signals])
+    domain_aliases = GYEOKGUK_FACET_DOMAIN_ALIASES.get(domain, {domain})
+    candidates: list[tuple[float, dict[str, object]]] = []
+    match_rows = (
+        prepared_matches
+        if prepared_matches is not None
+        else _prepare_gyeokguk_action_matches(gyeokguk_profile)
+    )
+
+    for match_row in match_rows:
+        source = str(match_row["source"])
+        match = match_row["match"]
+        tags = list(match_row["tags"])
+        tag_set = match_row["tag_set"]
+        match_domains = match_row["match_domains"]
+        domain_overlap = bool(match_domains & domain_aliases)
+        tag_overlap = bool(tag_set & desired_tags)
+        axis_overlap = any(str(tag) in code_text for tag in tag_set)
+        if not (domain_overlap or tag_overlap or axis_overlap):
+            continue
+
+        center_axis = match_row["center_axis"]
+        axis_code = str(center_axis.get("code") or "")
+        context_state = str(match_row["context_state"])
+        month_fit_state = str(match_row["month_fit_state"])
+        presence_score = int(match_row["presence_score"])
+        salience = (
+            presence_score
+            + (20 if domain_overlap else 0)
+            + (16 if tag_overlap else 0)
+            + (10 if axis_overlap else 0)
+            + int(center_axis.get("score") or 0)
+        )
+        if context_state in {
+            "context_strengthens_action",
+            "context_strengthens_pair",
+            "medicine_can_work",
+            "constructive_by_context",
+            "risk_is_reinforced",
+            "month_pressure_confirms_risk",
+        }:
+            salience += 10
+        if month_fit_state in {"supports_month_command", "usable_by_month_command", "both_supported_by_month_command"}:
+            salience += 6
+        if axis_code == "pagyeok_or_disease":
+            salience += 6
+
+        domain_projections = match_row["domain_projections"]
+        if isinstance(domain_projections, dict):
+            projection = next(
+                (
+                    str(domain_projections.get(alias))
+                    for alias in domain_aliases
+                    if domain_projections.get(alias)
+                ),
+                "",
+            )
+        else:
+            projection = ""
+        candidates.append(
+            (
+                float(salience),
+                {
+                    "source": source,
+                    "title": str(match_row["title"]),
+                    "center_axis": center_axis,
+                    "classical_tags": tags[:6],
+                    "presence_score": presence_score,
+                    "month_fit_state": month_fit_state,
+                    "context_judgment_state": context_state,
+                    "domain_relevant": domain_overlap,
+                    "cycle_tag_relevant": tag_overlap,
+                    "axis_source_relevant": axis_overlap,
+                    "domain_projection": projection,
+                },
+            )
+        )
+
+    candidates.sort(key=lambda item: (-item[0], str(item[1]["title"])))
+    seen: set[tuple[str, str]] = set()
+    selected: list[dict[str, object]] = []
+    for salience, payload in candidates:
+        signature = (str(payload["source"]), str(payload["title"]))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        payload["salience"] = round(salience, 2)
+        selected.append(payload)
+        if len(selected) >= 3:
+            break
+    return selected
+
+
+def _domain_facet_gyeokguk_delta(sources: list[dict[str, object]]) -> float:
+    if not sources:
+        return 0.0
+    deltas: list[float] = []
+    for source in sources[:3]:
+        axis = source.get("center_axis", {})
+        axis_code = str(axis.get("code") if isinstance(axis, dict) else "")
+        if axis_code == "seonggyeok":
+            delta = 3.2
+        elif axis_code == "seonggyeok_with_caution":
+            delta = 1.4
+        elif axis_code == "byeongyak_medicine":
+            delta = 2.6
+        elif axis_code == "pagyeok_or_disease":
+            delta = -3.4
+        elif axis_code == "conditional_axis":
+            delta = 0.8
+        else:
+            delta = 0.3
+        relevance = 0.45
+        if bool(source.get("cycle_tag_relevant")):
+            relevance += 0.3
+        if bool(source.get("axis_source_relevant")):
+            relevance += 0.2
+        if bool(source.get("domain_relevant")):
+            relevance += 0.1
+        delta *= min(1.0, relevance)
+        deltas.append(delta)
+    return max(-5.0, min(5.0, sum(deltas) / max(1, len(deltas)) * 1.6))
+
+
 DOMAIN_DECISION_FACET_RULES: dict[str, list[dict[str, object]]] = {
     "money": [
         {
@@ -1085,6 +1414,38 @@ DOMAIN_DECISION_FACET_RULES: dict[str, list[dict[str, object]]] = {
             "axis_weights": {"business_expansion": 1.45, "self_direction": 1.3, "deal_selection": 1.1, "communication_expression": 0.85},
             "cycle_tags": ["generates_peer_to_output", "generates_output_to_wealth", "output_generates_wealth"],
         },
+        {
+            "key": "practical_execution",
+            "label": "실무 처리력",
+            "meaning": "복잡한 업무를 순서대로 정리하고 실제 결과까지 마무리하는 정도입니다.",
+            "axis_keys": ["career_achievement", "crisis_recovery", "responsibility_capacity", "organization_adaptability"],
+            "axis_weights": {"career_achievement": 1.45, "crisis_recovery": 1.2, "responsibility_capacity": 1.0, "organization_adaptability": 0.75},
+            "cycle_tags": ["eating_god_controls_seven_killings", "officer_generates_resource", "visible_root"],
+        },
+        {
+            "key": "planning_judgment",
+            "label": "기획 판단력",
+            "meaning": "목표, 순서, 위험과 필요한 자원을 함께 검토하여 실행안을 세우는 정도입니다.",
+            "axis_keys": ["practical_planning", "decision_consistency", "work_domain_fit", "loss_avoidance"],
+            "axis_weights": {"practical_planning": 1.55, "decision_consistency": 1.25, "work_domain_fit": 0.95, "loss_avoidance": 0.8},
+            "cycle_tags": ["officer_generates_resource", "wealth_controls_resource", "visible_root"],
+        },
+        {
+            "key": "evaluation_management",
+            "label": "평가 관리력",
+            "meaning": "성과와 책임 이력을 조직의 평가와 신뢰로 안정적으로 연결하는 정도입니다.",
+            "axis_keys": ["reputation_maintenance", "promotion_visibility", "decision_consistency", "communication_expression"],
+            "axis_weights": {"reputation_maintenance": 1.45, "promotion_visibility": 1.15, "decision_consistency": 1.0, "communication_expression": 0.75},
+            "cycle_tags": ["officer_generates_resource", "output_generates_wealth_then_officer", "visible_root"],
+        },
+        {
+            "key": "career_continuity",
+            "label": "직업 지속성",
+            "meaning": "경력의 방향을 잃지 않고 전문성과 성과를 장기간 축적하는 정도입니다.",
+            "axis_keys": ["career_achievement", "academic_expertise", "organization_adaptability", "change_adaptability", "crisis_recovery"],
+            "axis_weights": {"career_achievement": 1.35, "academic_expertise": 1.2, "organization_adaptability": 1.1, "change_adaptability": 0.9, "crisis_recovery": 0.75},
+            "cycle_tags": ["officer_generates_resource", "controls_resource_to_output", "branch_cycle"],
+        },
     ],
     "love": [
         {
@@ -1223,6 +1584,46 @@ DOMAIN_DECISION_FACET_RULES: dict[str, list[dict[str, object]]] = {
             "axis_weights": {"marriage_timing_readiness": 1.55, "marriage_stability": 1.1, "spouse_match_quality": 0.95},
             "cycle_tags": ["generates_wealth_to_officer", "officer_generates_resource", "output_generates_wealth_then_officer"],
         },
+        {
+            "key": "opposite_sex_appeal",
+            "label": "이성 대상 호감도",
+            "meaning": "말과 태도, 표현 방식이 이성의 관심과 호감으로 이어지는 정도입니다.",
+            "axis_keys": ["interpersonal_influence", "affection_expression", "relationship_progression", "affection_receptivity"],
+            "axis_weights": {"interpersonal_influence": 1.55, "affection_expression": 1.25, "relationship_progression": 1.0, "affection_receptivity": 0.8},
+            "cycle_tags": ["generates_peer_to_output", "element_generates", "branch_cycle"],
+        },
+        {
+            "key": "romantic_emotional_stability",
+            "label": "감정 안정성",
+            "meaning": "연애 관계에서 감정의 기복을 조절하고 상대의 반응을 안정적으로 받아들이는 정도입니다.",
+            "axis_keys": ["emotional_alignment", "affection_receptivity", "conflict_recovery", "misunderstanding_prevention"],
+            "axis_weights": {"emotional_alignment": 1.55, "affection_receptivity": 1.15, "conflict_recovery": 1.0, "misunderstanding_prevention": 0.8},
+            "cycle_tags": ["officer_generates_resource", "controls_resource_to_output", "branch_cycle"],
+        },
+        {
+            "key": "partner_dependency_control",
+            "label": "상대 의존 조절력",
+            "meaning": "연애 중에도 자기 기준과 생활의 균형을 잃지 않는 정도입니다.",
+            "axis_keys": ["self_direction", "boundary_management", "emotional_alignment", "relationship_stability"],
+            "axis_weights": {"self_direction": 1.55, "boundary_management": 1.3, "emotional_alignment": 1.0, "relationship_stability": 0.8},
+            "cycle_tags": ["controls_officer_to_peer", "officer_generates_resource", "branch_cycle"],
+        },
+        {
+            "key": "bond_continuity",
+            "label": "인연 지속성",
+            "meaning": "환경과 감정의 변화 속에서도 중요한 인연을 오래 이어가는 정도입니다.",
+            "axis_keys": ["relationship_stability", "conflict_recovery", "affection_receptivity", "decision_consistency"],
+            "axis_weights": {"relationship_stability": 1.55, "conflict_recovery": 1.2, "affection_receptivity": 0.95, "decision_consistency": 0.8},
+            "cycle_tags": ["officer_generates_resource", "visible_root", "branch_cycle"],
+        },
+        {
+            "key": "breakup_resilience",
+            "label": "이별 위험 방어력",
+            "meaning": "거리감과 갈등이 커져도 관계가 단절로 넘어가지 않도록 조정하는 정도입니다.",
+            "axis_keys": ["relationship_stability", "conflict_recovery", "boundary_management", "misunderstanding_prevention"],
+            "axis_weights": {"relationship_stability": 1.55, "conflict_recovery": 1.3, "boundary_management": 1.0, "misunderstanding_prevention": 0.9},
+            "cycle_tags": ["officer_generates_resource", "controls_resource_to_output", "branch_cycle"],
+        },
     ],
     "marriage": [
         {
@@ -1353,55 +1754,337 @@ DOMAIN_DECISION_FACET_RULES: dict[str, list[dict[str, object]]] = {
             "axis_weights": {"marriage_crisis_management": 1.4, "conflict_recovery": 1.25, "marriage_stability": 1.0, "boundary_management": 0.9, "communication_expression": 0.75},
             "cycle_tags": ["officer_generates_resource", "controls_resource_to_output", "branch_cycle"],
         },
+        {
+            "key": "marriage_overall_stability",
+            "label": "결혼 안정성",
+            "meaning": "부부 관계와 생활 기반이 외부 변수에도 크게 흔들리지 않고 유지되는 정도입니다.",
+            "axis_keys": ["marriage_stability", "household_stability", "marriage_crisis_management", "relationship_stability"],
+            "axis_weights": {"marriage_stability": 1.55, "household_stability": 1.2, "marriage_crisis_management": 1.0, "relationship_stability": 0.8},
+            "primary_axis_key": "marriage_stability",
+            "corroboration_weights": {"household_stability": 0.15, "marriage_crisis_management": 0.12, "relationship_stability": 0.10},
+            "cycle_tags": ["officer_generates_resource", "visible_root", "branch_cycle"],
+        },
+        {
+            "key": "household_coordination",
+            "label": "생활 조율성",
+            "meaning": "주거, 시간, 역할과 생활 습관을 부부가 현실적으로 맞추는 정도입니다.",
+            "axis_keys": ["household_stability", "household_finance_alignment", "family_responsibility", "conflict_recovery"],
+            "axis_weights": {"household_stability": 1.35, "household_finance_alignment": 1.2, "family_responsibility": 1.0, "conflict_recovery": 0.8},
+            "primary_axis_key": "household_stability",
+            "corroboration_weights": {"household_finance_alignment": 0.14, "family_responsibility": 0.10, "conflict_recovery": 0.14},
+            "cycle_tags": ["officer_generates_resource", "controls_peer_to_wealth", "branch_cycle"],
+        },
+        {
+            "key": "marital_financial_agreement",
+            "label": "재정 합의성",
+            "meaning": "생활비, 저축, 투자와 공동 지출의 기준을 부부가 합의하는 정도입니다.",
+            "axis_keys": ["household_finance_alignment", "money_attitude", "decision_consistency", "boundary_management"],
+            "axis_weights": {"household_finance_alignment": 1.55, "money_attitude": 1.15, "decision_consistency": 1.0, "boundary_management": 0.8},
+            "primary_axis_key": "household_finance_alignment",
+            "corroboration_weights": {"money_attitude": 0.15, "decision_consistency": 0.12, "boundary_management": 0.10},
+            "cycle_tags": ["controls_peer_to_wealth", "wealth_generates_officer_controls_peer", "officer_generates_resource"],
+        },
+        {
+            "key": "family_relationship_stability",
+            "label": "가족 관계성",
+            "meaning": "원가족과 배우자 가족 사이의 책임과 개입 범위를 안정적으로 정리하는 정도입니다.",
+            "axis_keys": ["inlaw_boundary_strength", "family_responsibility", "conflict_recovery", "household_stability"],
+            "axis_weights": {"inlaw_boundary_strength": 1.35, "family_responsibility": 1.2, "conflict_recovery": 1.0, "household_stability": 0.8},
+            "primary_axis_key": "inlaw_boundary_strength",
+            "corroboration_weights": {"family_responsibility": 0.16, "conflict_recovery": 0.14, "household_stability": 0.08},
+            "cycle_tags": ["controls_officer_to_peer", "officer_generates_resource", "branch_cycle"],
+        },
+        {
+            "key": "long_term_marriage",
+            "label": "장기 유지성",
+            "meaning": "시간이 지나도 결혼 생활의 책임, 신뢰와 생활 기반을 유지하는 정도입니다.",
+            "axis_keys": ["marriage_stability", "marriage_crisis_management", "household_stability", "conflict_recovery"],
+            "axis_weights": {"marriage_stability": 1.55, "marriage_crisis_management": 1.3, "household_stability": 1.0, "conflict_recovery": 0.9},
+            "primary_axis_key": "marriage_crisis_management",
+            "corroboration_weights": {"marriage_stability": 0.18, "household_stability": 0.12, "conflict_recovery": 0.12},
+            "cycle_tags": ["officer_generates_resource", "visible_root", "branch_cycle"],
+        },
+        {
+            "key": "spouse_conflict_control",
+            "label": "배우자 충돌 조정력",
+            "meaning": "반복되는 의견 차이와 감정 충돌이 관계 단절로 번지지 않게 조정하는 정도입니다.",
+            "axis_keys": ["marriage_crisis_management", "conflict_recovery", "emotional_alignment", "household_finance_alignment", "boundary_management"],
+            "axis_weights": {"marriage_crisis_management": 1.45, "conflict_recovery": 1.25, "emotional_alignment": 1.0, "household_finance_alignment": 0.8, "boundary_management": 0.75},
+            "primary_axis_key": "conflict_recovery",
+            "corroboration_weights": {"marriage_crisis_management": 0.16, "emotional_alignment": 0.12, "household_finance_alignment": 0.08, "boundary_management": 0.08},
+            "cycle_tags": ["officer_generates_resource", "controls_resource_to_output", "branch_cycle"],
+        },
+        {
+            "key": "post_marriage_stability",
+            "label": "결혼 후 안정도",
+            "meaning": "결혼 이후 주거, 재정, 가족 책임과 부부 관계가 안정적으로 자리 잡는 정도입니다.",
+            "axis_keys": ["spouse_support_benefit", "household_stability", "household_finance_alignment", "family_responsibility", "marriage_stability"],
+            "axis_weights": {"spouse_support_benefit": 1.55, "household_stability": 1.2, "household_finance_alignment": 1.0, "family_responsibility": 0.85, "marriage_stability": 0.75},
+            "primary_axis_key": "spouse_support_benefit",
+            "corroboration_weights": {"household_stability": 0.24, "household_finance_alignment": 0.10, "family_responsibility": 0.08, "marriage_stability": 0.12},
+            "cycle_tags": ["officer_generates_resource", "controls_peer_to_wealth", "visible_root"],
+        },
     ],
     "personality": [
         {
-            "key": "judgment_style",
-            "label": "판단 방식",
-            "meaning": "중요한 선택 앞에서 무엇을 기준으로 결론을 내리는지입니다.",
-            "axis_keys": ["decision_consistency", "practical_planning", "academic_expertise"],
-            "axis_weights": {"decision_consistency": 1.55, "practical_planning": 1.15, "academic_expertise": 0.9},
+            "key": "self_direction",
+            "label": "자기 기준",
+            "meaning": "타인의 기대나 분위기에 휩쓸리지 않고 자신의 가치관과 판단 원칙에 따라 선택하는 정도입니다.",
+            "axis_keys": ["self_direction", "decision_consistency", "practical_planning", "academic_expertise"],
+            "axis_weights": {"self_direction": 1.55, "decision_consistency": 1.25, "practical_planning": 1.0, "academic_expertise": 0.65},
             "cycle_tags": ["officer_generates_resource", "controls_resource_to_output", "visible_root"],
         },
         {
-            "key": "expression_style",
-            "label": "표현 성향",
-            "meaning": "생각과 감정을 말, 글, 행동으로 드러내는 방식입니다.",
-            "axis_keys": ["communication_expression", "affection_expression", "self_direction"],
-            "axis_weights": {"communication_expression": 1.55, "affection_expression": 1.05, "self_direction": 0.95},
-            "cycle_tags": ["generates_peer_to_output", "controls_resource_to_output", "output"],
+            "key": "emotional_alignment",
+            "label": "감정 조절",
+            "meaning": "감정이 올라왔을 때 충동적으로 반응하지 않고 상황과 관계에 맞게 정리하는 정도입니다.",
+            "axis_keys": ["emotional_alignment", "conflict_recovery", "misunderstanding_prevention", "communication_expression"],
+            "axis_weights": {"emotional_alignment": 1.55, "conflict_recovery": 1.15, "misunderstanding_prevention": 0.95, "communication_expression": 0.7},
+            "cycle_tags": ["officer_generates_resource", "controls_resource_to_output", "branch_cycle"],
         },
         {
-            "key": "relationship_distance",
-            "label": "관계 거리",
-            "meaning": "사람을 가까이 두는 방식과 선을 긋는 방식입니다.",
-            "axis_keys": ["boundary_management", "interpersonal_influence", "conflict_recovery"],
-            "axis_weights": {"boundary_management": 1.55, "interpersonal_influence": 1.05, "conflict_recovery": 0.95},
-            "cycle_tags": ["controls_officer_to_peer", "wealth_generates_officer_controls_peer", "branch_cycle"],
+            "key": "action_pace",
+            "label": "실행 속도",
+            "meaning": "판단한 내용을 실제 행동으로 옮기고 결과를 확인하는 속도입니다.",
+            "axis_keys": ["change_adaptability", "self_direction", "business_expansion", "communication_expression"],
+            "axis_weights": {"change_adaptability": 1.5, "self_direction": 1.2, "business_expansion": 0.95, "communication_expression": 0.75},
+            "cycle_tags": ["generates_peer_to_output", "output", "element_generates"],
         },
         {
-            "key": "pressure_response",
-            "label": "압박 대응",
-            "meaning": "책임, 경쟁, 변수 앞에서 버티고 처리하는 방식입니다.",
-            "axis_keys": ["crisis_recovery", "responsibility_capacity", "change_adaptability"],
-            "axis_weights": {"crisis_recovery": 1.55, "responsibility_capacity": 1.15, "change_adaptability": 1.0},
-            "cycle_tags": ["eating_god_controls_seven_killings", "officer_generates_resource", "visible_root"],
+            "key": "decision_consistency",
+            "label": "신중성",
+            "meaning": "행동하기 전에 정보, 결과, 위험과 타인에게 미칠 영향을 검토하는 정도입니다.",
+            "axis_keys": ["decision_consistency", "practical_planning", "loss_avoidance", "deal_selection"],
+            "axis_weights": {"decision_consistency": 1.55, "practical_planning": 1.25, "loss_avoidance": 1.0, "deal_selection": 0.8},
+            "cycle_tags": ["officer_generates_resource", "visible_root", "wealth_controls_resource"],
         },
         {
-            "key": "persistence_style",
-            "label": "지속 방식",
-            "meaning": "한 번 잡은 일을 오래 끌고 가는 힘과 방식입니다.",
-            "axis_keys": ["self_direction", "responsibility_capacity", "asset_retention"],
-            "axis_weights": {"self_direction": 1.45, "responsibility_capacity": 1.15, "asset_retention": 0.95},
+            "key": "focus_depth",
+            "label": "몰입 성향",
+            "meaning": "한 대상이나 과제에 주의와 에너지를 깊게 집중하고 지속하는 정도입니다.",
+            "axis_keys": ["academic_expertise", "career_achievement", "self_direction", "responsibility_capacity"],
+            "axis_weights": {"academic_expertise": 1.45, "career_achievement": 1.15, "self_direction": 1.0, "responsibility_capacity": 0.85},
             "cycle_tags": ["visible_root", "same_element_root", "officer_generates_resource"],
         },
         {
-            "key": "interest_direction",
-            "label": "관심 방향",
-            "meaning": "무엇에 오래 마음이 가고 어떤 분야에 감각이 열리는지입니다.",
-            "axis_keys": ["academic_expertise", "attraction_selectivity", "money_attitude"],
-            "axis_weights": {"academic_expertise": 1.35, "attraction_selectivity": 1.15, "money_attitude": 0.95},
-            "cycle_tags": ["stem_reception", "integrated_saju", "element_generates"],
+            "key": "boundary_management",
+            "label": "관계 거리 조절력",
+            "meaning": "사람과 가까워지는 속도와 개인 영역의 범위를 관계의 단계와 상황에 맞게 조절하는 능력입니다.",
+            "axis_keys": ["boundary_management", "interpersonal_influence", "conflict_recovery", "misunderstanding_prevention"],
+            "axis_weights": {"boundary_management": 1.55, "interpersonal_influence": 1.0, "conflict_recovery": 0.95, "misunderstanding_prevention": 0.8},
+            "cycle_tags": ["controls_officer_to_peer", "wealth_generates_officer_controls_peer", "branch_cycle"],
+        },
+        {
+            "key": "crisis_recovery",
+            "label": "문제 해결력",
+            "meaning": "문제가 생겼을 때 원인을 구분하고 대안을 실행해 상황을 개선하는 정도입니다.",
+            "axis_keys": ["crisis_recovery", "responsibility_capacity", "practical_planning", "change_adaptability"],
+            "axis_weights": {"crisis_recovery": 1.55, "responsibility_capacity": 1.2, "practical_planning": 1.0, "change_adaptability": 0.85},
+            "cycle_tags": ["eating_god_controls_seven_killings", "officer_generates_resource", "visible_root"],
+        },
+        {
+            "key": "change_adaptability",
+            "label": "변화 수용성",
+            "meaning": "예상과 다른 상황이 생겼을 때 기존 방식을 조정하고 새 조건에 적응하는 정도입니다.",
+            "axis_keys": ["change_adaptability", "crisis_recovery", "organization_adaptability", "self_direction"],
+            "axis_weights": {"change_adaptability": 1.55, "crisis_recovery": 1.15, "organization_adaptability": 1.0, "self_direction": 0.75},
+            "cycle_tags": ["branch_cycle", "element_generates", "controls_resource_to_output"],
+        },
+        {
+            "key": "communication_expression",
+            "label": "표현 방식",
+            "meaning": "생각과 감정을 말, 글, 표정과 행동으로 전달하는 방식의 안정성입니다.",
+            "axis_keys": ["communication_expression", "affection_expression", "interpersonal_influence", "emotional_alignment"],
+            "axis_weights": {"communication_expression": 1.55, "affection_expression": 1.1, "interpersonal_influence": 0.95, "emotional_alignment": 0.75},
+            "cycle_tags": ["generates_peer_to_output", "controls_resource_to_output", "output"],
+        },
+        {
+            "key": "responsibility_capacity",
+            "label": "책임 감각",
+            "meaning": "맡은 역할의 범위와 결과를 인식하고 끝까지 감당하는 정도입니다.",
+            "axis_keys": ["responsibility_capacity", "family_responsibility", "role_authority_alignment", "asset_retention"],
+            "axis_weights": {"responsibility_capacity": 1.55, "family_responsibility": 1.1, "role_authority_alignment": 1.0, "asset_retention": 0.75},
+            "cycle_tags": ["officer_generates_resource", "visible_root", "generates_wealth_to_officer"],
+        },
+        {
+            "key": "honor_recognition",
+            "label": "인정 욕구",
+            "meaning": "자신의 능력과 성과가 타인과 사회에서 인정받기를 바라는 정도입니다.",
+            "axis_keys": ["honor_recognition", "promotion_visibility", "social_success_potential", "interpersonal_influence"],
+            "axis_weights": {"honor_recognition": 1.55, "promotion_visibility": 1.2, "social_success_potential": 1.0, "interpersonal_influence": 0.75},
+            "cycle_tags": ["generates_wealth_to_officer", "officer_generates_resource", "visible_root"],
+        },
+        {
+            "key": "loss_avoidance",
+            "label": "위험 감지",
+            "meaning": "손실, 갈등, 실수로 이어질 수 있는 신호를 미리 알아차리고 대비하는 정도입니다.",
+            "axis_keys": ["loss_avoidance", "deal_selection", "misunderstanding_prevention", "crisis_recovery"],
+            "axis_weights": {"loss_avoidance": 1.55, "deal_selection": 1.2, "misunderstanding_prevention": 1.0, "crisis_recovery": 0.8},
+            "cycle_tags": ["controls_peer_to_wealth", "branch_cycle", "visible_root"],
+        },
+    ],
+    "honor": [
+        {
+            "key": "honor_social_recognition",
+            "label": "사회적 인정",
+            "meaning": "능력과 성과가 조직과 사회의 공식 평가로 확인되는 정도입니다.",
+            "axis_keys": ["honor_recognition", "promotion_visibility", "reputation_maintenance", "social_success_potential", "career_achievement"],
+            "axis_weights": {"honor_recognition": 1.55, "promotion_visibility": 1.25, "reputation_maintenance": 1.05, "social_success_potential": 0.9, "career_achievement": 0.75},
+            "primary_axis_key": "honor_recognition",
+            "corroboration_weights": {"promotion_visibility": 0.12, "reputation_maintenance": 0.08, "social_success_potential": 0.08, "career_achievement": 0.06},
+            "cycle_tags": ["generates_wealth_to_officer", "officer_generates_resource", "output_generates_wealth_then_officer"],
+        },
+        {
+            "key": "honor_reputation_formation",
+            "label": "평판 형성",
+            "meaning": "반복된 결과와 책임 이력이 안정된 평판으로 축적되는 정도입니다.",
+            "axis_keys": ["reputation_maintenance", "decision_consistency", "responsibility_capacity", "misunderstanding_prevention", "communication_expression"],
+            "axis_weights": {"reputation_maintenance": 1.55, "decision_consistency": 1.2, "responsibility_capacity": 1.05, "misunderstanding_prevention": 0.9, "communication_expression": 0.7},
+            "primary_axis_key": "reputation_maintenance",
+            "corroboration_weights": {"decision_consistency": 0.12, "responsibility_capacity": 0.10, "misunderstanding_prevention": 0.10, "communication_expression": 0.05},
+            "cycle_tags": ["officer_generates_resource", "controls_resource_to_output", "visible_root"],
+        },
+        {
+            "key": "honor_title_rise",
+            "label": "직함 상승성",
+            "meaning": "실적과 책임이 승진, 직급, 자격, 공식 직함으로 이어지는 정도입니다.",
+            "axis_keys": ["promotion_visibility", "role_authority_alignment", "honor_recognition", "organization_adaptability", "career_achievement"],
+            "axis_weights": {"promotion_visibility": 1.55, "role_authority_alignment": 1.25, "honor_recognition": 1.1, "organization_adaptability": 0.9, "career_achievement": 0.75},
+            "primary_axis_key": "promotion_visibility",
+            "corroboration_weights": {"role_authority_alignment": 0.12, "honor_recognition": 0.10, "organization_adaptability": 0.08, "career_achievement": 0.06},
+            "cycle_tags": ["generates_wealth_to_officer", "officer_generates_resource", "wealth_generates_officer_controls_peer"],
+        },
+        {
+            "key": "honor_public_trust",
+            "label": "공적 신뢰도",
+            "meaning": "공식 역할과 약속을 맡길 만한 사람으로 신뢰받는 정도입니다.",
+            "axis_keys": ["reputation_maintenance", "responsibility_capacity", "decision_consistency", "organization_adaptability", "misunderstanding_prevention"],
+            "axis_weights": {"reputation_maintenance": 1.45, "responsibility_capacity": 1.3, "decision_consistency": 1.1, "organization_adaptability": 0.9, "misunderstanding_prevention": 0.8},
+            "primary_axis_key": "organization_adaptability",
+            "corroboration_weights": {"responsibility_capacity": 0.14, "reputation_maintenance": 0.12, "decision_consistency": 0.08, "misunderstanding_prevention": 0.08},
+            "cycle_tags": ["officer_generates_resource", "controls_officer_to_peer", "visible_root"],
+        },
+        {
+            "key": "honor_responsibility_acceptance",
+            "label": "책임 수용도",
+            "meaning": "공적인 책임의 범위와 결과를 인식하고 끝까지 감당하는 정도입니다.",
+            "axis_keys": ["responsibility_capacity", "role_authority_alignment", "practical_planning", "crisis_recovery", "decision_consistency"],
+            "axis_weights": {"responsibility_capacity": 1.55, "role_authority_alignment": 1.2, "practical_planning": 1.0, "crisis_recovery": 0.9, "decision_consistency": 0.75},
+            "primary_axis_key": "responsibility_capacity",
+            "corroboration_weights": {"role_authority_alignment": 0.12, "practical_planning": 0.08, "crisis_recovery": 0.08, "decision_consistency": 0.08},
+            "cycle_tags": ["officer_generates_resource", "controls_officer_to_peer", "eating_god_controls_seven_killings"],
+        },
+        {
+            "key": "honor_organizational_presence",
+            "label": "조직 내 존재감",
+            "meaning": "조직 안에서 의견과 성과가 주변의 판단과 결정에 영향을 미치는 정도입니다.",
+            "axis_keys": ["social_success_potential", "interpersonal_influence", "leadership_potential", "career_achievement", "communication_expression"],
+            "axis_weights": {"social_success_potential": 1.45, "interpersonal_influence": 1.25, "leadership_potential": 1.1, "career_achievement": 0.9, "communication_expression": 0.75},
+            "primary_axis_key": "leadership_potential",
+            "corroboration_weights": {"social_success_potential": 0.12, "interpersonal_influence": 0.12, "career_achievement": 0.08, "communication_expression": 0.08},
+            "cycle_tags": ["generates_peer_to_output", "output_generates_wealth_then_officer", "generates_wealth_to_officer"],
+        },
+        {
+            "key": "honor_authority_establishment",
+            "label": "권위 확보력",
+            "meaning": "책임을 맡을 때 결정권과 공식 권한까지 함께 확보되는 정도입니다.",
+            "axis_keys": ["role_authority_alignment", "leadership_potential", "promotion_visibility", "responsibility_capacity", "decision_consistency"],
+            "axis_weights": {"role_authority_alignment": 1.55, "leadership_potential": 1.25, "promotion_visibility": 1.1, "responsibility_capacity": 0.95, "decision_consistency": 0.8},
+            "primary_axis_key": "role_authority_alignment",
+            "corroboration_weights": {"leadership_potential": 0.16, "promotion_visibility": 0.12, "responsibility_capacity": 0.10, "decision_consistency": 0.08},
+            "cycle_tags": ["wealth_generates_officer_controls_peer", "controls_officer_to_peer", "generates_wealth_to_officer"],
+        },
+        {
+            "key": "honor_legitimacy_management",
+            "label": "명분 관리",
+            "meaning": "결정과 행동의 근거를 분명히 하여 공식적인 정당성을 지키는 정도입니다.",
+            "axis_keys": ["decision_consistency", "reputation_maintenance", "communication_expression", "loss_avoidance", "misunderstanding_prevention"],
+            "axis_weights": {"decision_consistency": 1.45, "reputation_maintenance": 1.25, "communication_expression": 1.0, "loss_avoidance": 0.9, "misunderstanding_prevention": 0.8},
+            "primary_axis_key": "decision_consistency",
+            "corroboration_weights": {"reputation_maintenance": 0.12, "communication_expression": 0.08, "loss_avoidance": 0.10, "misunderstanding_prevention": 0.10},
+            "cycle_tags": ["officer_generates_resource", "controls_resource_to_output", "wealth_controls_resource"],
+        },
+    ],
+    "social": [
+        {
+            "key": "social_affinity",
+            "label": "친화성",
+            "meaning": "새로운 사람과 자연스럽게 접점을 만들고 관계의 문을 여는 정도입니다.",
+            "axis_keys": ["interpersonal_influence", "affection_receptivity", "communication_expression", "relationship_progression"],
+            "axis_weights": {"interpersonal_influence": 1.55, "affection_receptivity": 1.2, "communication_expression": 1.0, "relationship_progression": 0.85},
+            "cycle_tags": ["generates_peer_to_output", "element_generates", "branch_cycle"],
+        },
+        {
+            "key": "social_trust_formation",
+            "label": "신뢰 형성",
+            "meaning": "말과 행동의 일관성을 통해 다른 사람의 신뢰를 얻는 정도입니다.",
+            "axis_keys": ["reputation_maintenance", "relationship_stability", "decision_consistency", "misunderstanding_prevention", "responsibility_capacity"],
+            "axis_weights": {"reputation_maintenance": 1.45, "relationship_stability": 1.25, "decision_consistency": 1.05, "misunderstanding_prevention": 0.9, "responsibility_capacity": 0.75},
+            "cycle_tags": ["officer_generates_resource", "visible_root", "branch_cycle"],
+        },
+        {
+            "key": "social_relationship_continuity",
+            "label": "관계 유지성",
+            "meaning": "가까워진 관계를 갈등과 환경 변화 속에서도 오래 유지하는 정도입니다.",
+            "axis_keys": ["relationship_stability", "conflict_recovery", "boundary_management", "misunderstanding_prevention", "interpersonal_influence"],
+            "axis_weights": {"relationship_stability": 1.55, "conflict_recovery": 1.25, "boundary_management": 1.0, "misunderstanding_prevention": 0.9, "interpersonal_influence": 0.7},
+            "cycle_tags": ["branch_cycle", "officer_generates_resource", "controls_resource_to_output"],
+        },
+        {
+            "key": "social_distance_control",
+            "label": "거리 조절",
+            "meaning": "관계의 친밀도와 책임 범위를 상황에 맞게 조절하는 정도입니다.",
+            "axis_keys": ["boundary_management", "emotional_alignment", "conflict_recovery", "self_direction", "interpersonal_influence"],
+            "axis_weights": {"boundary_management": 1.55, "emotional_alignment": 1.2, "conflict_recovery": 1.0, "self_direction": 0.9, "interpersonal_influence": 0.75},
+            "cycle_tags": ["controls_officer_to_peer", "wealth_generates_officer_controls_peer", "branch_cycle"],
+        },
+        {
+            "key": "social_cooperation",
+            "label": "협력성",
+            "meaning": "역할과 책임을 나누어 공동의 결과를 만드는 정도입니다.",
+            "axis_keys": ["interpersonal_influence", "organization_adaptability", "communication_expression", "responsibility_capacity", "conflict_recovery"],
+            "axis_weights": {"interpersonal_influence": 1.45, "organization_adaptability": 1.25, "communication_expression": 1.05, "responsibility_capacity": 0.9, "conflict_recovery": 0.8},
+            "cycle_tags": ["officer_generates_resource", "generates_peer_to_output", "controls_officer_to_peer"],
+        },
+        {
+            "key": "social_competition_control",
+            "label": "경쟁 관리력",
+            "meaning": "비교와 경쟁이 강해져도 관계와 자기 몫을 안정적으로 지키는 정도입니다.",
+            "axis_keys": ["boundary_management", "loss_avoidance", "emotional_alignment", "role_authority_alignment", "misunderstanding_prevention"],
+            "axis_weights": {"boundary_management": 1.5, "loss_avoidance": 1.25, "emotional_alignment": 1.05, "role_authority_alignment": 0.9, "misunderstanding_prevention": 0.8},
+            "cycle_tags": ["controls_peer_to_wealth", "controls_officer_to_peer", "wealth_generates_officer_controls_peer"],
+        },
+        {
+            "key": "social_speech_influence",
+            "label": "말의 영향력",
+            "meaning": "말과 설명이 주변의 판단과 행동에 영향을 미치는 정도입니다.",
+            "axis_keys": ["communication_expression", "interpersonal_influence", "reputation_maintenance", "emotional_alignment", "misunderstanding_prevention"],
+            "axis_weights": {"communication_expression": 1.55, "interpersonal_influence": 1.25, "reputation_maintenance": 1.0, "emotional_alignment": 0.85, "misunderstanding_prevention": 0.75},
+            "cycle_tags": ["generates_peer_to_output", "controls_resource_to_output", "output"],
+        },
+        {
+            "key": "social_conflict_avoidance",
+            "label": "갈등 회피력",
+            "meaning": "오해와 감정 충돌이 커지기 전에 관계를 조정하는 정도입니다.",
+            "axis_keys": ["misunderstanding_prevention", "conflict_recovery", "emotional_alignment", "boundary_management", "communication_expression"],
+            "axis_weights": {"misunderstanding_prevention": 1.5, "conflict_recovery": 1.25, "emotional_alignment": 1.05, "boundary_management": 0.9, "communication_expression": 0.75},
+            "cycle_tags": ["controls_resource_to_output", "officer_generates_resource", "branch_cycle"],
+        },
+        {
+            "key": "social_benefactor_support",
+            "label": "지인 덕",
+            "meaning": "주변 인연이 소개, 정보, 협력과 실질적인 도움으로 이어지는 정도입니다.",
+            "axis_keys": ["interpersonal_influence", "reputation_maintenance", "relationship_stability", "organization_adaptability", "affection_receptivity"],
+            "axis_weights": {"interpersonal_influence": 1.45, "reputation_maintenance": 1.2, "relationship_stability": 1.05, "organization_adaptability": 0.9, "affection_receptivity": 0.75},
+            "cycle_tags": ["officer_generates_resource", "element_generates", "branch_cycle"],
+        },
+        {
+            "key": "social_acquaintance_loss_defense",
+            "label": "지인 손실 방어력",
+            "meaning": "지인의 부탁, 금전 거래, 공동 책임에서 손실을 줄이는 정도입니다.",
+            "axis_keys": ["loss_avoidance", "boundary_management", "shared_asset_boundary", "deal_selection", "misunderstanding_prevention"],
+            "axis_weights": {"loss_avoidance": 1.55, "boundary_management": 1.3, "shared_asset_boundary": 1.1, "deal_selection": 0.9, "misunderstanding_prevention": 0.75},
+            "cycle_tags": ["controls_peer_to_wealth", "wealth_generates_officer_controls_peer", "controls_officer_to_peer"],
         },
     ],
 }
@@ -1439,6 +2122,10 @@ DOMAIN_DECISION_FACET_LAYER_FOCUS: dict[str, list[str]] = {
     "affiliation_transition": ["합충형파해", "십신·생극", "지지·지장간"],
     "unsuitable_work_filter": ["십신·생극", "합충형파해", "수용·배합"],
     "independent_work": ["오행·조후", "십신·생극", "수용·배합"],
+    "practical_execution": ["월령·격국", "십신·생극", "지지·지장간"],
+    "planning_judgment": ["월령·격국", "십신·생극", "수용·배합"],
+    "evaluation_management": ["월령·격국", "십신·생극", "천간·투출"],
+    "career_continuity": ["월령·격국", "지지·지장간", "십신·생극"],
     "relationship_opening": ["합충형파해", "오행·조후", "십신·생극"],
     "attraction_standard": ["십신·생극", "수용·배합", "지지·지장간"],
     "partner_selection": ["십신·생극", "지지·지장간", "수용·배합"],
@@ -1456,6 +2143,11 @@ DOMAIN_DECISION_FACET_LAYER_FOCUS: dict[str, list[str]] = {
     "reconnection_capacity": ["지지·지장간", "합충형파해", "십신·생극"],
     "contact_distance_stability": ["지지·지장간", "십신·생극", "수용·배합"],
     "marriage_bridge": ["십신·생극", "지지·지장간", "천간·투출"],
+    "opposite_sex_appeal": ["오행·조후", "십신·생극", "수용·배합"],
+    "romantic_emotional_stability": ["십신·생극", "합충형파해", "수용·배합"],
+    "partner_dependency_control": ["십신·생극", "지지·지장간", "합충형파해"],
+    "bond_continuity": ["지지·지장간", "십신·생극", "합충형파해"],
+    "breakup_resilience": ["지지·지장간", "십신·생극", "합충형파해"],
     "marriage_decision": ["월령·격국", "십신·생극", "천간·투출"],
     "marriage_realization": ["십신·생극", "지지·지장간", "천간·투출"],
     "spouse_match": ["지지·지장간", "십신·생극", "합충형파해"],
@@ -1472,27 +2164,58 @@ DOMAIN_DECISION_FACET_LAYER_FOCUS: dict[str, list[str]] = {
     "marriage_maintenance": ["지지·지장간", "십신·생극", "합충형파해"],
     "marriage_crisis_tolerance": ["합충형파해", "지지·지장간", "십신·생극"],
     "couple_conflict_repair": ["십신·생극", "합충형파해", "수용·배합"],
-    "judgment_style": ["월령·격국", "십신·생극", "수용·배합"],
-    "expression_style": ["오행·조후", "십신·생극", "수용·배합"],
-    "relationship_distance": ["지지·지장간", "십신·생극", "합충형파해"],
-    "pressure_response": ["월령·격국", "십신·생극", "합충형파해"],
-    "persistence_style": ["지지·지장간", "천간·투출", "십신·생극"],
-    "interest_direction": ["오행·조후", "수용·배합", "십신·생극"],
+    "marriage_overall_stability": ["월령·격국", "지지·지장간", "십신·생극"],
+    "household_coordination": ["지지·지장간", "십신·생극", "수용·배합"],
+    "marital_financial_agreement": ["십신·생극", "지지·지장간", "천간·투출"],
+    "family_relationship_stability": ["지지·지장간", "합충형파해", "십신·생극"],
+    "long_term_marriage": ["지지·지장간", "십신·생극", "합충형파해"],
+    "spouse_conflict_control": ["합충형파해", "십신·생극", "수용·배합"],
+    "post_marriage_stability": ["지지·지장간", "십신·생극", "월령·격국"],
+    "self_direction": ["월령·격국", "십신·생극", "수용·배합"],
+    "emotional_alignment": ["오행·조후", "십신·생극", "합충형파해"],
+    "action_pace": ["십신·생극", "천간·투출", "수용·배합"],
+    "decision_consistency": ["월령·격국", "십신·생극", "수용·배합"],
+    "focus_depth": ["지지·지장간", "천간·투출", "십신·생극"],
+    "boundary_management": ["지지·지장간", "십신·생극", "합충형파해"],
+    "crisis_recovery": ["월령·격국", "십신·생극", "합충형파해"],
+    "change_adaptability": ["오행·조후", "십신·생극", "합충형파해"],
+    "communication_expression": ["오행·조후", "십신·생극", "수용·배합"],
+    "responsibility_capacity": ["월령·격국", "지지·지장간", "십신·생극"],
+    "honor_recognition": ["월령·격국", "천간·투출", "십신·생극"],
+    "loss_avoidance": ["월령·격국", "십신·생극", "합충형파해"],
+    "honor_social_recognition": ["월령·격국", "십신·생극", "천간·투출"],
+    "honor_reputation_formation": ["월령·격국", "십신·생극", "수용·배합"],
+    "honor_title_rise": ["월령·격국", "십신·생극", "천간·투출"],
+    "honor_public_trust": ["월령·격국", "십신·생극", "지지·지장간"],
+    "honor_responsibility_acceptance": ["월령·격국", "십신·생극", "지지·지장간"],
+    "honor_organizational_presence": ["십신·생극", "천간·투출", "수용·배합"],
+    "honor_authority_establishment": ["월령·격국", "십신·생극", "천간·투출"],
+    "honor_legitimacy_management": ["월령·격국", "십신·생극", "수용·배합"],
+    "social_affinity": ["오행·조후", "십신·생극", "수용·배합"],
+    "social_trust_formation": ["월령·격국", "십신·생극", "지지·지장간"],
+    "social_relationship_continuity": ["지지·지장간", "십신·생극", "합충형파해"],
+    "social_distance_control": ["지지·지장간", "십신·생극", "합충형파해"],
+    "social_cooperation": ["십신·생극", "수용·배합", "지지·지장간"],
+    "social_competition_control": ["십신·생극", "합충형파해", "지지·지장간"],
+    "social_speech_influence": ["오행·조후", "십신·생극", "수용·배합"],
+    "social_conflict_avoidance": ["십신·생극", "합충형파해", "수용·배합"],
+    "social_benefactor_support": ["월령·격국", "십신·생극", "지지·지장간"],
+    "social_acquaintance_loss_defense": ["십신·생극", "합충형파해", "지지·지장간"],
 }
 
 
 def _facet_strength_label(score: int) -> str:
     if score >= 86:
-        return "최상급"
+        return "높음"
     if score >= 76:
-        return "강함"
+        return "다소 높음"
     if score >= 64:
-        return "분명함"
+        return "보통"
     if score >= 52:
         return "보통"
     if score >= 40:
-        return "보완 필요"
-    return "취약"
+        return "다소 낮음"
+    return "낮음"
 
 
 def _domain_facet_layer_coverage(
@@ -1943,9 +2666,13 @@ def _domain_facet_pressure_profile(
 def _domain_decision_facet_payload(
     profile: object,
     cycle_regulation_profile: dict[str, object] | None,
+    gyeokguk_profile: object | None = None,
+    chart_structure: object | None = None,
+    expert_adjudication: object | None = None,
 ) -> dict[str, list[dict[str, object]]]:
     axes = getattr(profile, "axes", {})
     result: dict[str, list[dict[str, object]]] = {}
+    prepared_gyeokguk_matches = _prepare_gyeokguk_action_matches(gyeokguk_profile)
     for domain, rules in DOMAIN_DECISION_FACET_RULES.items():
         domain_items: list[dict[str, object]] = []
         for rule in rules:
@@ -1953,19 +2680,73 @@ def _domain_decision_facet_payload(
             selected_axes = [axes[key] for key in axis_keys if key in axes]
             axis_weights_raw = rule.get("axis_weights") or {}
             axis_weights = axis_weights_raw if isinstance(axis_weights_raw, dict) else {}
+            primary_axis_key = str(rule.get("primary_axis_key") or "")
+            primary_axis = axes.get(primary_axis_key) if primary_axis_key else None
+            corroboration_weights_raw = rule.get("corroboration_weights") or {}
+            corroboration_weights = (
+                corroboration_weights_raw
+                if isinstance(corroboration_weights_raw, dict)
+                else {}
+            )
             weighted_axes: list[tuple[object, float]] = []
-            for axis in selected_axes:
-                try:
-                    weight = float(axis_weights.get(getattr(axis, "key", ""), 1.0))
-                except (TypeError, ValueError):
-                    weight = 1.0
-                weighted_axes.append((axis, max(0.1, weight)))
-            if selected_axes:
-                weight_total = sum(weight for _, weight in weighted_axes) or float(len(selected_axes))
-                base_score = sum(float(axis.score) * weight for axis, weight in weighted_axes) / weight_total
+            corroboration_delta_decimal = Decimal("0")
+            if primary_axis is not None:
+                weighted_axes.append((primary_axis, 1.0))
+                primary_axis_score_decimal = Decimal(str(getattr(primary_axis, "score", 50)))
+                for axis_key, raw_weight in corroboration_weights.items():
+                    axis = axes.get(str(axis_key))
+                    if axis is None or str(axis_key) == primary_axis_key:
+                        continue
+                    try:
+                        weight = float(raw_weight)
+                    except (TypeError, ValueError):
+                        continue
+                    if weight <= 0:
+                        continue
+                    weighted_axes.append((axis, weight))
+                    # A corroborating axis confirms or qualifies the primary
+                    # capacity. It must not become an unconditional bonus from
+                    # the neutral score, which allowed several good axes to
+                    # push a bounded 0-100 capacity above 100. Measure each
+                    # corroborator against the primary axis instead.
+                    corroboration_delta_decimal += (
+                        Decimal(str(getattr(axis, "score", 50))) - primary_axis_score_decimal
+                    ) * Decimal(str(weight))
+                base_score_decimal = primary_axis_score_decimal + corroboration_delta_decimal
+                base_score = float(primary_axis_score_decimal)
+                weight_total = sum((weight for _, weight in weighted_axes), 0.0)
+                score_method = "primary_axis_with_corroboration"
+            elif selected_axes:
+                for axis in selected_axes:
+                    try:
+                        weight = float(axis_weights.get(getattr(axis, "key", ""), 1.0))
+                    except (TypeError, ValueError):
+                        weight = 1.0
+                    weighted_axes.append((axis, max(0.1, weight)))
+                decimal_weight_total = sum(
+                    (Decimal(str(weight)) for _, weight in weighted_axes),
+                    Decimal("0"),
+                )
+                weighted_score_total = sum(
+                    (
+                        Decimal(str(getattr(axis, "score", 50))) * Decimal(str(weight))
+                        for axis, weight in weighted_axes
+                    ),
+                    Decimal("0"),
+                )
+                weight_total = float(decimal_weight_total)
+                base_score_decimal = (
+                    weighted_score_total / decimal_weight_total
+                    if decimal_weight_total > 0
+                    else Decimal("50")
+                )
+                base_score = float(base_score_decimal)
+                score_method = "declared_weighted_engine_axes"
             else:
                 weight_total = 0.0
                 base_score = 50.0
+                base_score_decimal = Decimal("50")
+                score_method = "neutral_no_engine_axis"
             basis_codes = list(
                 dict.fromkeys(
                     code
@@ -1992,6 +2773,14 @@ def _domain_decision_facet_payload(
                 domain=domain,
                 cycle_tags=[str(tag) for tag in list(rule.get("cycle_tags") or [])],
             )
+            gyeokguk_action_sources = _domain_facet_gyeokguk_action_sources(
+                gyeokguk_profile=gyeokguk_profile,
+                domain=domain,
+                rule=rule,
+                basis_codes=basis_codes,
+                counter_signals=counter_signals,
+                prepared_matches=prepared_gyeokguk_matches,
+            )
             inferred_layer_coverage = _domain_facet_layer_coverage(
                 basis_codes=basis_codes,
                 counter_signals=counter_signals,
@@ -2002,12 +2791,29 @@ def _domain_decision_facet_payload(
             required_layers = list(DOMAIN_DECISION_FACET_LAYER_FOCUS.get(rule_key, inferred_layer_coverage))
             cycle_delta = _domain_facet_cycle_delta(cycle_sources)
             principle_delta, principle_delta_sources = _domain_facet_principle_delta(principle_edges)
+            gyeokguk_delta = _domain_facet_gyeokguk_delta(gyeokguk_action_sources)
             layer_delta = _domain_facet_layer_delta(
                 required_layers=required_layers,
                 inferred_layers=inferred_layer_coverage,
                 counter_signals=counter_signals,
             )
-            score = max(0, min(100, round(base_score + cycle_delta + principle_delta + layer_delta)))
+            # Public-facing facets may name one semantic primary axis and use
+            # the remaining axes only as centered corroboration. This keeps
+            # multiple structural signals without averaging distinct metrics
+            # back toward the same middle score. Cycle, principle, gyeokguk,
+            # and layer values remain diagnostic because they already
+            # participate in the upstream axes and must not be counted twice.
+            adjudication = adjudicate_natal_metric(
+                metric_key=rule_key,
+                base_score=float(base_score_decimal),
+                structure=chart_structure,  # type: ignore[arg-type]
+                cycle_delta=cycle_delta,
+                principle_delta=principle_delta,
+                gyeokguk_delta=gyeokguk_delta,
+                layer_delta=layer_delta,
+                expert_adjudication=expert_adjudication,  # type: ignore[arg-type]
+            )
+            score = max(0, min(100, int(adjudication["score"])))
             layer_coverage = list(
                 dict.fromkeys(
                     required_layers
@@ -2030,9 +2836,27 @@ def _domain_decision_facet_payload(
                     "value": _facet_strength_label(score),
                     "score_components": {
                         "axis_base": round(base_score, 2),
+                        "score_method": score_method,
+                        "primary_axis_key": (
+                            primary_axis_key
+                            if primary_axis is not None
+                            else str(getattr(selected_axes[0], "key", "")) if selected_axes else ""
+                        ),
+                        "corroboration_delta": round(float(corroboration_delta_decimal), 2),
+                        "composite_score_unrounded": round(float(base_score_decimal), 2),
+                        "adjudicated_score": score,
+                        "judgment_contract_grade": adjudication.get("contract_grade", "D"),
+                        "judgment_contract_applied": bool(adjudication.get("contract_applied")),
+                        "judgment_components": {
+                            key: value
+                            for key, value in adjudication.items()
+                            if key not in {"score", "contract_grade", "contract_applied"}
+                            and value is not None
+                        },
                         "axis_weight_total": round(weight_total, 2),
                         "cycle_delta": round(cycle_delta, 2),
                         "principle_delta": round(principle_delta, 2),
+                        "gyeokguk_delta": round(gyeokguk_delta, 2),
                         "layer_delta": round(layer_delta, 2),
                     },
                     "axis_sources": [
@@ -2048,6 +2872,7 @@ def _domain_decision_facet_payload(
                     "cycle_sources": cycle_sources,
                     "principle_edges": principle_edges,
                     "principle_delta_sources": principle_delta_sources,
+                    "gyeokguk_action_sources": gyeokguk_action_sources,
                     "layer_coverage": layer_coverage,
                     "raw_layer_coverage": inferred_layer_coverage,
                     "basis_codes": basis_codes[:24],
@@ -2865,20 +3690,7 @@ def _timing_domain_numbers(flow: object, domain: str, event_packet: object | Non
 
 def _timing_candidate_score(flow: object, domain: str, kind: str, event_packet: object | None = None) -> float:
     parts = _timing_domain_numbers(flow, domain, event_packet)
-    if kind == "good":
-        score = (
-            parts["opportunity"] * 0.43
-            + parts["probability"] * 0.36
-            + parts["change"] * 0.12
-            - parts["risk"] * 0.18
-        )
-    else:
-        score = (
-        parts["risk"] * 0.62
-        + parts["change"] * 0.15
-        - parts["opportunity"] * 0.12
-        - parts["probability"] * 0.05
-        )
+    score = timing_base_score(parts, kind)
     return (
         score
         + _timing_packet_kind_modifier(kind, event_packet)
@@ -3030,64 +3842,7 @@ def _flow_activation_label(flow: object, kind: str = "") -> str:
 def _flow_activation_score_modifier(flow: object, kind: str = "") -> float:
     """Score how strongly a flow year is activated by month command and daeun-seun context."""
     context = getattr(flow, "activation_context", {}) or {}
-    if not isinstance(context, dict):
-        return 0.0
-    compound = context.get("compound_direction") if isinstance(context.get("compound_direction"), dict) else {}
-    grade = str((compound or {}).get("grade") or "")
-    useful = int(context.get("useful_hit_count") or 0)
-    caution = int(context.get("caution_hit_count") or 0)
-    phase = int(context.get("phase_hit_count") or 0)
-    relation_hits = context.get("relation_hits") if isinstance(context.get("relation_hits"), list) else []
-    daeun_annual_hits = context.get("daeun_annual_relation_hits") if isinstance(context.get("daeun_annual_relation_hits"), list) else []
-    harsh_relations = {"clash", "punishment", "self_punishment", "harm", "break"}
-    harsh_count = sum(
-        1
-        for item in list(relation_hits) + list(daeun_annual_hits)
-        if isinstance(item, dict) and str(item.get("relation_type") or "") in harsh_relations
-    )
-    combine_count = sum(
-        1
-        for item in list(relation_hits) + list(daeun_annual_hits)
-        if isinstance(item, dict)
-        and str(item.get("relation_type") or "") in {"six_combine", "three_harmony", "three_harmony_half", "three_meeting"}
-    )
-    if kind == "good":
-        score = {
-            "daeun_supports_annual_support": 8.0,
-            "daeun_burden_annual_support": 3.8,
-            "daeun_annual_mixed": -1.5,
-            "daeun_supports_annual_burden": -7.0,
-            "daeun_burden_annual_burden": -14.0,
-        }.get(grade, 0.0)
-        score += min(6.0, useful * 2.0)
-        score -= min(8.0, caution * 2.2)
-        if phase and useful >= caution:
-            score += min(3.5, phase * 1.5)
-        elif phase and caution > useful:
-            score -= min(3.5, phase * 1.2)
-        if harsh_count and caution >= useful:
-            score -= min(5.0, harsh_count * 1.7)
-        if combine_count and useful > caution:
-            score += min(2.5, combine_count * 1.1)
-        return round(score, 2)
-    score = {
-        "daeun_supports_annual_support": -8.0,
-        "daeun_supports_annual_burden": 6.0,
-        "daeun_burden_annual_support": 2.5,
-        "daeun_burden_annual_burden": 12.0,
-        "daeun_annual_mixed": 4.0,
-    }.get(grade, 0.0)
-    score += min(7.0, caution * 2.0)
-    score -= min(5.0, useful * 1.5)
-    if phase and caution >= useful:
-        score += min(4.0, phase * 1.4)
-    elif phase and useful > caution:
-        score -= min(2.8, phase * 1.0)
-    if harsh_count:
-        score += min(5.0, harsh_count * 1.6)
-    if combine_count and useful > caution:
-        score -= min(2.5, combine_count * 1.0)
-    return round(score, 2)
+    return timing_activation_modifier(context, kind)
 
 
 def _timing_candidate_payload(
@@ -3362,6 +4117,49 @@ def _pick_timing_candidates(candidates: list[dict[str, object]], limit: int) -> 
     return sorted(selected, key=lambda item: int(item.get("year") or 0))
 
 
+def _partition_timing_candidates_by_year(
+    good_candidates: list[dict[str, object]],
+    caution_candidates: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    best_good_by_year: dict[int, float] = {}
+    best_caution_by_year: dict[int, float] = {}
+    for candidate in good_candidates:
+        year = int(candidate.get("year") or 0)
+        if year:
+            best_good_by_year[year] = max(
+                best_good_by_year.get(year, float("-inf")),
+                float(candidate.get("score") or 0),
+            )
+    for candidate in caution_candidates:
+        year = int(candidate.get("year") or 0)
+        if year:
+            best_caution_by_year[year] = max(
+                best_caution_by_year.get(year, float("-inf")),
+                float(candidate.get("score") or 0),
+            )
+
+    directions = {
+        year: (
+            "caution"
+            if best_caution_by_year.get(year, float("-inf"))
+            > best_good_by_year.get(year, float("-inf"))
+            else "good"
+        )
+        for year in set(best_good_by_year) | set(best_caution_by_year)
+    }
+    directed_good = [
+        candidate
+        for candidate in good_candidates
+        if directions.get(int(candidate.get("year") or 0)) == "good"
+    ]
+    directed_caution = [
+        candidate
+        for candidate in caution_candidates
+        if directions.get(int(candidate.get("year") or 0)) == "caution"
+    ]
+    return directed_good or good_candidates, directed_caution or caution_candidates
+
+
 def build_timing_decision_payload_from_flows(
     flows: list[object],
     *,
@@ -3389,6 +4187,12 @@ def build_timing_decision_payload_from_flows(
             event_packet = _timing_packet_for_flow(packet_index, flow, domain)
             good_candidates.append(_with_timing_age(_timing_candidate_payload(flow, domain, "good", event_packet), birth_year))
             caution_candidates.append(_with_timing_age(_timing_candidate_payload(flow, domain, "caution", event_packet), birth_year))
+    all_good_candidates = good_candidates
+    all_caution_candidates = caution_candidates
+    good_candidates, caution_candidates = _partition_timing_candidates_by_year(
+        all_good_candidates,
+        all_caution_candidates,
+    )
 
     years = sorted({int(getattr(flow, "year", 0) or 0) for flow in flows if int(getattr(flow, "year", 0) or 0)})
     ages = [_timing_age(year, birth_year) for year in years]
@@ -3402,10 +4206,10 @@ def build_timing_decision_payload_from_flows(
     domain_years: dict[str, dict[str, object]] = {}
     for domain in TIMING_DECISION_DOMAIN_LABELS:
         domain_good = [
-            candidate for candidate in good_candidates if candidate.get("domain") == domain
+            candidate for candidate in all_good_candidates if candidate.get("domain") == domain
         ]
         domain_caution = [
-            candidate for candidate in caution_candidates if candidate.get("domain") == domain
+            candidate for candidate in all_caution_candidates if candidate.get("domain") == domain
         ]
         domain_years[domain] = {
             "good": max(domain_good, key=lambda item: float(item.get("score") or 0), default={}),
@@ -3468,6 +4272,48 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
     source_personality_profile = analysis.chart_structure.source_personality_profile
     source_reading_profile = analysis.chart_structure.source_reading_profile
     cycle_regulation_profile = analysis.chart_structure.cycle_regulation_profile
+    gyeokguk_profile = analysis.chart_structure.gyeokguk_profile
+    gyeokguk_contextual_profile = analysis.chart_structure.gyeokguk_contextual_profile
+    branch_keyword_profiles = branch_relation_keyword_profiles(
+        analysis.chart_structure.branch_interactions,
+        limit=10,
+    )
+    auxiliary_profile = analysis.chart_structure.auxiliary_profile
+    requested_target_years = {
+        int(year)
+        for year in list(analysis.trace.get("target_years") or [])
+        if isinstance(year, int)
+    }
+    annual_product_years = {CURRENT_FORTUNE_YEAR, CURRENT_FORTUNE_YEAR + 1}
+    target_years = sorted(
+        annual_product_years
+        | {year for year in requested_target_years if year in annual_product_years}
+    )
+    annual_shinsal_signal_items = build_annual_shinsal_signals(
+        analysis.chart_structure,
+        target_years,
+    )
+    gyeokguk_contextual_payload = (
+        dict(gyeokguk_contextual_profile)
+        if isinstance(gyeokguk_contextual_profile, dict)
+        else {}
+    )
+    shinsal_keyword_profile_items = annotate_shinsal_structure_alignment(
+        shinsal_keyword_profiles(
+            [
+                *auxiliary_profile.twelve_shinsal_signals,
+                *auxiliary_profile.misc_shinsal_signals,
+                *annual_shinsal_signal_items,
+            ],
+            limit=24,
+            product_only=True,
+        ),
+        gyeokguk_contextual_payload,
+    )
+    if branch_keyword_profiles:
+        gyeokguk_contextual_payload["branch_relation_keyword_profiles"] = branch_keyword_profiles
+    if shinsal_keyword_profile_items:
+        gyeokguk_contextual_payload["shinsal_keyword_profiles"] = shinsal_keyword_profile_items
 
     def season_context_payload() -> dict[str, object]:
         element_profile = analysis.chart_structure.element_profile
@@ -3491,6 +4337,8 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
             "useful_element_labels": [ELEMENT_LABELS.get(element, element) for element in element_profile.useful_elements],
             "caution_elements": list(element_profile.caution_elements),
             "caution_element_labels": [ELEMENT_LABELS.get(element, element) for element in element_profile.caution_elements],
+            "climate_needs": list(element_profile.climate_needs),
+            "climate_need_labels": [ELEMENT_LABELS.get(element, element) for element in element_profile.climate_needs],
             "dominant_elements": [
                 {
                     "element": score.element,
@@ -3643,9 +4491,39 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
                     "basis_code": interaction.basis_code,
                 }
             )
+        pair_combinations = []
+        for pair in analysis.chart_structure.branch_pair_combinations:
+            pair_combinations.append(
+                {
+                    "pair_id": pair.pair_id,
+                    "branches": list(pair.branches),
+                    "branch_labels": [BRANCH_LABELS.get(branch, branch) for branch in pair.branches],
+                    "positions": list(pair.positions),
+                    "position_labels": [POSITION_LABELS.get(position, position) for position in pair.positions],
+                    "elements": list(pair.elements),
+                    "element_labels": [ELEMENT_LABELS.get(element, element) for element in pair.elements],
+                    "element_relation": pair.element_relation,
+                    "relation_label": pair.relation_label,
+                    "source_element": pair.source_element,
+                    "source_element_label": ELEMENT_LABELS.get(pair.source_element, pair.source_element),
+                    "target_element": pair.target_element,
+                    "target_element_label": ELEMENT_LABELS.get(pair.target_element, pair.target_element),
+                    "formal_relation_types": list(pair.formal_relation_types),
+                    "formal_relation_labels": [
+                        BRANCH_RELATION_LABELS.get(relation, relation)
+                        for relation in pair.formal_relation_types
+                    ],
+                    "intensity": pair.intensity,
+                    "domain_links": list(pair.domain_links),
+                    "basis_codes": list(pair.basis_codes),
+                    "trait_keywords": list(pair.trait_keywords),
+                    "interpretation": pair.interpretation,
+                }
+            )
         return {
             "position_signals": position_signals,
             "interactions": interactions,
+            "pair_combinations": pair_combinations,
         }
 
     def cycle_regulation_payload() -> dict[str, object]:
@@ -3698,7 +4576,7 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
                 for position, values in sal_by_position.items()
             }
 
-        def misc_signal_payload() -> list[dict[str, object]]:
+        def signal_payload(signals) -> list[dict[str, object]]:
             return [
                 {
                     "key": signal.key,
@@ -3715,7 +4593,7 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
                     "caution": signal.caution,
                     "basis_codes": list(signal.basis_codes),
                 }
-                for signal in auxiliary.misc_shinsal_signals
+                for signal in signals
             ]
 
         return {
@@ -3724,7 +4602,9 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
             "year_branch_group": auxiliary.year_branch_group,
             "day_basis_sal_by_position": sal_payload(auxiliary.day_sal_by_position or auxiliary.sal_by_position),
             "year_basis_sal_by_position": sal_payload(auxiliary.year_sal_by_position),
-            "misc_shinsal_signals": misc_signal_payload(),
+            "twelve_shinsal_signals": signal_payload(auxiliary.twelve_shinsal_signals),
+            "misc_shinsal_signals": signal_payload(auxiliary.misc_shinsal_signals),
+            "annual_shinsal_signals": signal_payload(annual_shinsal_signal_items),
         }
 
     def pattern_context_payload() -> dict[str, object]:
@@ -3772,6 +4652,3183 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
             "special_pattern_flags": list(pattern_profile.special_pattern_flags),
         }
 
+    def gyeokguk_context_payload() -> dict[str, object]:
+        profile = analysis.chart_structure.gyeokguk_profile
+
+        flow_source_labels = {
+            "annual_stem": "세운 천간",
+            "annual_branch_main": "세운 지지 본기",
+            "daeun_stem": "대운 천간",
+            "daeun_branch_main": "대운 지지 본기",
+        }
+
+        def flow_ten_god_sources(flow, ten_god: str) -> list[str]:
+            sources: list[str] = []
+            if getattr(flow, "year_stem_ten_god", None) == ten_god:
+                sources.append("annual_stem")
+            if getattr(flow, "year_branch_main_ten_god", None) == ten_god:
+                sources.append("annual_branch_main")
+            if getattr(flow, "daeun_stem_ten_god", None) == ten_god:
+                sources.append("daeun_stem")
+            if getattr(flow, "daeun_branch_main_ten_god", None) == ten_god:
+                sources.append("daeun_branch_main")
+            return sources
+
+        def flow_domain_activation_score(flow, domains: list[str]) -> tuple[float, str, str]:
+            best_score = 0.0
+            best_domain = ""
+            best_polarity = "mixed"
+            scores = getattr(flow, "domain_scores", {}) or {}
+            for domain in domains or list(DOMAIN_ORDER):
+                data = scores.get(domain) if isinstance(scores, dict) else {}
+                if not isinstance(data, dict):
+                    data = {}
+                opportunity = float(data.get("opportunity") or 0)
+                risk = float(data.get("risk") or 0)
+                change = float(data.get("change") or 0)
+                probability = float(data.get("probability") or 0)
+                score = max(opportunity, risk) * 0.56 + change * 0.22 + probability * 0.22
+                if score > best_score:
+                    best_score = score
+                    best_domain = str(domain)
+                    if opportunity >= risk + 8:
+                        best_polarity = "supportive"
+                    elif risk >= opportunity + 8:
+                        best_polarity = "burdensome"
+                    else:
+                        best_polarity = "mixed"
+            return best_score, best_domain, best_polarity
+
+        def compound_flow_grade(flow) -> str:
+            context = getattr(flow, "activation_context", {}) or {}
+            if not isinstance(context, dict):
+                return ""
+            compound = context.get("compound_direction") if isinstance(context.get("compound_direction"), dict) else {}
+            return str((compound or {}).get("grade") or "")
+
+        def single_action_timing_hits(match, limit: int = 5) -> list[dict[str, object]]:
+            hits: list[dict[str, object]] = []
+            for flow in analysis.flow_signals:
+                sources = flow_ten_god_sources(flow, match.acting_ten_god)
+                if not sources:
+                    continue
+                domain_score, domain, polarity = flow_domain_activation_score(flow, list(match.domain_priority))
+                source_bonus = sum(
+                    {
+                        "annual_stem": 8,
+                        "annual_branch_main": 10,
+                        "daeun_stem": 6,
+                        "daeun_branch_main": 8,
+                    }.get(source, 0)
+                    for source in sources
+                )
+                hit_score = int(
+                    round(
+                        min(
+                            100,
+                            match.presence_score * 0.42 + domain_score * 0.46 + source_bonus,
+                        )
+                    )
+                )
+                hits.append(
+                    {
+                        "year": int(getattr(flow, "year", 0) or 0),
+                        "period_label": str(getattr(flow, "period_label", "") or ""),
+                        "ten_god": match.acting_ten_god,
+                        "ten_god_label": TEN_GOD_LABELS.get(match.acting_ten_god, match.acting_ten_god),
+                        "sources": sources,
+                        "source_labels": [flow_source_labels.get(source, source) for source in sources],
+                        "domain": domain,
+                        "domain_label": DOMAIN_LABELS.get(domain, domain),
+                        "polarity": polarity,
+                        "compound_grade": compound_flow_grade(flow),
+                        "activation_score": hit_score,
+                    }
+                )
+            return sorted(hits, key=lambda item: (-int(item["activation_score"]), int(item["year"])))[:limit]
+
+        def dual_action_timing_hits(match, limit: int = 5) -> list[dict[str, object]]:
+            hits: list[dict[str, object]] = []
+            for flow in analysis.flow_signals:
+                first_sources = flow_ten_god_sources(flow, match.first_ten_god)
+                second_sources = flow_ten_god_sources(flow, match.second_ten_god)
+                if not first_sources and not second_sources:
+                    continue
+                domain_score, domain, polarity = flow_domain_activation_score(flow, list(match.domain_priority))
+                first_source_weight = 12 if first_sources else 0
+                second_source_weight = 12 if second_sources else 0
+                simultaneous_bonus = 8 if first_sources and second_sources else 0
+                hit_score = int(
+                    round(
+                        min(
+                            100,
+                            match.presence_score * 0.38
+                            + domain_score * 0.42
+                            + first_source_weight
+                            + second_source_weight
+                            + simultaneous_bonus,
+                        )
+                    )
+                )
+                if any(source.startswith("daeun") for source in first_sources) and any(
+                    source.startswith("annual") for source in second_sources
+                ):
+                    sequence_state = "first_decade_second_year"
+                elif any(source.startswith("daeun") for source in second_sources) and any(
+                    source.startswith("annual") for source in first_sources
+                ):
+                    sequence_state = "second_decade_first_year"
+                elif first_sources and second_sources:
+                    sequence_state = "same_period_chain"
+                elif first_sources:
+                    sequence_state = "first_actor_only"
+                else:
+                    sequence_state = "second_actor_only"
+                hits.append(
+                    {
+                        "year": int(getattr(flow, "year", 0) or 0),
+                        "period_label": str(getattr(flow, "period_label", "") or ""),
+                        "first_ten_god": match.first_ten_god,
+                        "first_ten_god_label": TEN_GOD_LABELS.get(match.first_ten_god, match.first_ten_god),
+                        "second_ten_god": match.second_ten_god,
+                        "second_ten_god_label": TEN_GOD_LABELS.get(match.second_ten_god, match.second_ten_god),
+                        "first_sources": first_sources,
+                        "first_source_labels": [flow_source_labels.get(source, source) for source in first_sources],
+                        "second_sources": second_sources,
+                        "second_source_labels": [flow_source_labels.get(source, source) for source in second_sources],
+                        "sequence_state": sequence_state,
+                        "domain": domain,
+                        "domain_label": DOMAIN_LABELS.get(domain, domain),
+                        "polarity": polarity,
+                        "compound_grade": compound_flow_grade(flow),
+                        "activation_score": hit_score,
+                    }
+                )
+            return sorted(hits, key=lambda item: (-int(item["activation_score"]), int(item["year"])))[:limit]
+
+        def single_action_rank(match) -> tuple[int, int, int, str]:
+            # Center lists must represent the natal structure. Timing hits are
+            # still exposed on each match, but they should not decide which
+            # natal action is called "center".
+            timing_score = 0
+            role_rank = {
+                "core": 5,
+                "core_overload": 5,
+                "strong_regulator": 5,
+                "danger": 5,
+                "breaker": 5,
+                "breaker_or_medicine": 4,
+                "regulator_or_breaker": 4,
+                "support": 4,
+                "regulator": 4,
+                "burden": 3,
+                "conditioned_support": 3,
+                "mixed": 2,
+                "source": 2,
+            }.get(str(match.role_grade), 0)
+            critical_rank = 3 if any(
+                str(code).startswith("gyeokguk_single_critical_action:")
+                for code in list(getattr(match, "basis_codes", []) or [])
+            ) else 0
+            context_rank = {
+                "constructive_by_context": 5,
+                "medicine_or_regulator": 5,
+                "risk_by_context": 5,
+                "context_strengthens_action": 4,
+                "conditional_by_context": 2,
+                "context_weakens_action": 1,
+                "not_activated": 0,
+            }.get(str(getattr(match, "context_judgment_state", "")), 0)
+            return (
+                -(match.presence_score + timing_score + role_rank * 8 + critical_rank * 6 + context_rank * 7),
+                -timing_score,
+                -(role_rank + critical_rank + context_rank),
+                match.rule_key,
+            )
+
+        def dual_action_rank(match) -> tuple[int, int, int, str]:
+            # Center dual actions are selected by monthly command, pattern,
+            # role grade, and contextual strength. Luck-cycle activation is
+            # handled downstream as timing data, not as natal-center priority.
+            timing_score = 0
+            chain_rank = {
+                "medicine_chain": 5,
+                "constructive_chain": 5,
+                "supportive_chain": 4,
+                "mediated_tension_chain": 4,
+                "success_chain": 4,
+                "support_chain": 4,
+                "risk_chain": 4,
+                "compounded_burden_chain": 4,
+                "conditional_chain": 3,
+                "mixed_chain": 2,
+                "disease_chain": 1,
+            }.get(str(match.chain_grade), 0)
+            exact_pair_rank = 2 if bool(getattr(match, "exact_pair_category", "")) else 0
+            context_rank = {
+                "structure_supports_expression": 5,
+                "medicine_can_work": 5,
+                "month_pressure_confirms_risk": 5,
+                "risk_is_reinforced": 5,
+                "context_strengthens_pair": 4,
+                "conditional_by_context": 2,
+                "context_weakens_pair": 1,
+                "not_activated": 0,
+            }.get(str(getattr(match, "context_judgment_state", "")), 0)
+            return (
+                -(match.presence_score + timing_score + chain_rank * 8 + exact_pair_rank * 6 + context_rank * 7),
+                -timing_score,
+                -(chain_rank + exact_pair_rank + context_rank),
+                match.rule_key,
+            )
+
+        def dual_pair_center_signature(match) -> tuple[object, ...]:
+            unordered_pair = tuple(sorted([match.first_ten_god, match.second_ten_god]))
+            category = str(getattr(match, "exact_pair_category", "") or "")
+            if not category:
+                category = str(getattr(match, "first_to_second_relation", "") or "")
+            return (
+                category,
+                unordered_pair,
+            )
+
+        def center_dual_action_matches(limit: int = 3):
+            selected = []
+            seen: set[tuple[object, ...]] = set()
+            for match in sorted(profile.dual_ten_god_action_matches, key=dual_action_rank):
+                signature = dual_pair_center_signature(match)
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                selected.append(match)
+                if len(selected) >= limit:
+                    break
+            return selected
+
+        def extract_classical_action_tags(prefix: str, basis_codes) -> list[str]:
+            tags: list[str] = []
+            for code in list(basis_codes or []):
+                value = str(code)
+                if value.startswith(prefix):
+                    tag = value.split(":", 1)[1]
+                    if tag not in tags:
+                        tags.append(tag)
+            return tags
+
+        def match_classical_action_tags(match, prefix: str) -> list[str]:
+            direct_tags = list(getattr(match, "classical_action_tags", []) or [])
+            if direct_tags:
+                return direct_tags
+            return extract_classical_action_tags(prefix, getattr(match, "basis_codes", []))
+
+        def match_component_classical_action_tags(match) -> list[str]:
+            direct_tags = [
+                *list(getattr(match, "first_single_classical_action_tags", []) or []),
+                *list(getattr(match, "second_single_classical_action_tags", []) or []),
+            ]
+            if direct_tags:
+                return direct_tags
+            return [
+                *extract_classical_action_tags("gyeokguk_dual_first_single_classical_action:", match.basis_codes),
+                *extract_classical_action_tags("gyeokguk_dual_second_single_classical_action:", match.basis_codes),
+            ]
+
+        def extract_mechanic_codes(prefix: str, basis_codes) -> list[str]:
+            return [
+                str(code)
+                for code in list(basis_codes or [])
+                if str(code).startswith(prefix)
+            ]
+
+        def month_fit_attention_weight(state: str) -> int:
+            return {
+                "supports_month_command": 18,
+                "usable_by_month_command": 15,
+                "mixed_by_month_command": 11,
+                "harms_month_command": 17,
+                "burdensome_by_month_command": 17,
+                "both_supported_by_month_command": 20,
+                "both_pressure_by_month_command": 20,
+                "one_side_pressure_by_month_command": 16,
+                "mixed_or_neutral_by_month_command": 10,
+                "not_evaluated_by_month_command": 3,
+            }.get(str(state), 3)
+
+        def month_fit_label_for_selection(state: str) -> str:
+            return {
+                "supports_month_command": "월령이 해당 작용을 성격 방향으로 받침",
+                "usable_by_month_command": "월령상 사용할 수 있는 작용",
+                "mixed_by_month_command": "월령상 성패가 갈리는 작용",
+                "harms_month_command": "월령 기준에서 파격 가능성이 있는 작용",
+                "burdensome_by_month_command": "월령 기준에서 부담이 커지는 작용",
+                "both_supported_by_month_command": "두 작용 모두 월령상 쓸 수 있음",
+                "both_pressure_by_month_command": "두 작용 모두 월령상 부담 가능",
+                "one_side_pressure_by_month_command": "한쪽은 쓰이고 한쪽은 부담",
+                "mixed_or_neutral_by_month_command": "월령 판단이 혼합 또는 중립",
+                "not_evaluated_by_month_command": "월령 적합성 미평가",
+            }.get(str(state), str(state))
+
+        def single_role_attention_weight(role_grade: str) -> int:
+            return {
+                "core": 18,
+                "core_overload": 18,
+                "danger": 18,
+                "breaker": 18,
+                "strong_regulator": 17,
+                "breaker_or_medicine": 16,
+                "regulator_or_breaker": 16,
+                "support": 15,
+                "regulator": 15,
+                "burden": 13,
+                "conditioned_support": 11,
+                "mixed": 9,
+                "source": 8,
+            }.get(str(role_grade), 5)
+
+        def dual_chain_attention_weight(chain_grade: str) -> int:
+            return {
+                "medicine_chain": 22,
+                "constructive_chain": 21,
+                "risk_chain": 21,
+                "compounded_burden_chain": 20,
+                "supportive_chain": 18,
+                "mediated_tension_chain": 18,
+                "success_chain": 18,
+                "support_chain": 17,
+                "conditional_chain": 15,
+                "mixed_chain": 11,
+                "disease_chain": 10,
+            }.get(str(chain_grade), 6)
+
+        def context_attention_weight(state: str) -> int:
+            return {
+                "constructive_by_context": 16,
+                "medicine_or_regulator": 16,
+                "risk_by_context": 16,
+                "structure_supports_expression": 16,
+                "medicine_can_work": 16,
+                "month_pressure_confirms_risk": 16,
+                "risk_is_reinforced": 16,
+                "context_strengthens_action": 13,
+                "context_strengthens_pair": 13,
+                "conditional_by_context": 9,
+                "context_weakens_action": 6,
+                "context_weakens_pair": 6,
+                "not_activated": 0,
+            }.get(str(state), 4)
+
+        MAJOR_CLASSICAL_ACTION_TAGS = {
+                "siksang_saengjae",
+                "jaesaenggwan",
+                "gwanin_sangsaeng",
+                "salin_sangsaeng",
+                "siksin_jesal",
+                "sanggwan_gyeongwan",
+                "jaegeukin",
+                "bigeop_jaengjae",
+                "inseong_dosik",
+                "jaesaengsal",
+                "gwansal_honhap",
+                "inbi_overload",
+                "siksang_overload",
+                "jaeda_sinyak_risk",
+                "gwansal_overload",
+        }
+        CATEGORY_CLASSICAL_ACTION_TAGS = {
+                "bigeop_generates_siksang",
+                "jaeseong_generates_gwanseong",
+                "gwanseong_generates_inseong",
+                "inseong_generates_bigeop",
+                "bigeop_controls_wealth",
+                "wealth_controls_resource",
+                "inseong_controls_output",
+                "siksang_controls_gwanseong",
+                "gwanseong_controls_bigeop",
+                "bigeop_same_group",
+                "siksang_same_group",
+                "wealth_same_group",
+                "gwanseong_same_group",
+                "inseong_same_group",
+        }
+        SAME_GROUP_CLASSICAL_ACTION_TAGS = {
+            "bigeop_same_group",
+            "siksang_same_group",
+            "wealth_same_group",
+            "gwanseong_same_group",
+            "inseong_same_group",
+        }
+        GENERIC_CLASSICAL_ACTION_TAGS = {
+            "gyeokguk_specific_adjustment",
+        }
+        CENTER_DEDUPE_CLASSICAL_ACTION_TAGS = (
+            MAJOR_CLASSICAL_ACTION_TAGS
+            | CATEGORY_CLASSICAL_ACTION_TAGS
+            | SAME_GROUP_CLASSICAL_ACTION_TAGS
+        ) - GENERIC_CLASSICAL_ACTION_TAGS
+
+        def classical_attention_weight(tags: list[str]) -> int:
+            score = 0
+            if any(tag in MAJOR_CLASSICAL_ACTION_TAGS for tag in tags):
+                score += 18
+            if any(tag in CATEGORY_CLASSICAL_ACTION_TAGS for tag in tags):
+                score += 10
+            return score
+
+        def component_classical_attention_weight(tags: list[str]) -> int:
+            tag_set = {str(tag) for tag in list(tags or [])}
+            major_count = len(tag_set & MAJOR_CLASSICAL_ACTION_TAGS)
+            category_count = len(tag_set & CATEGORY_CLASSICAL_ACTION_TAGS)
+            return min(18, major_count * 7 + category_count * 4)
+
+        def center_judgment_axis_from_resolution(
+            resolution_state: str,
+            grade_state: str,
+            tags: set[str],
+        ) -> dict[str, object]:
+            """Expose whether a candidate is seonggyeok, pagyeok, or byeong-yak."""
+
+            state = str(resolution_state or "")
+            grade = str(grade_state or "")
+            hard_pagyeok = (
+                "pagyeok" in state
+                or "disease" in state
+                or grade in {"risk_chain", "compounded_burden_chain", "danger", "breaker", "core_overload"}
+            )
+            if "byeongyak" in state or "medicine" in state or grade in {"medicine_chain", "breaker_or_medicine"}:
+                return {
+                    "code": "byeongyak_medicine",
+                    "label": "병약 조절",
+                    "summary": "격국의 병을 덜거나 과한 작용을 쓸모로 돌리는 축",
+                    "score": 13,
+                }
+            if hard_pagyeok:
+                return {
+                    "code": "pagyeok_or_disease",
+                    "label": "파격·병증",
+                    "summary": "격국의 중심을 흔들거나 현실 사건에서 부담으로 드러나는 축",
+                    "score": 12,
+                }
+            if "seonggyeok" in state or grade in {"constructive_chain", "supportive_chain", "core", "support", "source"}:
+                if bool(tags & CAUTION_CLASSICAL_ACTION_TAGS):
+                    return {
+                        "code": "seonggyeok_with_caution",
+                        "label": "성격 작용·병증 점검",
+                        "summary": "격국을 세우는 작용이지만 과하면 병증으로 기울 수 있는 축",
+                        "score": 12,
+                    }
+                return {
+                    "code": "seonggyeok",
+                    "label": "성격 작용",
+                    "summary": "격국의 성립과 현실 성과를 받치는 축",
+                    "score": 12,
+                }
+            if "conditional" in state or "mixed" in state or grade in {"conditional_chain", "mixed_chain", "mixed"}:
+                return {
+                    "code": "conditional_axis",
+                    "label": "조건부 성패",
+                    "summary": "월령, 강약, 위치에 따라 성패가 갈리는 축",
+                    "score": 7,
+                }
+            return {
+                "code": "secondary_axis",
+                "label": "보조 작용",
+                "summary": "격국 중심을 보조하거나 세부 사건으로 드러나는 축",
+                "score": 4,
+            }
+
+        def ten_god_operation_depth_basis(
+            source: str,
+            match,
+            tags: list[str],
+            component_tags: list[str] | None = None,
+        ) -> dict[str, object]:
+            """Score how deeply the candidate explains the pattern by ten-god logic."""
+
+            tag_set = {str(tag) for tag in list(tags or [])}
+            component_set = {str(tag) for tag in list(component_tags or [])}
+            all_tags = tag_set | component_set
+            major_tags = sorted(all_tags & MAJOR_CLASSICAL_ACTION_TAGS)
+            category_tags = sorted(all_tags & CATEGORY_CLASSICAL_ACTION_TAGS)
+            support_tags = sorted(all_tags & SUPPORT_CLASSICAL_ACTION_TAGS)
+            caution_tags = sorted(all_tags & CAUTION_CLASSICAL_ACTION_TAGS)
+            has_generation_chain = any(
+                tag in all_tags
+                for tag in {
+                    "siksang_saengjae",
+                    "jaesaenggwan",
+                    "gwanin_sangsaeng",
+                    "salin_sangsaeng",
+                    "jaesaengsal",
+                    "jaeseong_generates_gwanseong",
+                    "gwanseong_generates_inseong",
+                    "bigeop_generates_siksang",
+                    "inseong_generates_bigeop",
+                }
+            )
+            has_control_chain = any(
+                tag in all_tags
+                for tag in {
+                    "siksin_jesal",
+                    "sanggwan_gyeongwan",
+                    "jaegeukin",
+                    "bigeop_jaengjae",
+                    "inseong_dosik",
+                    "siksang_controls_gwanseong",
+                    "wealth_controls_resource",
+                    "bigeop_controls_wealth",
+                    "inseong_controls_output",
+                    "gwanseong_controls_bigeop",
+                }
+            )
+            has_overload_chain = any(
+                tag in all_tags
+                for tag in {
+                    "gwansal_honhap",
+                    "inbi_overload",
+                    "siksang_overload",
+                    "jaeda_sinyak_risk",
+                    "gwansal_overload",
+                }
+            )
+            activation_order_profile = (
+                dict(getattr(match, "activation_order_profile", {}) or {})
+                if source == "dual"
+                else {}
+            )
+            first_order = dict(activation_order_profile.get("first_then_second", {}) or {})
+            second_order = dict(activation_order_profile.get("second_then_first", {}) or {})
+            activation_order_score = 0
+            if first_order and second_order:
+                if first_order.get("entry_ten_god") and second_order.get("entry_ten_god"):
+                    activation_order_score += 2
+                if first_order.get("entry_event_targets") and first_order.get("result_event_targets"):
+                    activation_order_score += 2
+                if second_order.get("entry_event_targets") and second_order.get("result_event_targets"):
+                    activation_order_score += 2
+                if first_order.get("entry_event_targets") != second_order.get("entry_event_targets"):
+                    activation_order_score += 2
+                activation_order_score = min(8, activation_order_score)
+            if source == "single":
+                resolution_state = str(getattr(match, "pattern_resolution_state", "") or "")
+                grade_state = str(getattr(match, "role_grade", "") or "")
+                relation_state = str(getattr(match, "relation_to_pattern", "") or "")
+                relation_score = {
+                    "actor_controls_pattern": 8,
+                    "pattern_controls_actor": 8,
+                    "actor_generates_pattern": 7,
+                    "pattern_generates_actor": 7,
+                    "same_group": 5,
+                    "indirect_relation": 2,
+                }.get(relation_state, 1 if relation_state else 0)
+                resolution_score = {
+                    "seonggyeok_center": 12,
+                    "seonggyeok_support": 11,
+                    "seonggyeok_source": 10,
+                    "byeongyak_medicine": 12,
+                    "medicine_or_pagyeok": 10,
+                    "pagyeok_or_medicine": 10,
+                    "pagyeok_risk": 11,
+                    "strong_pagyeok_risk": 12,
+                    "disease_overload": 11,
+                    "disease_burden": 10,
+                    "conditional_seonggyeok": 8,
+                    "conditional_mixed": 6,
+                }.get(resolution_state, 3)
+                grade_score = {
+                    "core": 10,
+                    "core_overload": 10,
+                    "strong_regulator": 10,
+                    "regulator": 9,
+                    "breaker": 10,
+                    "danger": 10,
+                    "breaker_or_medicine": 9,
+                    "regulator_or_breaker": 9,
+                    "support": 8,
+                    "source": 6,
+                    "burden": 7,
+                    "conditioned_support": 6,
+                    "mixed": 5,
+                }.get(grade_state, 3)
+            else:
+                resolution_state = str(getattr(match, "combination_resolution_state", "") or "")
+                grade_state = str(getattr(match, "chain_grade", "") or "")
+                relation_state = str(getattr(match, "first_to_second_relation", "") or "")
+                relation_score = {
+                    "first_generates_second": 8,
+                    "second_generates_first": 8,
+                    "first_controls_second": 9,
+                    "second_controls_first": 9,
+                    "same_group": 5,
+                }.get(relation_state, 2 if relation_state else 0)
+                resolution_score = {
+                    "seonggyeok_chain": 12,
+                    "seonggyeok_support_chain": 11,
+                    "byeongyak_medicine_chain": 13,
+                    "pagyeok_chain": 12,
+                    "compounded_disease_chain": 12,
+                    "mediated_condition_chain": 10,
+                    "conditional_chain": 8,
+                    "mixed_chain": 6,
+                }.get(resolution_state, 3)
+                grade_score = {
+                    "medicine_chain": 11,
+                    "constructive_chain": 10,
+                    "supportive_chain": 9,
+                    "success_chain": 9,
+                    "support_chain": 8,
+                    "mediated_tension_chain": 8,
+                    "risk_chain": 11,
+                    "compounded_burden_chain": 11,
+                    "conditional_chain": 7,
+                    "mixed_chain": 5,
+                    "disease_chain": 10,
+                }.get(grade_state, 3)
+
+            classical_score = min(10, len(major_tags) * 4 + len(category_tags) * 2)
+            chain_score = 0
+            if has_generation_chain:
+                chain_score = max(chain_score, 4)
+            if has_control_chain:
+                chain_score = max(chain_score, 5)
+            if has_overload_chain:
+                chain_score = max(chain_score, 4)
+            support_caution_score = min(6, len(support_tags) * 2 + len(caution_tags) * 2)
+            center_axis = center_judgment_axis_from_resolution(resolution_state, grade_state, all_tags)
+            center_axis_score = int(center_axis.get("score") or 0)
+            raw_score = (
+                relation_score
+                + resolution_score
+                + grade_score
+                + classical_score
+                + chain_score
+                + support_caution_score
+                + center_axis_score
+                + activation_order_score
+            )
+            return {
+                "state": resolution_state,
+                "grade_state": grade_state,
+                "relation_state": relation_state,
+                "score": min(64, raw_score),
+                "relation_score": relation_score,
+                "resolution_score": resolution_score,
+                "grade_score": grade_score,
+                "classical_score": classical_score,
+                "chain_score": chain_score,
+                "support_caution_score": support_caution_score,
+                "activation_order_score": activation_order_score,
+                "center_judgment_axis": center_axis,
+                "center_axis_score": center_axis_score,
+                "major_tags": major_tags,
+                "category_tags": category_tags,
+                "support_tags": support_tags,
+                "caution_tags": caution_tags,
+                "has_generation_chain": has_generation_chain,
+                "has_control_chain": has_control_chain,
+                "has_overload_chain": has_overload_chain,
+            }
+
+        def center_dedupe_tags(tags: list[str]) -> set[str]:
+            return {
+                str(tag)
+                for tag in list(tags or [])
+                if str(tag) in CENTER_DEDUPE_CLASSICAL_ACTION_TAGS
+            }
+
+        def center_candidate_repeats_existing(candidate_tags: set[str], seen_tags: set[str]) -> bool:
+            if not candidate_tags or not seen_tags:
+                return False
+            overlap = candidate_tags & seen_tags
+            if not overlap:
+                return False
+            new_tags = candidate_tags - seen_tags
+            if not new_tags:
+                return True
+            return len(overlap) >= 2 and len(overlap) >= len(new_tags)
+
+        def center_flow_activation_score(timing_score: int) -> int:
+            # The center action is selected from the natal structure first.
+            # Luck-cycle activation is preserved separately as timing_score and
+            # raw_selection_basis, but it must not decide the natal center.
+            return 0
+
+        def center_specificity_adjustment(tags: list[str]) -> int:
+            tag_set = {str(tag) for tag in list(tags or [])}
+            has_major = bool(tag_set & MAJOR_CLASSICAL_ACTION_TAGS)
+            has_same_group = bool(tag_set & SAME_GROUP_CLASSICAL_ACTION_TAGS)
+            if has_same_group and not has_major:
+                return -22
+            if has_major:
+                return 6
+            return 0
+
+        CAUTION_CLASSICAL_ACTION_TAGS = {
+            "sanggwan_gyeongwan",
+            "jaegeukin",
+            "bigeop_jaengjae",
+            "inseong_dosik",
+            "jaesaengsal",
+            "gwansal_honhap",
+            "inbi_overload",
+            "siksang_overload",
+            "jaeda_sinyak_risk",
+            "gwansal_overload",
+            "bigeop_controls_wealth",
+            "wealth_controls_resource",
+            "inseong_controls_output",
+        }
+        SUPPORT_CLASSICAL_ACTION_TAGS = {
+            "siksang_saengjae",
+            "jaesaenggwan",
+            "gwanin_sangsaeng",
+            "salin_sangsaeng",
+            "siksin_jesal",
+            "jaeseong_generates_gwanseong",
+            "gwanseong_generates_inseong",
+            "siksang_controls_gwanseong",
+            "gwanseong_controls_bigeop",
+            "bigeop_generates_siksang",
+            "inseong_generates_bigeop",
+        }
+
+        def has_pattern_center_bridge(match) -> bool:
+            return any(
+                str(code).startswith("gyeokguk_dual_pattern_center_bridge:")
+                for code in list(getattr(match, "basis_codes", []) or [])
+            )
+
+        def pattern_center_relevance(source: str, match) -> dict[str, object]:
+            pattern_ten_god = str(profile.primary_ten_god)
+            pattern_group = str(profile.primary_group)
+            if source == "single":
+                direct = str(getattr(match, "acting_ten_god", "")) == pattern_ten_god
+                same_group = str(getattr(match, "acting_group", "")) == pattern_group
+                relation = str(getattr(match, "relation_to_pattern", ""))
+                bridge = False
+                if direct:
+                    score = 42
+                    label = "격국 중심 십신이 직접 작용"
+                elif same_group:
+                    score = 30
+                    label = "격국 중심과 같은 계열의 작용"
+                elif relation:
+                    score = 8
+                    label = "격국 중심과 간접 연결"
+                else:
+                    score = -8
+                    label = "격국 중심과의 연결 약함"
+                return {
+                    "direct_center_actor": direct,
+                    "same_group_as_center": same_group,
+                    "pattern_center_bridge": bridge,
+                    "label": label,
+                    "score": score,
+                }
+
+            first_direct = str(getattr(match, "first_ten_god", "")) == pattern_ten_god
+            second_direct = str(getattr(match, "second_ten_god", "")) == pattern_ten_god
+            first_same_group = str(getattr(match, "first_group", "")) == pattern_group
+            second_same_group = str(getattr(match, "second_group", "")) == pattern_group
+            bridge = has_pattern_center_bridge(match)
+            direct = first_direct or second_direct
+            same_group = first_same_group or second_same_group
+            if direct:
+                score = 46
+                label = "격국 중심 십신이 이중 작용 안에 직접 포함"
+            elif bridge:
+                score = 28
+                label = "두 십신 작용이 격국 중심을 경유"
+            elif same_group:
+                score = 32
+                label = "격국 중심 계열이 이중 작용 안에 포함"
+            else:
+                score = -10
+                label = "격국 중심 밖에서 이어지는 보조 작용"
+            return {
+                "direct_center_actor": direct,
+                "same_group_as_center": same_group,
+                "pattern_center_bridge": bridge,
+                "label": label,
+                "score": score,
+            }
+
+        def exact_ten_god_specificity_basis(source: str, match) -> dict[str, object]:
+            """Keep exact ten-god faces visible in center-action selection."""
+
+            if source == "single":
+                ten_gods = [str(getattr(match, "acting_ten_god", "") or "")]
+                pair_bonus = 0
+                pair_state = ""
+            else:
+                ten_gods = [
+                    str(getattr(match, "first_ten_god", "") or ""),
+                    str(getattr(match, "second_ten_god", "") or ""),
+                ]
+                pair_state = str(getattr(match, "exact_pair_category", "") or "")
+                pair_bonus = 6 if pair_state else 0
+                if str(getattr(match, "exact_pair_effect", "") or "") and str(getattr(match, "exact_pair_risk", "") or ""):
+                    pair_bonus += 4
+
+            domains: list[str] = []
+            exact_faces: list[str] = []
+            for ten_god in ten_gods:
+                exact_nuance = str(TEN_GOD_EXACT_NUANCE.get(ten_god, "") or "")
+                exact_profile = TEN_GOD_EXACT_ACTION_PROFILE.get(ten_god, {})
+                if exact_nuance:
+                    exact_faces.append(ten_god)
+                if isinstance(exact_profile, dict):
+                    domains.extend(str(domain) for domain in list(exact_profile.get("domains", []) or []) if domain)
+
+            domain_score = min(10, len(set(domains)) * 2)
+            face_score = min(8, len(exact_faces) * 4)
+            score = min(28, domain_score + face_score + pair_bonus)
+            return {
+                "score": score,
+                "ten_gods": ten_gods,
+                "exact_faces": exact_faces,
+                "domains": sorted(set(domains)),
+                "pair_state": pair_state,
+                "domain_score": domain_score,
+                "face_score": face_score,
+                "pair_bonus": pair_bonus,
+            }
+
+        def selection_role_for_candidate(source: str, match, tags: list[str]) -> dict[str, str]:
+            tag_set = {str(tag) for tag in list(tags or [])}
+            month_state = str(getattr(match, "month_fit_state", ""))
+            context_state = str(getattr(match, "context_judgment_state", ""))
+            risk_by_context = context_state in {
+                "risk_by_context",
+                "risk_is_reinforced",
+                "month_pressure_confirms_risk",
+                "context_weakens_action",
+                "context_weakens_pair",
+            }
+            month_pressure = month_state in {
+                "harms_month_command",
+                "burdensome_by_month_command",
+                "both_pressure_by_month_command",
+                "one_side_pressure_by_month_command",
+            }
+            if source == "dual":
+                chain_grade = str(getattr(match, "chain_grade", ""))
+                if chain_grade in {"risk_chain", "compounded_burden_chain", "disease_chain"}:
+                    return {
+                        "code": "caution",
+                        "label": "주의 작용",
+                        "reason": "두 십신이 결합하면서 손상, 부담, 충돌 쪽으로 기울 수 있음",
+                    }
+                if chain_grade == "medicine_chain":
+                    return {
+                        "code": "primary",
+                        "label": "대표 작용",
+                        "reason": "격국의 병을 제어하거나 과한 작용을 쓰임으로 돌리는 병약 작용",
+                    }
+                if tag_set & CAUTION_CLASSICAL_ACTION_TAGS and (
+                    risk_by_context or month_pressure or has_pattern_center_bridge(match)
+                ):
+                    return {
+                        "code": "caution",
+                        "label": "주의 작용",
+                        "reason": "주의 태그가 월령·맥락 보정에서 강화됨",
+                    }
+                if chain_grade == "constructive_chain":
+                    return {
+                        "code": "primary",
+                        "label": "대표 작용",
+                        "reason": "격국 성립이나 병약 조절을 직접 이끄는 이중 작용",
+                    }
+                if chain_grade in {"supportive_chain", "success_chain", "support_chain", "mediated_tension_chain"}:
+                    return {
+                        "code": "support",
+                        "label": "보조 작용",
+                        "reason": "격국 중심을 보조하거나 결과로 이어 주는 작용",
+                    }
+                return {
+                    "code": "conditional",
+                    "label": "조건부 작용",
+                    "reason": "월령, 강약, 위치에 따라 성패가 갈리는 작용",
+                }
+
+            role_grade = str(getattr(match, "role_grade", ""))
+            if role_grade in {"breaker", "danger", "burden", "core_overload"}:
+                return {
+                    "code": "caution",
+                    "label": "주의 작용",
+                    "reason": "격국 중심을 흔들거나 부담을 더하는 단일 작용",
+                }
+            if role_grade in {"regulator_or_breaker", "breaker_or_medicine"} and (
+                risk_by_context or month_pressure or bool(tag_set & CAUTION_CLASSICAL_ACTION_TAGS)
+            ):
+                return {
+                    "code": "caution",
+                    "label": "주의 작용",
+                    "reason": "약으로도 쓰이나 조건이 어긋나면 파격으로 기울 수 있음",
+                }
+            if role_grade in {"core", "strong_regulator", "regulator"}:
+                return {
+                    "code": "primary",
+                    "label": "대표 작용",
+                    "reason": "격국 중심이나 병약 조절에 직접 관여하는 작용",
+                }
+            if role_grade in {"source", "support", "conditioned_support"} or bool(tag_set & SUPPORT_CLASSICAL_ACTION_TAGS):
+                return {
+                    "code": "support",
+                    "label": "보조 작용",
+                    "reason": "격국 성립을 받치거나 현실 결과를 보조하는 작용",
+                }
+            return {
+                "code": "conditional",
+                "label": "조건부 작용",
+                "reason": "월령, 강약, 위치에 따라 작용 방향이 갈리는 십신",
+            }
+
+        def center_reason_parts(
+            *,
+            month_fit_state: str,
+            context_state: str,
+            tags: list[str],
+            timing_score: int,
+            relation_text: str,
+        ) -> list[str]:
+            reasons = []
+            if month_fit_attention_weight(month_fit_state) >= 10:
+                reasons.append("월령 기준에서 해석 비중이 큼")
+            if context_attention_weight(context_state) >= 13:
+                reasons.append("강약·조후·위치 보정 후 중심 작용으로 강화")
+            if tags:
+                reasons.append("핵심 십신 작용 태그 확인")
+            if timing_score >= 50:
+                reasons.append("대운·세운에서 발동 가능성 확인")
+            if relation_text:
+                reasons.append(relation_text)
+            return reasons[:5]
+
+        def context_score_delta_from_basis(basis_codes, prefix: str) -> int:
+            for code in list(basis_codes or []):
+                value = str(code)
+                if value.startswith(prefix):
+                    raw = value.split(":", 1)[1]
+                    try:
+                        return int(raw)
+                    except ValueError:
+                        return 0
+            return 0
+
+        def position_attention_from_context(position_context) -> tuple[int, str]:
+            if not isinstance(position_context, dict):
+                return 0, "위치 판단 미평가"
+            subcontexts = []
+            if "first" in position_context or "second" in position_context:
+                for key in ("first", "second"):
+                    data = position_context.get(key)
+                    if isinstance(data, dict):
+                        subcontexts.append(data)
+            else:
+                subcontexts.append(position_context)
+
+            score = 0
+            labels: list[str] = []
+            for data in subcontexts:
+                grade = str(data.get("grade", "") or "")
+                visible = list(data.get("visible_positions", []) or [])
+                branch_main = list(data.get("branch_main_positions", []) or [])
+                hidden = list(data.get("hidden_positions", []) or [])
+                if "month" in visible or "month" in branch_main:
+                    score += 13
+                    labels.append("월주·월지에서 확인")
+                elif "day" in branch_main or "day" in hidden:
+                    score += 10
+                    labels.append("일지·생활 자리에서 확인")
+                elif visible:
+                    score += 8
+                    labels.append("천간 투출")
+                elif branch_main:
+                    score += 7
+                    labels.append("지지 본기")
+                elif hidden:
+                    score += 5
+                    labels.append("지장간 잠복")
+                elif grade:
+                    labels.append(grade)
+            return min(20, score), ", ".join(dict.fromkeys(labels)) or "위치 신호 약함"
+
+        def protrusion_attention_from_position_context(position_context) -> tuple[int, str]:
+            if not isinstance(position_context, dict):
+                return 0, "투출 판단 미평가"
+            subcontexts = []
+            if "first" in position_context or "second" in position_context:
+                for key in ("first", "second"):
+                    data = position_context.get(key)
+                    if isinstance(data, dict):
+                        subcontexts.append(data)
+            else:
+                subcontexts.append(position_context)
+
+            visible_positions: list[str] = []
+            for data in subcontexts:
+                visible_positions.extend(str(item) for item in list(data.get("visible_positions", []) or []))
+            if "month" in visible_positions:
+                return 10, "월간 투출"
+            if visible_positions:
+                return 7, "천간 투출"
+            return 1, "투출 약함"
+
+        def rooting_attention_from_position_context(position_context) -> tuple[int, str]:
+            if not isinstance(position_context, dict):
+                return 0, "통근 판단 미평가"
+            subcontexts = []
+            if "first" in position_context or "second" in position_context:
+                for key in ("first", "second"):
+                    data = position_context.get(key)
+                    if isinstance(data, dict):
+                        subcontexts.append(data)
+            else:
+                subcontexts.append(position_context)
+
+            branch_main_positions: list[str] = []
+            hidden_positions: list[str] = []
+            for data in subcontexts:
+                branch_main_positions.extend(str(item) for item in list(data.get("branch_main_positions", []) or []))
+                hidden_positions.extend(str(item) for item in list(data.get("hidden_positions", []) or []))
+            if "month" in branch_main_positions:
+                return 10, "월지 본기 통근"
+            if branch_main_positions:
+                return 7, "지지 본기 통근"
+            if hidden_positions:
+                return 4, "지장간 뿌리"
+            return 1, "통근 약함"
+
+        def hidden_attention_from_position_context(position_context) -> tuple[int, str]:
+            if not isinstance(position_context, dict):
+                return 0, "지장간 판단 미평가"
+            subcontexts = []
+            if "first" in position_context or "second" in position_context:
+                for key in ("first", "second"):
+                    data = position_context.get(key)
+                    if isinstance(data, dict):
+                        subcontexts.append(data)
+            else:
+                subcontexts.append(position_context)
+
+            hidden_positions: list[str] = []
+            branch_main_positions: list[str] = []
+            for data in subcontexts:
+                hidden_positions.extend(str(item) for item in list(data.get("hidden_positions", []) or []))
+                branch_main_positions.extend(str(item) for item in list(data.get("branch_main_positions", []) or []))
+            if "month" in hidden_positions or "month" in branch_main_positions:
+                return 8, "월지 본기·지장간 작용"
+            if hidden_positions:
+                return 6, "지장간 잠복 작용"
+            if branch_main_positions:
+                return 5, "지지 본기 작용"
+            return 1, "지장간 작용 약함"
+
+        def branch_attention_from_context(branch_context) -> tuple[int, str]:
+            if not isinstance(branch_context, dict):
+                return 0, "합충형파해 미평가"
+            subcontexts = []
+            if "first" in branch_context or "second" in branch_context:
+                for key in ("first", "second"):
+                    data = branch_context.get(key)
+                    if isinstance(data, dict):
+                        subcontexts.append(data)
+            else:
+                subcontexts.append(branch_context)
+
+            score = 0
+            labels: list[str] = []
+            for data in subcontexts:
+                grade = str(data.get("grade", "") or "")
+                relations = list(data.get("relations", []) or [])
+                if grade == "branch_relation_pressures_actor":
+                    score += 12
+                    labels.append("충·형·파·해 압력")
+                elif grade == "branch_relation_supports_actor":
+                    score += 9
+                    labels.append("합·회합 보조")
+                elif grade == "branch_relation_mixed_actor":
+                    score += 7
+                    labels.append("성립과 흔들림 공존")
+                elif relations:
+                    score += 5
+                    labels.append("지지 작용 확인")
+            return min(18, score), ", ".join(dict.fromkeys(labels)) or "직접 작용 약함"
+
+        def strength_attention_from_label(label: str) -> int:
+            value = str(label)
+            if "보강" in value or "배출" in value or "제어" in value:
+                return 10
+            if "부담" in value or "편중" in value:
+                return 9
+            if "중립" in value:
+                return 4
+            return 2 if value else 0
+
+        def climate_attention_from_label(label: str) -> int:
+            value = str(label)
+            if "조후상 필요한" in value:
+                return 12
+            if "쓸 수 있는" in value or "구조상" in value:
+                return 7
+            if "과해지기 쉬운" in value or "불필요" in value:
+                return 9
+            return 2 if value else 0
+
+        def compact_basis_label(label: str) -> str:
+            parts = [part.strip() for part in str(label or "").split(" / ") if part.strip()]
+            if not parts:
+                return ""
+            return " / ".join(dict.fromkeys(parts))
+
+        def formation_label_for_selection(state: str) -> str:
+            return {
+                "properly_formed": "격이 분명하게 성립함",
+                "formed_with_conditions": "격은 성립하나 병약과 조건을 함께 봄",
+                "partially_formed": "격의 중심은 있으나 투출·통근 보강이 필요함",
+                "latent_but_usable": "격의 씨앗은 있으나 발동 조건이 필요함",
+                "weak_or_fragmented": "격의 힘이 흩어져 보조 구조를 함께 봄",
+                "undetermined": "격국 성립도 미정",
+            }.get(str(state), "격국 성립도 점검")
+
+        def formation_attention_weight(state: str) -> int:
+            return {
+                "properly_formed": 14,
+                "formed_with_conditions": 12,
+                "partially_formed": 10,
+                "latent_but_usable": 8,
+                "weak_or_fragmented": 7,
+                "undetermined": 0,
+            }.get(str(state), 5)
+
+        def single_selection_basis(match, tags: list[str], timing_score: int) -> dict[str, object]:
+            position_score, position_label = position_attention_from_context(match.position_context)
+            protrusion_score, protrusion_label = protrusion_attention_from_position_context(match.position_context)
+            rooting_score, rooting_label = rooting_attention_from_position_context(match.position_context)
+            hidden_score, hidden_label = hidden_attention_from_position_context(match.position_context)
+            branch_score, branch_label = branch_attention_from_context(match.branch_relation_context)
+            context_delta = context_score_delta_from_basis(match.basis_codes, "gyeokguk_single_context_score_delta:")
+            operation_depth = ten_god_operation_depth_basis("single", match, tags)
+            exact_specificity = exact_ten_god_specificity_basis("single", match)
+            basis = {
+                "order": [
+                    "month_command",
+                    "gyeokguk_role",
+                    "gyeokguk_formation",
+                    "day_master_strength",
+                    "climate",
+                    "protrusion",
+                    "rooting",
+                    "position",
+                    "hidden_stems",
+                    "branch_interactions",
+                    "flow_activation",
+                ],
+                "month_command": {
+                    "state": match.month_fit_state,
+                    "label": month_fit_label_for_selection(match.month_fit_state),
+                    "score": month_fit_attention_weight(match.month_fit_state),
+                },
+                "gyeokguk_role": {
+                    "state": match.role_grade,
+                    "label": match.pattern_effect_state,
+                    "score": single_role_attention_weight(match.role_grade),
+                },
+                "gyeokguk_formation": {
+                    "state": profile.formation_state,
+                    "clarity_state": profile.clarity_state,
+                    "label": formation_label_for_selection(profile.formation_state),
+                    "score": formation_attention_weight(profile.formation_state),
+                },
+                "day_master_strength": {
+                    "label": compact_basis_label(match.day_master_strength_context),
+                    "score": strength_attention_from_label(match.day_master_strength_context),
+                },
+                "climate": {
+                    "label": compact_basis_label(match.climate_context),
+                    "score": climate_attention_from_label(match.climate_context),
+                },
+                "protrusion": {
+                    "label": protrusion_label,
+                    "score": protrusion_score,
+                },
+                "rooting": {
+                    "label": rooting_label,
+                    "score": rooting_score,
+                },
+                "position": {
+                    "label": position_label,
+                    "score": position_score,
+                },
+                "hidden_stems": {
+                    "label": hidden_label,
+                    "score": hidden_score,
+                },
+                "branch_interactions": {
+                    "label": branch_label,
+                    "score": branch_score,
+                },
+                "flow_activation": {
+                    "label": "대운·세운 발동성",
+                    "score": timing_score,
+                },
+                "context_score_delta": context_delta,
+                "classical_action_score": classical_attention_weight(tags),
+                "component_classical_action_score": 0,
+                "pattern_center_relevance": pattern_center_relevance("single", match),
+                "ten_god_operation_depth": operation_depth,
+                "exact_ten_god_specificity": exact_specificity,
+            }
+            return basis
+
+        def dual_selection_basis(match, tags: list[str], timing_score: int) -> dict[str, object]:
+            position_score, position_label = position_attention_from_context(match.position_context)
+            protrusion_score, protrusion_label = protrusion_attention_from_position_context(match.position_context)
+            rooting_score, rooting_label = rooting_attention_from_position_context(match.position_context)
+            hidden_score, hidden_label = hidden_attention_from_position_context(match.position_context)
+            branch_score, branch_label = branch_attention_from_context(match.branch_relation_context)
+            context_delta = context_score_delta_from_basis(match.basis_codes, "gyeokguk_dual_context_score_delta:")
+            component_tags = match_component_classical_action_tags(match)
+            operation_depth = ten_god_operation_depth_basis("dual", match, tags, component_tags)
+            exact_specificity = exact_ten_god_specificity_basis("dual", match)
+            basis = {
+                "order": [
+                    "month_command",
+                    "gyeokguk_chain",
+                    "gyeokguk_formation",
+                    "day_master_strength",
+                    "climate",
+                    "protrusion",
+                    "rooting",
+                    "position",
+                    "hidden_stems",
+                    "branch_interactions",
+                    "flow_activation",
+                ],
+                "month_command": {
+                    "state": match.month_fit_state,
+                    "label": month_fit_label_for_selection(match.month_fit_state),
+                    "score": month_fit_attention_weight(match.month_fit_state),
+                },
+                "gyeokguk_chain": {
+                    "state": match.chain_grade,
+                    "label": match.pattern_combination_state,
+                    "score": dual_chain_attention_weight(match.chain_grade),
+                },
+                "gyeokguk_formation": {
+                    "state": profile.formation_state,
+                    "clarity_state": profile.clarity_state,
+                    "label": formation_label_for_selection(profile.formation_state),
+                    "score": formation_attention_weight(profile.formation_state),
+                },
+                "day_master_strength": {
+                    "label": compact_basis_label(match.day_master_strength_context),
+                    "score": strength_attention_from_label(match.day_master_strength_context),
+                },
+                "climate": {
+                    "label": compact_basis_label(match.climate_context),
+                    "score": climate_attention_from_label(match.climate_context),
+                },
+                "protrusion": {
+                    "label": protrusion_label,
+                    "score": protrusion_score,
+                },
+                "rooting": {
+                    "label": rooting_label,
+                    "score": rooting_score,
+                },
+                "position": {
+                    "label": position_label,
+                    "score": position_score,
+                },
+                "hidden_stems": {
+                    "label": hidden_label,
+                    "score": hidden_score,
+                },
+                "branch_interactions": {
+                    "label": branch_label,
+                    "score": branch_score,
+                },
+                "flow_activation": {
+                    "label": "대운·세운 발동성",
+                    "score": timing_score,
+                },
+                "context_score_delta": context_delta,
+                "classical_action_score": classical_attention_weight(tags),
+                "component_classical_action_score": component_classical_attention_weight(component_tags),
+                "pattern_center_relevance": pattern_center_relevance("dual", match),
+                "ten_god_operation_depth": operation_depth,
+                "exact_ten_god_specificity": exact_specificity,
+            }
+            return basis
+
+        def basis_attention_total(basis: dict[str, object]) -> int:
+            total = 0
+            for key in list(basis.get("order", []) or []):
+                item = basis.get(key)
+                if isinstance(item, dict):
+                    total += int(item.get("score") or 0)
+            total += int(basis.get("classical_action_score") or 0)
+            total += int(basis.get("component_classical_action_score") or 0)
+            pattern_relevance = basis.get("pattern_center_relevance")
+            if isinstance(pattern_relevance, dict):
+                total += int(pattern_relevance.get("score") or 0)
+            operation_depth = basis.get("ten_god_operation_depth")
+            if isinstance(operation_depth, dict):
+                total += int(operation_depth.get("score") or 0)
+            exact_specificity = basis.get("exact_ten_god_specificity")
+            if isinstance(exact_specificity, dict):
+                total += int(exact_specificity.get("score") or 0)
+            total += max(0, min(16, abs(int(basis.get("context_score_delta") or 0))))
+            return total
+
+        EVENT_AXIS_LABELS = {
+            "money": "돈",
+            "asset": "자산",
+            "income": "수입",
+            "work": "직장",
+            "authority": "권한",
+            "people": "사람",
+            "partner": "배우자",
+            "document": "문서",
+            "responsibility": "책임",
+            "evaluation": "평가",
+            "output": "결과물",
+            "personality": "성격",
+            "tendency": "경향",
+            "judgment": "판단 방식",
+            "timing": "시기",
+        }
+
+        DOMAIN_EVENT_AXES = {
+            "money": ["money", "income", "asset"],
+            "career": ["work", "authority", "responsibility"],
+            "relationship": ["people"],
+            "marriage": ["partner", "money", "responsibility"],
+            "personality": ["personality", "tendency", "judgment"],
+            "reputation": ["evaluation", "authority"],
+            "timing": ["timing"],
+        }
+
+        TAG_EVENT_AXES = {
+            "siksang_saengjae": ["output", "income", "money"],
+            "jaesaenggwan": ["money", "responsibility", "evaluation"],
+            "jaeseong_generates_gwanseong": ["money", "work", "responsibility"],
+            "gwanin_sangsaeng": ["work", "document", "evaluation"],
+            "salin_sangsaeng": ["responsibility", "document", "work"],
+            "gwanseong_generates_inseong": ["responsibility", "document", "evaluation"],
+            "siksin_jesal": ["output", "responsibility", "work"],
+            "sanggwan_gyeongwan": ["evaluation", "work", "authority"],
+            "siksang_controls_gwanseong": ["output", "authority", "evaluation"],
+            "jaegeukin": ["money", "document", "asset"],
+            "wealth_controls_resource": ["money", "document", "tendency"],
+            "bigeop_jaengjae": ["money", "people", "asset"],
+            "bigeop_controls_wealth": ["people", "money", "asset"],
+            "gwanseong_controls_bigeop": ["work", "responsibility", "people"],
+            "inseong_dosik": ["document", "output", "tendency"],
+            "inseong_controls_output": ["document", "output", "tendency"],
+            "jaesaengsal": ["money", "responsibility", "work"],
+            "gwansal_honhap": ["work", "responsibility", "evaluation"],
+            "gwanseong_same_group": ["work", "responsibility", "evaluation"],
+            "inbi_overload": ["personality", "document", "people"],
+            "inseong_generates_bigeop": ["document", "personality", "people"],
+            "siksang_overload": ["output", "evaluation", "work"],
+            "siksang_same_group": ["output", "evaluation", "tendency"],
+            "jaeda_sinyak_risk": ["money", "asset", "responsibility"],
+            "wealth_same_group": ["money", "asset", "income"],
+            "gwansal_overload": ["responsibility", "work", "evaluation"],
+            "bigeop_generates_siksang": ["people", "output", "work"],
+            "inseong_same_group": ["document", "personality", "tendency"],
+            "bigeop_same_group": ["people", "money"],
+        }
+
+        AXIS_STATEMENTS = {
+            "money": "금전의 발생, 분배, 손익 판단으로 드러난다.",
+            "asset": "소유권, 자산화, 공동 명의 문제로 이어질 수 있다.",
+            "income": "수입 구조와 보상 방식에 직접 연결된다.",
+            "work": "직장, 직무, 조직 안의 역할 문제로 나타난다.",
+            "authority": "권한, 결정권, 직책의 범위가 중요해진다.",
+            "people": "가까운 사람, 동업자, 지인과의 이해관계로 드러난다.",
+            "partner": "배우자와의 생활 기준, 책임 분담으로 나타난다.",
+            "document": "계약서, 자격, 문서, 명분의 안정성이 핵심이 된다.",
+            "responsibility": "책임, 압박, 맡아야 할 범위로 사건화된다.",
+            "evaluation": "평판, 인정, 공식 평가의 문제로 올라온다.",
+            "output": "기술, 결과물, 서비스, 표현물이 현실 성과의 근거가 된다.",
+            "personality": "반응 방식, 자기 기준, 사람을 대하는 태도로 드러난다.",
+            "tendency": "반복되는 선택 습관과 관심의 방향으로 이어진다.",
+            "judgment": "판단 습관, 고집, 보류, 실행 속도의 문제로 드러난다.",
+            "timing": "대운·세운에서 해당 작용이 들어올 때 사건성이 커진다.",
+        }
+
+        def event_axes_for_candidate(match, tags: list[str]) -> list[str]:
+            axes: list[str] = []
+            for tag in tags:
+                axes.extend(TAG_EVENT_AXES.get(str(tag), []))
+            for domain in list(getattr(match, "domain_priority", []) or []):
+                axes.extend(DOMAIN_EVENT_AXES.get(str(domain), []))
+            for domain in list((getattr(match, "domain_projections", {}) or {}).keys()):
+                axes.extend(DOMAIN_EVENT_AXES.get(str(domain), []))
+            return list(dict.fromkeys(axis for axis in axes if axis in EVENT_AXIS_LABELS))[:7]
+
+        def real_world_projection_payload(match, tags: list[str]) -> dict[str, object]:
+            axes = event_axes_for_candidate(match, tags)
+            domain_projections = dict(getattr(match, "domain_projections", {}) or {})
+            primary_domains = list(getattr(match, "domain_priority", []) or [])[:4]
+            return {
+                "primary_axes": axes[:4],
+                "axis_labels": [EVENT_AXIS_LABELS[axis] for axis in axes[:4]],
+                "all_axes": axes,
+                "all_axis_labels": [EVENT_AXIS_LABELS[axis] for axis in axes],
+                "axis_statements": {
+                    axis: AXIS_STATEMENTS[axis]
+                    for axis in axes
+                    if axis in AXIS_STATEMENTS
+                },
+                "primary_domains": primary_domains,
+                "domain_projections": {
+                    domain: domain_projections.get(domain, "")
+                    for domain in primary_domains
+                    if domain in domain_projections
+                },
+            }
+
+        def feature_axis_impacts_payload(
+            tags: object,
+            domains: object,
+            *,
+            source: str,
+            limit: int = 8,
+        ) -> list[dict[str, object]]:
+            tag_values = [str(tag) for tag in list(tags or []) if str(tag or "").strip()]
+            domain_values = [str(domain) for domain in list(domains or []) if str(domain or "").strip()]
+            life_axes = analysis.chart_structure.life_feature_profile.axes
+            domain_axis_keys: set[str] = set()
+            for domain in domain_values:
+                for alias in GYEOKGUK_DOMAIN_ALIASES.get(domain, (domain,)):
+                    domain_axis_keys.update(DOMAIN_AXIS_LINKS.get(alias, ()))
+            impacts: list[dict[str, object]] = []
+            seen: set[tuple[str, str]] = set()
+            for tag in tag_values:
+                effects = GYEOKGUK_CLASSICAL_AXIS_EFFECTS.get(tag, {})
+                if not effects:
+                    continue
+                ranked = sorted(effects.items(), key=lambda item: abs(float(item[1])), reverse=True)
+                for axis_key, raw_delta in ranked:
+                    if axis_key not in life_axes:
+                        continue
+                    if domain_axis_keys and axis_key not in domain_axis_keys and abs(float(raw_delta)) < 3.0:
+                        continue
+                    key = (tag, axis_key)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    axis = life_axes[axis_key]
+                    delta = float(raw_delta)
+                    impacts.append(
+                        {
+                            "source": source,
+                            "classical_tag": tag,
+                            "axis_key": axis.key,
+                            "axis_label": axis.label,
+                            "axis_category": axis.category,
+                            "current_score": axis.score,
+                            "current_strength_label": axis.strength_label,
+                            "raw_score_delta": round(delta, 2),
+                            "direction": "support" if delta >= 0 else "burden",
+                            "domain_priority": domain_values,
+                        }
+                    )
+                    if len(impacts) >= limit:
+                        return impacts
+            return impacts
+
+        def classical_action_mechanics_payload(tags: list[str]) -> dict[str, object]:
+            payload: dict[str, object] = {}
+            for tag in tags:
+                key = str(tag)
+                mechanic = CLASSICAL_ACTION_MECHANICS.get(key)
+                if not mechanic:
+                    continue
+                mechanic_text = CLASSICAL_ACTION_MECHANIC_TEXTS.get(key, {})
+                payload[key] = {
+                    "flow": str(mechanic.get("flow", "")),
+                    "disease": str(mechanic.get("disease", "")),
+                    "medicine": str(mechanic.get("medicine", "")),
+                    "events": list(mechanic.get("events", []) or []),
+                    "principle_text": str(mechanic_text.get("principle", "")),
+                    "disease_text": str(mechanic_text.get("disease", "")),
+                    "medicine_text": str(mechanic_text.get("medicine", "")),
+                }
+            return payload
+
+        def ten_god_operation_face_payload(ten_god: str) -> dict[str, object]:
+            key = str(ten_god)
+            face = TEN_GOD_OPERATION_FACE.get(key, {})
+            exact_profile = TEN_GOD_EXACT_ACTION_PROFILE.get(key, {})
+            exact_profile_domains = (
+                list(exact_profile.get("domains", []) or [])
+                if isinstance(exact_profile, dict)
+                else []
+            )
+            return {
+                "ten_god": key,
+                "label": TEN_GOD_LABELS.get(key, key),
+                "action": str(face.get("action", "")),
+                "result": str(face.get("result", "")),
+                "risk": str(face.get("risk", "")),
+                "timing": str(face.get("timing", "")),
+                "exact_nuance": str(TEN_GOD_EXACT_NUANCE.get(key, "")),
+                "exact_profile_domains": exact_profile_domains,
+            }
+
+        def operation_faces_payload(ten_gods: list[str]) -> list[dict[str, object]]:
+            seen: set[str] = set()
+            faces: list[dict[str, object]] = []
+            for ten_god in ten_gods:
+                key = str(ten_god)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                faces.append(ten_god_operation_face_payload(key))
+            return faces
+
+        def pattern_center_bridge_payload(basis_codes: list[str]) -> dict[str, object]:
+            payload = {
+                "keys": [],
+                "directions": [],
+                "patterns": [],
+            }
+            for code in basis_codes:
+                text = str(code)
+                if text.startswith("gyeokguk_dual_pattern_center_bridge:"):
+                    payload["keys"].append(text.split(":", 1)[1])
+                elif text.startswith("gyeokguk_dual_pattern_center_bridge_direction:"):
+                    payload["directions"].append(text.split(":", 1)[1])
+                elif text.startswith("gyeokguk_dual_pattern_center_bridge_pattern:"):
+                    payload["patterns"].append(text.split(":", 1)[1])
+            return {
+                key: list(dict.fromkeys(values))
+                for key, values in payload.items()
+                if values
+            }
+
+        def exact_profile_domain_basis_payload(basis_codes: list[str]) -> dict[str, object]:
+            payload: dict[str, list[str]] = {
+                "single": [],
+                "first": [],
+                "second": [],
+                "all": [],
+            }
+            prefixes = {
+                "single": "gyeokguk_action_exact_profile_domain:",
+                "first": "gyeokguk_dual_first_exact_profile_domain:",
+                "second": "gyeokguk_dual_second_exact_profile_domain:",
+            }
+            for code in basis_codes:
+                text = str(code)
+                for key, prefix in prefixes.items():
+                    if text.startswith(prefix):
+                        domain = text.split(":", 1)[1]
+                        payload[key].append(domain)
+                        payload["all"].append(domain)
+            return {
+                key: list(dict.fromkeys(values))
+                for key, values in payload.items()
+                if values
+            }
+
+        def relation_to_pattern_role_payload(ten_god: str, relation: str) -> dict[str, object]:
+            relation_key = str(relation)
+            relation_profiles = {
+                "same_group": {
+                    "role_code": "same_class_as_pattern_center",
+                    "role_label": "격국 중심과 같은 계열",
+                    "function": "격의 성격을 선명하게 하지만 과하면 편중을 만든다.",
+                    "risk": "강하면 중심이 또렷해지고, 지나치면 같은 작용이 겹쳐 병이 된다.",
+                },
+                "actor_generates_pattern": {
+                    "role_code": "source_of_pattern_center",
+                    "role_label": "격국 중심을 생하는 근거",
+                    "function": "격국 중심에 힘을 공급해 성격 조건을 받친다.",
+                    "risk": "약하면 격을 받칠 근거가 부족하고, 과하면 생하는 쪽이 소모된다.",
+                },
+                "pattern_generates_actor": {
+                    "role_code": "extension_from_pattern_center",
+                    "role_label": "격국 중심에서 뻗어 나가는 작용",
+                    "function": "격국 중심의 힘이 다른 영역으로 흘러 결과와 사건을 만든다.",
+                    "risk": "과하면 격의 중심이 새고, 약하면 결과가 밖으로 나오지 못한다.",
+                },
+                "actor_controls_pattern": {
+                    "role_code": "controller_or_breaker_of_pattern_center",
+                    "role_label": "격국 중심을 제어하는 작용",
+                    "function": "필요한 극이면 병을 다스리는 약이 되고, 불필요하면 격의 중심을 손상시킨다.",
+                    "risk": "월령과 통근이 받치지 않으면 조절이 아니라 파격으로 기울 수 있다.",
+                },
+                "pattern_controls_actor": {
+                    "role_code": "regulated_by_pattern_center",
+                    "role_label": "격국 중심의 제어를 받는 작용",
+                    "function": "격국 중심이 과한 작용을 묶어 질서를 세운다.",
+                    "risk": "대상이 약하면 제어가 억압으로 바뀌고, 과하면 통제가 어려워진다.",
+                },
+            }
+            profile = relation_profiles.get(
+                relation_key,
+                {
+                    "role_code": "conditional_relation_to_pattern_center",
+                    "role_label": "격국 중심과 조건부로 얽힌 작용",
+                    "function": "월령, 위치, 투출, 통근에 따라 작용 방향이 갈린다.",
+                    "risk": "한 가지 태그만으로 길흉을 확정하면 판단이 얕아진다.",
+                },
+            )
+            return {
+                "ten_god": str(ten_god),
+                "label": TEN_GOD_LABELS.get(str(ten_god), str(ten_god)),
+                "relation_to_pattern": relation_key,
+                **profile,
+            }
+
+        def dual_pair_function_payload(match, classical_tags: list[str], bridge_payload: dict[str, object]) -> dict[str, object]:
+            tags = {str(tag) for tag in classical_tags}
+            control_tags = {
+                "siksin_jesal",
+                "sanggwan_gyeongwan",
+                "jaegeukin",
+                "bigeop_jaengjae",
+                "inseong_dosik",
+                "siksang_controls_gwanseong",
+                "wealth_controls_resource",
+                "bigeop_controls_wealth",
+                "inseong_controls_output",
+                "gwanseong_controls_bigeop",
+            }
+            generation_tags = {
+                "siksang_saengjae",
+                "jaesaenggwan",
+                "jaesaengsal",
+                "gwanin_sangsaeng",
+                "salin_sangsaeng",
+                "jaeseong_generates_gwanseong",
+                "gwanseong_generates_inseong",
+                "bigeop_generates_siksang",
+                "inseong_generates_bigeop",
+            }
+            overload_tags = {
+                "gwansal_overload",
+                "gwansal_honhap",
+                "inbi_overload",
+                "siksang_overload",
+                "jaeda_sinyak_risk",
+            }
+            function_profiles = {
+                "constructive_chain": (
+                    "pattern_formation_expansion",
+                    "성격 조건을 넓히는 조합",
+                    "두 십신이 원인과 결론으로 이어져 격국이 현실 사건으로 뻗는다.",
+                ),
+                "supportive_chain": (
+                    "pattern_support",
+                    "성격을 보조하는 조합",
+                    "두 십신이 함께 격국 중심을 받쳐 성립 조건을 보강한다.",
+                ),
+                "medicine_chain": (
+                    "disease_medicine_regulation",
+                    "병을 다스리는 조합",
+                    "한쪽의 과한 작용을 다른 쪽이 제어하여 약으로 쓴다.",
+                ),
+                "mediated_tension_chain": (
+                    "requires_pattern_center_mediation",
+                    "격국 중심의 매개가 필요한 조합",
+                    "두 십신은 직접 부딪히지만 월령의 중심을 거치면 사건 구조가 성립한다.",
+                ),
+                "conditional_chain": (
+                    "conditional_by_force_and_position",
+                    "강약과 위치로 갈리는 조합",
+                    "같은 조합이라도 투출, 통근, 지장간, 합충형파해에 따라 길흉이 갈린다.",
+                ),
+                "risk_chain": (
+                    "pattern_break_risk",
+                    "파격 위험이 있는 조합",
+                    "한쪽 작용이 격국 중심을 흔들어 손상, 충돌, 부담으로 기울 수 있다.",
+                ),
+                "compounded_burden_chain": (
+                    "burden_amplification",
+                    "부담이 겹치는 조합",
+                    "두 십신이 함께 병으로 작동하면 파격 가능성이 커진다.",
+                ),
+                "mixed_chain": (
+                    "mixed_operation",
+                    "조건부 혼합 조합",
+                    "좋고 나쁨이 고정되지 않고 월령과 실제 힘의 배치로 다시 판정한다.",
+                ),
+            }
+            function_code, function_label, function_summary = function_profiles.get(
+                str(match.chain_grade),
+                (
+                    "mixed_operation",
+                    "조건부 혼합 조합",
+                    "좋고 나쁨이 고정되지 않고 월령과 실제 힘의 배치로 다시 판정한다.",
+                ),
+            )
+            if str(match.sequence_key) == "same_role_amplification":
+                function_code = "same_group_amplification"
+                function_label = "동류 편중 조합"
+                function_summary = "같은 계열의 장점과 병이 함께 커지므로 강약 판정이 중요하다."
+
+            if str(match.first_to_second_relation) == "first_controls_second":
+                controller = str(match.first_ten_god)
+                controlled = str(match.second_ten_god)
+            elif str(match.first_to_second_relation) == "second_controls_first":
+                controller = str(match.second_ten_god)
+                controlled = str(match.first_ten_god)
+            else:
+                controller = ""
+                controlled = ""
+
+            return {
+                "function_code": function_code,
+                "function_label": function_label,
+                "function_summary": function_summary,
+                "has_generation_axis": bool(tags & generation_tags),
+                "has_control_axis": bool(tags & control_tags),
+                "has_overload_axis": bool(tags & overload_tags),
+                "control_axis": {
+                    "controller": controller,
+                    "controller_label": TEN_GOD_LABELS.get(controller, controller) if controller else "",
+                    "controlled": controlled,
+                    "controlled_label": TEN_GOD_LABELS.get(controlled, controlled) if controlled else "",
+                    "classical_tags": sorted(tags & control_tags),
+                },
+                "generation_axis": {
+                    "classical_tags": sorted(tags & generation_tags),
+                },
+                "overload_axis": {
+                    "classical_tags": sorted(tags & overload_tags),
+                },
+                "pattern_center_mediation": bridge_payload,
+            }
+
+        def dual_operation_assessment_payload(match, classical_tags: list[str], bridge_payload: dict[str, object]) -> dict[str, object]:
+            first_role = relation_to_pattern_role_payload(
+                str(match.first_ten_god),
+                str(match.first_relation_to_pattern),
+            )
+            second_role = relation_to_pattern_role_payload(
+                str(match.second_ten_god),
+                str(match.second_relation_to_pattern),
+            )
+            primary_actor = str(match.primary_actor)
+            secondary_actor = str(match.secondary_actor)
+            return {
+                "pattern_center": str(match.pattern_ten_god),
+                "pattern_center_label": TEN_GOD_LABELS.get(str(match.pattern_ten_god), str(match.pattern_ten_god)),
+                "first_role_in_pattern": first_role,
+                "second_role_in_pattern": second_role,
+                "first_to_second_relation": str(match.first_to_second_relation),
+                "pair_function": dual_pair_function_payload(match, classical_tags, bridge_payload),
+                "component_single_actions": {
+                    "first_classical_tags": list(
+                        getattr(match, "first_single_classical_action_tags", []) or extract_classical_action_tags(
+                            "gyeokguk_dual_first_single_classical_action:",
+                            match.basis_codes,
+                        )
+                    ),
+                    "second_classical_tags": list(
+                        getattr(match, "second_single_classical_action_tags", []) or extract_classical_action_tags(
+                            "gyeokguk_dual_second_single_classical_action:",
+                            match.basis_codes,
+                        )
+                    ),
+                    "pair_classical_tags": list(classical_tags),
+                },
+                "primary_actor": primary_actor,
+                "primary_actor_label": TEN_GOD_LABELS.get(primary_actor, primary_actor),
+                "secondary_actor": secondary_actor,
+                "secondary_actor_label": TEN_GOD_LABELS.get(secondary_actor, secondary_actor),
+                "actor_hierarchy_logic": str(match.actor_hierarchy_logic),
+                "pattern_combination_state": str(match.pattern_combination_state),
+                "combination_resolution_state": str(match.combination_resolution_state),
+                "combination_resolution_logic": str(match.combination_resolution_logic),
+                "chain_grade": str(match.chain_grade),
+                "sequence_key": str(match.sequence_key),
+                "exact_pair_axis": {
+                    "exact_pair_key": str(match.exact_pair_key),
+                    "exact_pair_category": str(match.exact_pair_category),
+                    "exact_pair_name": str(match.exact_pair_name),
+                    "exact_pair_effect": str(match.exact_pair_effect),
+                    "exact_pair_risk": str(match.exact_pair_risk),
+                    "exact_pair_timing": str(match.exact_pair_timing),
+                },
+                "disease_medicine_axis": {
+                    "disease_medicine_logic": str(match.disease_medicine_logic),
+                    "pattern_combination_state": str(match.pattern_combination_state),
+                    "combination_resolution_state": str(match.combination_resolution_state),
+                    "combination_resolution_logic": str(match.combination_resolution_logic),
+                    "chain_nature": str(match.chain_nature),
+                    "actor_hierarchy_logic": str(match.actor_hierarchy_logic),
+                },
+                "interaction_judgment": dict(match.interaction_judgment),
+                "visibility_axis": dict(match.visibility_interaction),
+                "timing_order": {
+                    "first_then_second": str(match.first_then_second_activation),
+                    "second_then_first": str(match.second_then_first_activation),
+                    "timing_activation": str(match.timing_activation),
+                    "activation_order_profile": dict(getattr(match, "activation_order_profile", {}) or {}),
+                    "event_manifestations": dict(match.event_manifestations),
+                },
+                "domain_axis": {
+                    "domain_priority": list(match.domain_priority),
+                    "domain_projections": dict(match.domain_projections),
+                    "event_manifestations": dict(match.event_manifestations),
+                },
+                "context_axis": {
+                    "context_judgment_state": str(match.context_judgment_state),
+                    "context_judgment_summary": str(match.context_judgment_summary),
+                    "context_judgment_path": list(match.context_judgment_path),
+                },
+            }
+
+        def single_operation_function_payload(match, classical_tags: list[str]) -> dict[str, object]:
+            role_profiles = {
+                "core": (
+                    "pattern_center",
+                    "격국 중심",
+                    "격국의 중심 작용을 직접 강화한다.",
+                    "지나치면 중심이 편중되어 병이 된다.",
+                ),
+                "core_overload": (
+                    "pattern_center_overload",
+                    "중심 과다",
+                    "격국 중심과 같은 힘이 겹쳐 작용한다.",
+                    "과하면 장점이 병으로 바뀌어 균형을 잃는다.",
+                ),
+                "source": (
+                    "source_support",
+                    "근원 보조",
+                    "격국 중심을 생하거나 받쳐 성립 근거를 만든다.",
+                    "약하면 격을 받칠 근거가 부족하다.",
+                ),
+                "support": (
+                    "pattern_support",
+                    "성격 보조",
+                    "격국의 좋은 성립 조건을 보강한다.",
+                    "과하면 보조 작용이 중심을 대신하려 한다.",
+                ),
+                "conditioned_support": (
+                    "conditional_support",
+                    "조건부 성격",
+                    "월령, 강약, 위치가 맞을 때 격의 성립을 돕는다.",
+                    "조건이 맞지 않으면 장점이 현실 사건으로 굳지 않는다.",
+                ),
+                "regulator": (
+                    "disease_medicine_regulator",
+                    "병약 조절",
+                    "과한 작용을 제어하거나 격의 병을 약으로 바꾼다.",
+                    "제어 대상이 약하면 조절이 손상으로 바뀐다.",
+                ),
+                "strong_regulator": (
+                    "strong_regulation",
+                    "강한 조절",
+                    "격국의 부담을 강하게 정리하고 질서를 세운다.",
+                    "과하면 통제가 지나쳐 생동감이 줄어든다.",
+                ),
+                "regulator_or_breaker": (
+                    "regulator_or_breaker",
+                    "조절·파격 경계",
+                    "필요하면 약이 되지만 불필요하면 격국 중심을 친다.",
+                    "월령과 통근을 보지 않으면 길흉 판단이 뒤집힌다.",
+                ),
+                "breaker_or_medicine": (
+                    "breaker_or_medicine",
+                    "파격·약성 경계",
+                    "격을 치는 작용이지만 과한 중심을 덜어 내면 약이 된다.",
+                    "중심이 약한데 들어오면 파격으로 기운다.",
+                ),
+                "breaker": (
+                    "pattern_breaker",
+                    "파격 위험",
+                    "격국 중심을 직접 흔들거나 제어한다.",
+                    "강하면 손상, 충돌, 명분 훼손으로 나타난다.",
+                ),
+                "danger": (
+                    "danger_pressure",
+                    "강한 파격 위험",
+                    "격국의 핵심 조건을 거칠게 압박한다.",
+                    "대운·세운에서 발동되면 사건성이 커진다.",
+                ),
+                "burden": (
+                    "pattern_burden",
+                    "부담 작용",
+                    "격국 성립에 부담을 더한다.",
+                    "해소하는 약이 없으면 결핍보다 부담이 먼저 드러난다.",
+                ),
+                "mixed": (
+                    "mixed_operation",
+                    "혼합 작용",
+                    "좋고 나쁨이 고정되지 않고 조건에 따라 갈린다.",
+                    "투출, 통근, 위치, 합충형파해를 함께 보아야 한다.",
+                ),
+            }
+            function_code, function_label, function_summary, risk_summary = role_profiles.get(
+                str(match.role_grade),
+                (
+                    "conditional_operation",
+                    "조건부 작용",
+                    "월령, 격국, 실제 힘의 배치에 따라 작용 방향이 갈린다.",
+                    "한 가지 십신명만으로 판단하면 실제 사건을 놓친다.",
+                ),
+            )
+            return {
+                "function_code": function_code,
+                "function_label": function_label,
+                "function_summary": function_summary,
+                "risk_summary": risk_summary,
+                "role_grade": str(match.role_grade),
+                "pattern_effect_state": str(match.pattern_effect_state),
+                "action_nature": str(match.action_nature),
+                "classical_tags": list(classical_tags),
+                "has_critical_lens": any(
+                    str(code).startswith("gyeokguk_single_critical_action:")
+                    for code in list(getattr(match, "basis_codes", []) or [])
+                ),
+            }
+
+        def single_operation_assessment_payload(match, classical_tags: list[str]) -> dict[str, object]:
+            acting_role = relation_to_pattern_role_payload(
+                str(match.acting_ten_god),
+                str(match.relation_to_pattern),
+            )
+            acting_ten_god = str(match.acting_ten_god)
+            pattern_center = str(profile.primary_ten_god)
+            return {
+                "pattern_center": pattern_center,
+                "pattern_center_label": TEN_GOD_LABELS.get(pattern_center, pattern_center),
+                "acting_operation_face": ten_god_operation_face_payload(acting_ten_god),
+                "pattern_center_operation_face": ten_god_operation_face_payload(pattern_center),
+                "acting_role_in_pattern": acting_role,
+                "single_function": single_operation_function_payload(match, classical_tags),
+                "role_axis": {
+                    "role_grade": str(match.role_grade),
+                    "action_nature": str(match.action_nature),
+                    "center_effect": str(match.center_effect),
+                    "role_in_pattern_logic": str(match.role_in_pattern_logic),
+                },
+                "disease_medicine_axis": {
+                    "excess_disease": str(match.excess_disease),
+                    "deficiency_gap": str(match.deficiency_gap),
+                    "pattern_effect_state": str(match.pattern_effect_state),
+                    "pattern_resolution_state": str(match.pattern_resolution_state),
+                    "pattern_resolution_logic": str(match.pattern_resolution_logic),
+                },
+                "visibility_axis": {
+                    "protrusion_effect": str(match.protrusion_effect),
+                    "hidden_effect": str(match.hidden_effect),
+                    "rooting_effect": str(match.rooting_effect),
+                    "unrooted_effect": str(match.unrooted_effect),
+                },
+                "timing_axis": {
+                    "timing_activation": str(match.timing_activation),
+                    "timing_hits": single_action_timing_hits(match),
+                    "event_manifestations": dict(match.event_manifestations),
+                },
+                "domain_axis": {
+                    "domain_priority": list(match.domain_priority),
+                    "domain_projections": dict(match.domain_projections),
+                    "event_manifestations": dict(match.event_manifestations),
+                },
+                "context_axis": {
+                    "context_judgment_state": str(match.context_judgment_state),
+                    "context_judgment_summary": str(match.context_judgment_summary),
+                    "context_judgment_path": list(match.context_judgment_path),
+                },
+            }
+
+        def single_center_candidate(match) -> dict[str, object]:
+            timing_hits = single_action_timing_hits(match, limit=1)
+            timing_score = int(timing_hits[0]["activation_score"]) if timing_hits else 0
+            tags = match_classical_action_tags(match, "gyeokguk_single_classical_action:")
+            dedupe_tags = center_dedupe_tags(tags)
+            center_timing_score = center_flow_activation_score(timing_score)
+            basis = single_selection_basis(match, tags, center_timing_score)
+            raw_basis = single_selection_basis(match, tags, timing_score)
+            score = int(
+                round(
+                    match.presence_score * 0.34
+                    + basis_attention_total(basis) * 0.68
+                    + context_attention_weight(getattr(match, "context_judgment_state", ""))
+                    + center_specificity_adjustment(tags)
+                )
+            )
+            reasons = center_reason_parts(
+                month_fit_state=match.month_fit_state,
+                context_state=getattr(match, "context_judgment_state", ""),
+                tags=tags,
+                timing_score=timing_score,
+                relation_text="단일 십신이 격국 중심을 직접 건드림",
+            )
+            selection_role = selection_role_for_candidate("single", match, tags)
+            ten_god_label = TEN_GOD_LABELS.get(match.acting_ten_god, match.acting_ten_god)
+            action_title = (
+                str(match.action_nature)
+                if str(match.action_nature).startswith(str(ten_god_label))
+                else f"{ten_god_label} {match.action_nature}"
+            )
+            return {
+                "source": "single",
+                "match": match,
+                "score": score,
+                "selection_role": selection_role,
+                "tags": tags,
+                "component_tags": [],
+                "dedupe_tags": sorted(dedupe_tags),
+                "signature": tuple(tags[:2] or [match.action_key]),
+                "title": action_title,
+                "reason": reasons,
+                "timing_score": timing_score,
+                "center_timing_score": center_timing_score,
+                "selection_basis": basis,
+                "raw_selection_basis": raw_basis,
+            }
+
+        def dual_center_candidate(match) -> dict[str, object]:
+            timing_hits = dual_action_timing_hits(match, limit=1)
+            timing_score = int(timing_hits[0]["activation_score"]) if timing_hits else 0
+            tags = match_classical_action_tags(match, "gyeokguk_dual_classical_action:")
+            component_tags = match_component_classical_action_tags(match)
+            dedupe_tags = center_dedupe_tags([*tags, *component_tags])
+            center_timing_score = center_flow_activation_score(timing_score)
+            basis = dual_selection_basis(match, tags, center_timing_score)
+            raw_basis = dual_selection_basis(match, tags, timing_score)
+            score = int(
+                round(
+                    match.presence_score * 0.32
+                    + basis_attention_total(basis) * 0.7
+                    + context_attention_weight(getattr(match, "context_judgment_state", ""))
+                    + center_specificity_adjustment(tags)
+                )
+            )
+            reasons = center_reason_parts(
+                month_fit_state=match.month_fit_state,
+                context_state=getattr(match, "context_judgment_state", ""),
+                tags=tags,
+                timing_score=timing_score,
+                relation_text="두 십신의 생극 관계가 하나의 사건 구조를 이룸",
+            )
+            selection_role = selection_role_for_candidate("dual", match, tags)
+            return {
+                "source": "dual",
+                "match": match,
+                "score": score,
+                "selection_role": selection_role,
+                "tags": tags,
+                "component_tags": component_tags,
+                "dedupe_tags": sorted(dedupe_tags),
+                "signature": dual_pair_center_signature(match),
+                "title": match.exact_pair_name,
+                "reason": reasons,
+                "timing_score": timing_score,
+                "center_timing_score": center_timing_score,
+                "selection_basis": basis,
+                "raw_selection_basis": raw_basis,
+            }
+
+        def all_center_core_action_candidates() -> list[dict[str, object]]:
+            candidates = [
+                *(single_center_candidate(match) for match in profile.ten_god_action_matches),
+                *(dual_center_candidate(match) for match in profile.dual_ten_god_action_matches),
+            ]
+            candidates.sort(
+                key=lambda item: (
+                    -int(item["score"]),
+                    0 if item["source"] == "dual" else 1,
+                    str(item["title"]),
+                )
+            )
+            return candidates
+
+        def center_core_action_candidates(limit: int = 3) -> list[dict[str, object]]:
+            candidates = all_center_core_action_candidates()
+
+            def preserve_single_pattern_action(selected_items: list[dict[str, object]]) -> list[dict[str, object]]:
+                if limit <= 1 or any(item["source"] == "single" for item in selected_items):
+                    return selected_items
+                if not selected_items:
+                    return selected_items
+
+                selected_tags = {
+                    str(tag)
+                    for item in selected_items
+                    for tag in list(item.get("dedupe_tags", []) or [])
+                }
+                selected_signatures = {tuple(item["signature"]) for item in selected_items}
+                lowest_selected_score = min(int(item["score"]) for item in selected_items)
+                fallback_single: dict[str, object] | None = None
+                for candidate in candidates:
+                    if candidate["source"] != "single":
+                        continue
+                    candidate_tags = {str(tag) for tag in list(candidate.get("dedupe_tags", []) or [])}
+                    candidate_signature = tuple(candidate["signature"])
+                    if candidate_signature in selected_signatures:
+                        continue
+                    candidate_relevance = (
+                        candidate.get("selection_basis", {})
+                        .get("pattern_center_relevance", {})
+                        if isinstance(candidate.get("selection_basis"), dict)
+                        else {}
+                    )
+                    is_core_single = (
+                        isinstance(candidate_relevance, dict)
+                        and (
+                            bool(candidate_relevance.get("direct_center_actor"))
+                            or bool(candidate_relevance.get("same_group_as_center"))
+                        )
+                    )
+                    if is_core_single and int(candidate["score"]) >= lowest_selected_score - 70:
+                        if fallback_single is None or int(candidate["score"]) > int(fallback_single["score"]):
+                            fallback_single = candidate
+                    if not is_core_single:
+                        continue
+                    if center_candidate_repeats_existing(candidate_tags, selected_tags):
+                        continue
+                    if int(candidate["score"]) < lowest_selected_score - 35:
+                        continue
+                    adjusted = list(selected_items)
+                    adjusted[-1] = candidate
+                    adjusted.sort(
+                        key=lambda item: (
+                            -int(item["score"]),
+                            0 if item["source"] == "single" else 1,
+                            str(item["title"]),
+                        )
+                    )
+                    return adjusted[:limit]
+                if fallback_single is not None:
+                    adjusted = list(selected_items)
+                    fallback = dict(fallback_single)
+                    fallback["selection_adjusted_score"] = int(fallback["score"])
+                    fallback["selection_overlap_penalty"] = 0
+                    adjusted[-1] = fallback
+                    adjusted.sort(
+                        key=lambda item: (
+                            -int(item["score"]),
+                            0 if item["source"] == "dual" else 1,
+                            str(item["title"]),
+                        )
+                    )
+                    return adjusted[:limit]
+                return selected_items
+
+            def candidate_pattern_relevance(candidate: dict[str, object]) -> dict[str, object]:
+                basis = candidate.get("selection_basis", {})
+                if not isinstance(basis, dict):
+                    return {}
+                relevance = basis.get("pattern_center_relevance", {})
+                return relevance if isinstance(relevance, dict) else {}
+
+            def candidate_selection_role_code(candidate: dict[str, object]) -> str:
+                role = candidate.get("selection_role", {})
+                if not isinstance(role, dict):
+                    return ""
+                return str(role.get("code", "") or "")
+
+            def candidate_has_direct_center(candidate: dict[str, object]) -> bool:
+                relevance = candidate_pattern_relevance(candidate)
+                return bool(relevance.get("direct_center_actor")) or bool(relevance.get("same_group_as_center"))
+
+            def candidate_has_pattern_bridge(candidate: dict[str, object]) -> bool:
+                relevance = candidate_pattern_relevance(candidate)
+                return bool(relevance.get("pattern_center_bridge"))
+
+            def candidate_is_primary_center_flow(candidate: dict[str, object]) -> bool:
+                role_code = candidate_selection_role_code(candidate)
+                tags = {str(tag) for tag in list(candidate.get("tags", []) or [])}
+                return (
+                    candidate_has_direct_center(candidate)
+                    and role_code == "primary"
+                    and bool(tags & SUPPORT_CLASSICAL_ACTION_TAGS)
+                )
+
+            def candidate_is_bridge_medicine(candidate: dict[str, object]) -> bool:
+                basis = candidate.get("selection_basis", {})
+                operation_depth = (
+                    basis.get("ten_god_operation_depth", {})
+                    if isinstance(basis, dict)
+                    else {}
+                )
+                return (
+                    candidate_has_pattern_bridge(candidate)
+                    and candidate_selection_role_code(candidate) == "primary"
+                    and isinstance(operation_depth, dict)
+                    and str(operation_depth.get("grade_state", "")) == "medicine_chain"
+                )
+
+            def candidate_is_bridge_caution(candidate: dict[str, object]) -> bool:
+                return candidate_has_pattern_bridge(candidate) and candidate_selection_role_code(candidate) == "caution"
+
+            def candidate_is_single_center(candidate: dict[str, object]) -> bool:
+                return str(candidate.get("source", "")) == "single" and candidate_has_direct_center(candidate)
+
+            def candidate_with_selection_defaults(candidate: dict[str, object]) -> dict[str, object]:
+                item = dict(candidate)
+                item.setdefault("selection_adjusted_score", int(item["score"]))
+                item.setdefault("selection_overlap_penalty", 0)
+                return item
+
+            def best_candidate(predicate) -> dict[str, object] | None:
+                matches = [candidate for candidate in candidates if predicate(candidate)]
+                if not matches:
+                    return None
+                matches.sort(
+                    key=lambda item: (
+                        -int(item["score"]),
+                        0 if item["source"] == "dual" else 1,
+                        str(item["title"]),
+                    )
+                )
+                return candidate_with_selection_defaults(matches[0])
+
+            def balance_center_action_roles(selected_items: list[dict[str, object]]) -> list[dict[str, object]]:
+                if limit < 3:
+                    return selected_items
+                balanced: list[dict[str, object]] = []
+                seen_signatures_for_balance: set[tuple[object, ...]] = set()
+                seen_raw_tags_for_balance: set[str] = set()
+
+                def add(candidate: dict[str, object] | None) -> None:
+                    if candidate is None:
+                        return
+                    signature = tuple(candidate["signature"])
+                    if signature in seen_signatures_for_balance:
+                        return
+                    raw_tags = {str(tag) for tag in list(candidate.get("tags", []) or [])}
+                    if raw_tags:
+                        existing_tag_sets = [
+                            {str(tag) for tag in list(item.get("tags", []) or [])}
+                            for item in balanced
+                        ]
+                        if any(raw_tags <= existing_tags for existing_tags in existing_tag_sets if existing_tags):
+                            return
+                        if any(existing_tags < raw_tags for existing_tags in existing_tag_sets if existing_tags):
+                            balanced[:] = [
+                                item
+                                for item in balanced
+                                if not (
+                                    {str(tag) for tag in list(item.get("tags", []) or [])}
+                                    and {str(tag) for tag in list(item.get("tags", []) or [])} < raw_tags
+                                )
+                            ]
+                            seen_signatures_for_balance.clear()
+                            seen_signatures_for_balance.update(tuple(item["signature"]) for item in balanced)
+                            seen_raw_tags_for_balance.clear()
+                            seen_raw_tags_for_balance.update(
+                                str(tag)
+                                for item in balanced
+                                for tag in list(item.get("tags", []) or [])
+                            )
+                    seen_signatures_for_balance.add(signature)
+                    seen_raw_tags_for_balance.update(raw_tags)
+                    balanced.append(candidate_with_selection_defaults(candidate))
+
+                add(best_candidate(candidate_is_bridge_medicine))
+                add(best_candidate(candidate_is_primary_center_flow))
+                add(best_candidate(candidate_is_bridge_caution))
+                add(best_candidate(candidate_is_single_center))
+
+                for candidate in [*selected_items, *candidates]:
+                    if len(balanced) >= limit:
+                        break
+                    add(candidate)
+
+                return balanced[:limit] if balanced else selected_items
+
+            def overlap_penalty(candidate_tags: set[str], seen_tags: set[str], selected_count: int) -> int:
+                if not candidate_tags:
+                    return 12 if selected_count else 0
+                overlap = candidate_tags & seen_tags
+                if not overlap:
+                    return 0
+                new_tags = candidate_tags - seen_tags
+                if not new_tags:
+                    return 70
+                return min(54, len(overlap) * 16)
+
+            selected: list[dict[str, object]] = []
+            seen_tags: set[str] = set()
+            seen_signatures: set[tuple[object, ...]] = set()
+            remaining = list(candidates)
+            while remaining and len(selected) < limit:
+                ranked: list[tuple[int, int, int, str, dict[str, object], int]] = []
+                for candidate in remaining:
+                    signature = tuple(candidate["signature"])
+                    if signature in seen_signatures:
+                        continue
+                    tags = {str(tag) for tag in list(candidate.get("dedupe_tags", []) or [])}
+                    penalty = overlap_penalty(tags, seen_tags, len(selected))
+                    adjusted_score = int(candidate["score"]) - penalty
+                    ranked.append(
+                        (
+                            adjusted_score,
+                            int(candidate["score"]),
+                            0 if candidate["source"] == "dual" else 1,
+                            str(candidate["title"]),
+                            candidate,
+                            penalty,
+                        )
+                    )
+                if not ranked:
+                    break
+                ranked.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
+                selected_candidate = dict(ranked[0][4])
+                selected_candidate["selection_adjusted_score"] = int(ranked[0][0])
+                selected_candidate["selection_overlap_penalty"] = int(ranked[0][5])
+                selected.append(selected_candidate)
+                seen_signatures.add(tuple(selected_candidate["signature"]))
+                seen_tags.update(str(tag) for tag in list(selected_candidate.get("dedupe_tags", []) or []))
+                selected_signature = tuple(selected_candidate["signature"])
+                remaining = [candidate for candidate in remaining if tuple(candidate["signature"]) != selected_signature]
+            result = balance_center_action_roles(preserve_single_pattern_action(selected))
+            result.sort(
+                key=lambda item: (
+                    -int(item["score"]),
+                    0 if item["source"] == "dual" else 1,
+                    str(item["title"]),
+                )
+            )
+            return result
+
+        def flow_activated_core_action_candidates(limit: int = 5) -> list[dict[str, object]]:
+            candidates = [
+                candidate
+                for candidate in all_center_core_action_candidates()
+                if int(candidate.get("timing_score") or 0) > 0
+            ]
+            candidates.sort(
+                key=lambda item: (
+                    -int(item.get("timing_score") or 0),
+                    -int(item.get("score") or 0),
+                    0 if item.get("source") == "dual" else 1,
+                    str(item.get("title") or ""),
+                )
+            )
+            selected: list[dict[str, object]] = []
+            seen_signatures: set[tuple[object, ...]] = set()
+            for candidate in candidates:
+                signature = (
+                    str(candidate.get("source") or ""),
+                    *tuple(candidate.get("signature") or ()),
+                )
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                selected.append(candidate)
+                if len(selected) >= limit:
+                    break
+            return selected
+
+        def candidate_payload(candidate) -> dict[str, object]:
+            return {
+                "pattern": candidate.pattern,
+                "source_ten_god": candidate.source_ten_god,
+                "source_ten_god_label": TEN_GOD_LABELS.get(candidate.source_ten_god, candidate.source_ten_god),
+                "source_group": candidate.source_group,
+                "source_stem": candidate.source_stem,
+                "source_element": candidate.source_element,
+                "source_element_label": ELEMENT_LABELS.get(candidate.source_element, candidate.source_element),
+                "source_weight": candidate.source_weight,
+                "source_priority": candidate.source_priority,
+                "source_phase": candidate.source_phase,
+                "protruded": candidate.protruded,
+                "protrusion_positions": list(candidate.protrusion_positions),
+                "rooted": candidate.rooted,
+                "root_positions": list(candidate.root_positions),
+                "month_authority": candidate.month_authority,
+                "clarity_state": candidate.clarity_state,
+                "formation_state": candidate.formation_state,
+                "support_roles": list(candidate.support_roles),
+                "burden_roles": list(candidate.burden_roles),
+                "favorable_elements": list(candidate.favorable_elements),
+                "unfavorable_elements": list(candidate.unfavorable_elements),
+                "score": candidate.score,
+                "confidence": candidate.confidence,
+                "basis_codes": list(candidate.basis_codes),
+                "counter_signals": list(candidate.counter_signals),
+            }
+
+        def action_match_payload(match) -> dict[str, object]:
+            classical_tags = match_classical_action_tags(match, "gyeokguk_single_classical_action:")
+            operation_assessment = single_operation_assessment_payload(match, classical_tags)
+            return {
+                "rule_key": match.rule_key,
+                "pattern": match.pattern,
+                "acting_ten_god": match.acting_ten_god,
+                "acting_ten_god_label": TEN_GOD_LABELS.get(match.acting_ten_god, match.acting_ten_god),
+                "acting_group": match.acting_group,
+                "relation_to_pattern": match.relation_to_pattern,
+                "action_key": match.action_key,
+                "action_nature": match.action_nature,
+                "role_grade": match.role_grade,
+                "center_effect": match.center_effect,
+                "role_in_pattern_logic": match.role_in_pattern_logic,
+                "presence_state": match.presence_state,
+                "presence_score": match.presence_score,
+                "month_fit_state": match.month_fit_state,
+                "verdict": match.verdict,
+                "functional_role": match.functional_role,
+                "functional_role_label": match.functional_role_label,
+                "pattern_effect_state": match.pattern_effect_state,
+                "pattern_resolution_state": match.pattern_resolution_state,
+                "pattern_resolution_logic": match.pattern_resolution_logic,
+                "activation_context": match.activation_context,
+                "context_judgment_state": match.context_judgment_state,
+                "context_judgment_summary": match.context_judgment_summary,
+                "context_judgment_path": list(match.context_judgment_path),
+                "classical_action_tags": classical_tags,
+                "mechanic_codes": extract_mechanic_codes("gyeokguk_single_mechanic:", match.basis_codes),
+                "day_master_strength_context": match.day_master_strength_context,
+                "climate_context": match.climate_context,
+                "position_context": dict(match.position_context),
+                "branch_relation_context": dict(match.branch_relation_context),
+                "excess_disease": match.excess_disease,
+                "deficiency_gap": match.deficiency_gap,
+                "protrusion_effect": match.protrusion_effect,
+                "hidden_effect": match.hidden_effect,
+                "rooting_effect": match.rooting_effect,
+                "unrooted_effect": match.unrooted_effect,
+                "timing_activation": match.timing_activation,
+                "timing_hits": single_action_timing_hits(match),
+                "event_manifestations": dict(match.event_manifestations),
+                "domain_priority": list(match.domain_priority),
+                "expert_summary": match.expert_summary,
+                "domain_projections": dict(match.domain_projections),
+                "classical_action_mechanics": classical_action_mechanics_payload(classical_tags),
+                "operation_faces": operation_faces_payload([match.acting_ten_god]),
+                "exact_profile_domain_basis": exact_profile_domain_basis_payload(list(match.basis_codes)),
+                "single_operation_assessment": operation_assessment,
+                "judgment_order": list(match.judgment_order),
+                "basis_codes": list(match.basis_codes),
+                "counter_signals": list(match.counter_signals),
+            }
+
+        def dual_action_match_payload(match) -> dict[str, object]:
+            classical_tags = match_classical_action_tags(match, "gyeokguk_dual_classical_action:")
+            bridge_payload = pattern_center_bridge_payload(list(match.basis_codes))
+            operation_assessment = dual_operation_assessment_payload(match, classical_tags, bridge_payload)
+            return {
+                "rule_key": match.rule_key,
+                "pattern": match.pattern,
+                "pattern_ten_god": match.pattern_ten_god,
+                "pattern_ten_god_label": TEN_GOD_LABELS.get(match.pattern_ten_god, match.pattern_ten_god),
+                "pattern_group": match.pattern_group,
+                "first_ten_god": match.first_ten_god,
+                "first_ten_god_label": TEN_GOD_LABELS.get(match.first_ten_god, match.first_ten_god),
+                "first_group": match.first_group,
+                "second_ten_god": match.second_ten_god,
+                "second_ten_god_label": TEN_GOD_LABELS.get(match.second_ten_god, match.second_ten_god),
+                "second_group": match.second_group,
+                "first_relation_to_pattern": match.first_relation_to_pattern,
+                "second_relation_to_pattern": match.second_relation_to_pattern,
+                "first_to_second_relation": match.first_to_second_relation,
+                "pattern_center_bridge_profile": dict(match.pattern_center_bridge),
+                "sequence_key": match.sequence_key,
+                "chain_grade": match.chain_grade,
+                "chain_nature": match.chain_nature,
+                "presence_state": match.presence_state,
+                "presence_score": match.presence_score,
+                "month_fit_state": match.month_fit_state,
+                "verdict": match.verdict,
+                "functional_role": match.functional_role,
+                "functional_role_label": match.functional_role_label,
+                "pattern_combination_state": match.pattern_combination_state,
+                "combination_resolution_state": match.combination_resolution_state,
+                "combination_resolution_logic": match.combination_resolution_logic,
+                "exact_pair_key": match.exact_pair_key,
+                "exact_pair_category": match.exact_pair_category,
+                "exact_pair_name": match.exact_pair_name,
+                "exact_pair_effect": match.exact_pair_effect,
+                "exact_pair_risk": match.exact_pair_risk,
+                "exact_pair_timing": match.exact_pair_timing,
+                "activation_context": match.activation_context,
+                "context_judgment_state": match.context_judgment_state,
+                "context_judgment_summary": match.context_judgment_summary,
+                "context_judgment_path": list(match.context_judgment_path),
+                "classical_action_tags": classical_tags,
+                "mechanic_codes": extract_mechanic_codes("gyeokguk_dual_mechanic:", match.basis_codes),
+                "day_master_strength_context": match.day_master_strength_context,
+                "climate_context": match.climate_context,
+                "position_context": dict(match.position_context),
+                "branch_relation_context": dict(match.branch_relation_context),
+                "primary_actor": match.primary_actor,
+                "secondary_actor": match.secondary_actor,
+                "actor_hierarchy_logic": match.actor_hierarchy_logic,
+                "disease_medicine_logic": match.disease_medicine_logic,
+                "first_then_second_activation": match.first_then_second_activation,
+                "second_then_first_activation": match.second_then_first_activation,
+                "timing_activation": match.timing_activation,
+                "activation_order_profile": dict(match.activation_order_profile),
+                "timing_hits": dual_action_timing_hits(match),
+                "event_manifestations": dict(match.event_manifestations),
+                "interaction_judgment": dict(match.interaction_judgment),
+                "visibility_interaction": dict(match.visibility_interaction),
+                "domain_priority": list(match.domain_priority),
+                "expert_summary": match.expert_summary,
+                "domain_projections": dict(match.domain_projections),
+                "classical_action_mechanics": classical_action_mechanics_payload(classical_tags),
+                "operation_faces": operation_faces_payload([match.first_ten_god, match.second_ten_god]),
+                "exact_profile_domain_basis": exact_profile_domain_basis_payload(list(match.basis_codes)),
+                "pattern_center_bridge": {
+                    **bridge_payload,
+                    **({"profile": dict(match.pattern_center_bridge)} if getattr(match, "pattern_center_bridge", {}) else {}),
+                },
+                "dual_operation_assessment": operation_assessment,
+                "judgment_order": list(match.judgment_order),
+                "basis_codes": list(match.basis_codes),
+                "counter_signals": list(match.counter_signals),
+            }
+
+        def basis_step_payload(basis: dict[str, object], raw_basis: dict[str, object], key: str) -> dict[str, object]:
+            item = basis.get(key)
+            if not isinstance(item, dict):
+                return {}
+            raw_item = raw_basis.get(key)
+            payload = dict(item)
+            if isinstance(raw_item, dict):
+                payload["raw_score"] = int(raw_item.get("score") or 0)
+                payload["raw_label"] = str(raw_item.get("label") or raw_item.get("state") or "")
+            return payload
+
+        def eventization_conditions_payload(candidate: dict[str, object]) -> dict[str, object]:
+            basis = dict(candidate["selection_basis"])
+            raw_basis = dict(candidate["raw_selection_basis"])
+            match = candidate["match"]
+            source = str(candidate["source"])
+            gyeokguk_step_key = "gyeokguk_chain" if source == "dual" else "gyeokguk_role"
+            ordered_steps = list(basis.get("order", []) or [])
+            raw_flow_activation = dict(raw_basis.get("flow_activation", {}) or {})
+            raw_flow_activation["raw_score"] = int(raw_flow_activation.get("score") or 0)
+            return {
+                "judgment_order": list(getattr(match, "judgment_order", []) or []),
+                "ordered_steps": ordered_steps,
+                "monthly_authority": {
+                    "pattern": profile.primary_pattern,
+                    "month_branch": profile.month_branch,
+                    "month_branch_label": BRANCH_LABELS.get(profile.month_branch, profile.month_branch),
+                    "month_command_ten_god": profile.month_command_ten_god,
+                    "month_command_label": TEN_GOD_LABELS.get(
+                        profile.month_command_ten_god,
+                        profile.month_command_ten_god,
+                    ),
+                    "active_hidden_ten_god": profile.active_hidden_ten_god,
+                    "active_hidden_ten_god_label": TEN_GOD_LABELS.get(
+                        profile.active_hidden_ten_god,
+                        profile.active_hidden_ten_god,
+                    ),
+                },
+                "month_command": basis_step_payload(basis, raw_basis, "month_command"),
+                "gyeokguk_step_key": gyeokguk_step_key,
+                "gyeokguk_step": basis_step_payload(basis, raw_basis, gyeokguk_step_key),
+                "gyeokguk_formation": basis_step_payload(basis, raw_basis, "gyeokguk_formation"),
+                "day_master_strength": basis_step_payload(basis, raw_basis, "day_master_strength"),
+                "climate": basis_step_payload(basis, raw_basis, "climate"),
+                "protrusion": basis_step_payload(basis, raw_basis, "protrusion"),
+                "rooting": basis_step_payload(basis, raw_basis, "rooting"),
+                "position": basis_step_payload(basis, raw_basis, "position"),
+                "hidden_stems": basis_step_payload(basis, raw_basis, "hidden_stems"),
+                "branch_interactions": basis_step_payload(basis, raw_basis, "branch_interactions"),
+                "flow_activation": basis_step_payload(basis, raw_basis, "flow_activation"),
+                "raw_flow_activation": raw_flow_activation,
+                "selection_scoring": {
+                    "center_score": int(candidate["score"]),
+                    "selection_adjusted_score": int(candidate.get("selection_adjusted_score", candidate["score"])),
+                    "selection_overlap_penalty": int(candidate.get("selection_overlap_penalty", 0)),
+                    "context_score_delta": int(basis.get("context_score_delta") or 0),
+                    "classical_action_score": int(basis.get("classical_action_score") or 0),
+                    "component_classical_action_score": int(basis.get("component_classical_action_score") or 0),
+                    "ten_god_operation_depth_score": int(
+                        dict(basis.get("ten_god_operation_depth", {}) or {}).get("score") or 0
+                    ),
+                },
+            }
+
+        def operation_hierarchy_payload(
+            source: str,
+            match,
+            match_payload: dict[str, object],
+            candidate: dict[str, object],
+        ) -> dict[str, object]:
+            event_conditions = eventization_conditions_payload(candidate)
+            real_world_focus = real_world_projection_payload(match, list(candidate["tags"]))
+            if source == "single":
+                assessment = dict(match_payload.get("single_operation_assessment", {}) or {})
+                return {
+                    "main_operation": {
+                        "kind": "single",
+                        "title": str(candidate["title"]),
+                        "acting_ten_god": str(match_payload.get("acting_ten_god", "")),
+                        "acting_ten_god_label": str(match_payload.get("acting_ten_god_label", "")),
+                        "classical_tags": list(candidate["tags"]),
+                        "role_in_pattern": dict(assessment.get("acting_role_in_pattern", {}) or {}),
+                        "function": dict(assessment.get("single_function", {}) or {}),
+                        "disease_medicine_axis": dict(assessment.get("disease_medicine_axis", {}) or {}),
+                        "visibility_axis": dict(assessment.get("visibility_axis", {}) or {}),
+                        "timing_axis": dict(assessment.get("timing_axis", {}) or {}),
+                        "domain_axis": dict(assessment.get("domain_axis", {}) or {}),
+                        "context_axis": dict(assessment.get("context_axis", {}) or {}),
+                    },
+                    "supporting_operations": [
+                        {
+                            "kind": "pattern_center",
+                            "ten_god": profile.primary_ten_god,
+                            "ten_god_label": TEN_GOD_LABELS.get(profile.primary_ten_god, profile.primary_ten_god),
+                            "operation_face": ten_god_operation_face_payload(profile.primary_ten_god),
+                            "formation_state": profile.formation_state,
+                            "clarity_state": profile.clarity_state,
+                        }
+                    ],
+                    "eventization_conditions": event_conditions,
+                    "real_world_focus": real_world_focus,
+                }
+
+            assessment = dict(match_payload.get("dual_operation_assessment", {}) or {})
+            component_actions = dict(assessment.get("component_single_actions", {}) or {})
+            first_ten_god = str(match_payload.get("first_ten_god", ""))
+            second_ten_god = str(match_payload.get("second_ten_god", ""))
+            return {
+                "main_operation": {
+                    "kind": "dual_pair",
+                    "title": str(candidate["title"]),
+                    "first_ten_god": first_ten_god,
+                    "first_ten_god_label": TEN_GOD_LABELS.get(first_ten_god, first_ten_god),
+                    "second_ten_god": second_ten_god,
+                    "second_ten_god_label": TEN_GOD_LABELS.get(second_ten_god, second_ten_god),
+                    "first_to_second_relation": str(match_payload.get("first_to_second_relation", "")),
+                    "classical_tags": list(candidate["tags"]),
+                    "pair_classical_tags": list(component_actions.get("pair_classical_tags", []) or []),
+                    "pair_function": dict(assessment.get("pair_function", {}) or {}),
+                    "exact_pair_axis": dict(assessment.get("exact_pair_axis", {}) or {}),
+                    "disease_medicine_axis": dict(assessment.get("disease_medicine_axis", {}) or {}),
+                    "interaction_judgment": dict(assessment.get("interaction_judgment", {}) or {}),
+                    "visibility_axis": dict(assessment.get("visibility_axis", {}) or {}),
+                    "timing_order": dict(assessment.get("timing_order", {}) or {}),
+                    "domain_axis": dict(assessment.get("domain_axis", {}) or {}),
+                    "context_axis": dict(assessment.get("context_axis", {}) or {}),
+                    "primary_actor": str(assessment.get("primary_actor", "")),
+                    "primary_actor_label": str(assessment.get("primary_actor_label", "")),
+                    "secondary_actor": str(assessment.get("secondary_actor", "")),
+                    "secondary_actor_label": str(assessment.get("secondary_actor_label", "")),
+                    "actor_hierarchy_logic": str(assessment.get("actor_hierarchy_logic", "")),
+                    "pattern_combination_state": str(assessment.get("pattern_combination_state", "")),
+                    "combination_resolution_state": str(assessment.get("combination_resolution_state", "")),
+                    "combination_resolution_logic": str(assessment.get("combination_resolution_logic", "")),
+                },
+                "supporting_operations": [
+                    {
+                        "kind": "component_single_action",
+                        "component": "first",
+                        "ten_god": first_ten_god,
+                        "ten_god_label": TEN_GOD_LABELS.get(first_ten_god, first_ten_god),
+                        "role_in_pattern": dict(assessment.get("first_role_in_pattern", {}) or {}),
+                        "classical_tags": list(component_actions.get("first_classical_tags", []) or []),
+                        "operation_face": ten_god_operation_face_payload(first_ten_god),
+                    },
+                    {
+                        "kind": "component_single_action",
+                        "component": "second",
+                        "ten_god": second_ten_god,
+                        "ten_god_label": TEN_GOD_LABELS.get(second_ten_god, second_ten_god),
+                        "role_in_pattern": dict(assessment.get("second_role_in_pattern", {}) or {}),
+                        "classical_tags": list(component_actions.get("second_classical_tags", []) or []),
+                        "operation_face": ten_god_operation_face_payload(second_ten_god),
+                    },
+                ],
+                "eventization_conditions": event_conditions,
+                "real_world_focus": real_world_focus,
+            }
+
+        def center_core_action_payload(candidate: dict[str, object]) -> dict[str, object]:
+            source = str(candidate["source"])
+            match = candidate["match"]
+            match_payload = action_match_payload(match) if source == "single" else dual_action_match_payload(match)
+            selection_basis = dict(candidate["selection_basis"])
+            operation_depth = selection_basis.get("ten_god_operation_depth", {})
+            center_judgment_axis = (
+                dict(operation_depth.get("center_judgment_axis", {}))
+                if isinstance(operation_depth, dict)
+                else {}
+            )
+            operation_ten_gods = (
+                [match.acting_ten_god]
+                if source == "single"
+                else [match.first_ten_god, match.second_ten_god]
+            )
+            pattern_identity = {
+                "pattern": match.pattern,
+                "pattern_label": PATTERN_LABELS.get(match.pattern, match.pattern),
+                "pattern_center_ten_god": profile.primary_ten_god,
+                "pattern_center_ten_god_label": TEN_GOD_LABELS.get(
+                    profile.primary_ten_god,
+                    profile.primary_ten_god,
+                ),
+                "month_command_ten_god": profile.month_command_ten_god,
+                "month_command_ten_god_label": TEN_GOD_LABELS.get(
+                    profile.month_command_ten_god,
+                    profile.month_command_ten_god,
+                ),
+                "pattern_family": profile.family,
+                "formation_state": profile.formation_state,
+                "clarity_state": profile.clarity_state,
+            }
+            action_identity = (
+                {
+                    **pattern_identity,
+                    "acting_ten_god": match.acting_ten_god,
+                    "acting_ten_god_label": TEN_GOD_LABELS.get(match.acting_ten_god, match.acting_ten_god),
+                    "relation_to_pattern": match.relation_to_pattern,
+                    "action_key": match.action_key,
+                    "action_nature": match.action_nature,
+                    "center_effect": match.center_effect,
+                }
+                if source == "single"
+                else {
+                    **pattern_identity,
+                    "first_ten_god": match.first_ten_god,
+                    "first_ten_god_label": TEN_GOD_LABELS.get(match.first_ten_god, match.first_ten_god),
+                    "second_ten_god": match.second_ten_god,
+                    "second_ten_god_label": TEN_GOD_LABELS.get(match.second_ten_god, match.second_ten_god),
+                    "pattern_ten_god": match.pattern_ten_god,
+                    "pattern_ten_god_label": TEN_GOD_LABELS.get(match.pattern_ten_god, match.pattern_ten_god),
+                    "pattern_group": match.pattern_group,
+                    "first_relation_to_pattern": match.first_relation_to_pattern,
+                    "second_relation_to_pattern": match.second_relation_to_pattern,
+                    "first_to_second_relation": match.first_to_second_relation,
+                    "pattern_center_bridge_profile": dict(match.pattern_center_bridge),
+                    "sequence_key": match.sequence_key,
+                    "chain_grade": match.chain_grade,
+                    "chain_nature": match.chain_nature,
+                    "pattern_combination_state": match.pattern_combination_state,
+                    "combination_resolution_state": match.combination_resolution_state,
+                    "combination_resolution_logic": match.combination_resolution_logic,
+                    "primary_actor": match.primary_actor,
+                    "primary_actor_label": TEN_GOD_LABELS.get(match.primary_actor, match.primary_actor),
+                    "secondary_actor": match.secondary_actor,
+                    "secondary_actor_label": TEN_GOD_LABELS.get(match.secondary_actor, match.secondary_actor),
+                    "actor_hierarchy_logic": match.actor_hierarchy_logic,
+                    "disease_medicine_logic": match.disease_medicine_logic,
+                    "exact_pair_key": match.exact_pair_key,
+                    "exact_pair_category": match.exact_pair_category,
+                    "exact_pair_name": match.exact_pair_name,
+                    "exact_pair_effect": match.exact_pair_effect,
+                    "exact_pair_risk": match.exact_pair_risk,
+                    "exact_pair_timing": match.exact_pair_timing,
+                    "first_then_second_activation": match.first_then_second_activation,
+                    "second_then_first_activation": match.second_then_first_activation,
+                    "activation_order_profile": dict(match.activation_order_profile),
+                }
+            )
+            return {
+                "source": source,
+                "title": str(candidate["title"]),
+                "action_identity": action_identity,
+                "center_score": int(candidate["score"]),
+                "selection_adjusted_score": int(candidate.get("selection_adjusted_score", candidate["score"])),
+                "selection_overlap_penalty": int(candidate.get("selection_overlap_penalty", 0)),
+                "selection_reasons": list(candidate["reason"]),
+                "selection_role": dict(candidate.get("selection_role", {}) or {}),
+                "center_judgment_axis": center_judgment_axis,
+                "center_axis_score": int(center_judgment_axis.get("score") or 0),
+                "selection_basis": selection_basis,
+                "raw_selection_basis": dict(candidate["raw_selection_basis"]),
+                "presence_state": str(getattr(match, "presence_state", "") or ""),
+                "presence_score": int(getattr(match, "presence_score", 0) or 0),
+                "activation_context": str(getattr(match, "activation_context", "") or ""),
+                "month_fit_state": str(getattr(match, "month_fit_state", "") or ""),
+                "position_context": dict(getattr(match, "position_context", {}) or {}),
+                "counter_signals": list(getattr(match, "counter_signals", []) or []),
+                "judgment_order": list(getattr(match, "judgment_order", [])),
+                "classical_action_tags": list(candidate["tags"]),
+                "component_classical_action_tags": list(candidate.get("component_tags", []) or []),
+                "dedupe_classical_action_tags": list(candidate.get("dedupe_tags", []) or []),
+                "classical_action_mechanics": classical_action_mechanics_payload(list(candidate["tags"])),
+                "feature_axis_impacts": feature_axis_impacts_payload(
+                    candidate["tags"],
+                    getattr(match, "domain_priority", []),
+                    source=source,
+                ),
+                "operation_faces": operation_faces_payload(operation_ten_gods),
+                "pattern_center_operation_face": ten_god_operation_face_payload(profile.primary_ten_god),
+                "exact_profile_domain_basis": exact_profile_domain_basis_payload(
+                    list(getattr(match, "basis_codes", []) or [])
+                ),
+                "pattern_center_bridge": (
+                    pattern_center_bridge_payload(list(getattr(match, "basis_codes", []) or []))
+                    if source == "dual"
+                    else {}
+                ),
+                "single_operation_assessment": (
+                    match_payload.get("single_operation_assessment", {})
+                    if source == "single"
+                    else {}
+                ),
+                "dual_operation_assessment": (
+                    match_payload.get("dual_operation_assessment", {})
+                    if source == "dual"
+                    else {}
+                ),
+                "operation_hierarchy": operation_hierarchy_payload(source, match, match_payload, candidate),
+                "real_world_projection": real_world_projection_payload(match, list(candidate["tags"])),
+                "event_manifestations": dict(getattr(match, "event_manifestations", {}) or {}),
+                "interaction_judgment": dict(getattr(match, "interaction_judgment", {}) or {}),
+                "visibility_interaction": dict(getattr(match, "visibility_interaction", {}) or {}),
+                "timing_hits": (
+                    single_action_timing_hits(match, limit=3)
+                    if source == "single"
+                    else dual_action_timing_hits(match, limit=3)
+                ),
+                "timing_score": int(candidate["timing_score"]),
+                "center_timing_score": int(candidate["center_timing_score"]),
+                "formation_state": profile.formation_state,
+                "clarity_state": profile.clarity_state,
+                "domain_priority": list(getattr(match, "domain_priority", []) or []),
+                "context_judgment_state": str(getattr(match, "context_judgment_state", "")),
+                "context_judgment_summary": str(getattr(match, "context_judgment_summary", "")),
+                "context_judgment_path": list(getattr(match, "context_judgment_path", []) or []),
+                "match": match_payload,
+            }
+
+        def flow_activated_core_action_payload(candidate: dict[str, object]) -> dict[str, object]:
+            payload = center_core_action_payload(candidate)
+            payload["flow_activation_score"] = int(candidate.get("timing_score") or 0)
+            payload["flow_selection_basis"] = dict(candidate.get("raw_selection_basis", {}) or {})
+            payload["flow_activation_basis"] = dict(
+                dict(candidate.get("raw_selection_basis", {}) or {}).get("flow_activation", {}) or {}
+            )
+            payload["flow_timing_hits"] = list(payload.get("timing_hits", []) or [])[:3]
+            return payload
+
+        def unique_limited(values: object, limit: int = 6) -> list[str]:
+            result: list[str] = []
+            sequence = list(values or []) if isinstance(values, (list, tuple, set)) else []
+            for value in sequence:
+                text = str(value).strip()
+                if text and text not in result:
+                    result.append(text)
+                if len(result) >= limit:
+                    break
+            return result
+
+        def domain_label_list(codes: object, limit: int = 4) -> list[str]:
+            fallback_labels = {
+                "relationship": "관계",
+                "reputation": "명예",
+                "personality": "성향",
+                "work": "직업",
+            }
+            labels: list[str] = []
+            for code in unique_limited(codes, limit=limit):
+                label = DOMAIN_LABELS.get(code, fallback_labels.get(code, code))
+                if label not in labels:
+                    labels.append(label)
+            return labels
+
+        def card_axis_labels(values: object, limit: int = 4) -> list[str]:
+            replacements = {
+                "돈": "재물",
+                "사람": "대인",
+                "직장": "직업",
+                "판단 방식": "판단",
+            }
+            labels: list[str] = []
+            for label in unique_limited(values, limit=limit):
+                normalized = replacements.get(label, label)
+                if normalized not in labels:
+                    labels.append(normalized)
+            return labels
+
+        def join_labels(labels: list[str], limit: int = 3) -> str:
+            return ", ".join(labels[:limit])
+
+        def ro_particle(label: str) -> str:
+            if not label:
+                return "으로"
+            last = label[-1]
+            code = ord(last)
+            if 0xAC00 <= code <= 0xD7A3:
+                jong = (code - 0xAC00) % 28
+                return "로" if jong in {0, 8} else "으로"
+            return "로"
+
+        def center_card_basis_summary(center_item: dict[str, object]) -> dict[str, object]:
+            basis = dict(center_item.get("selection_basis", {}) or {})
+            source = str(center_item.get("source") or "")
+            order = list(basis.get("order", []) or [])
+            axis_labels = {
+                "month_command": "월령",
+                "gyeokguk_role": "격국",
+                "gyeokguk_chain": "격국",
+                "gyeokguk_formation": "격국 성립",
+                "day_master_strength": "일간 강약",
+                "climate": "조후",
+                "protrusion": "투출",
+                "rooting": "통근",
+                "position": "위치",
+                "hidden_stems": "지장간",
+                "branch_interactions": "합충형파해",
+                "flow_activation": "대운·세운",
+            }
+            axis_evidence: list[dict[str, object]] = []
+            for key in order:
+                step = dict(basis.get(str(key), {}) or {})
+                axis_evidence.append(
+                    {
+                        "key": str(key),
+                        "axis": axis_labels.get(str(key), str(key)),
+                        "judgment": str(step.get("label") or step.get("state") or ""),
+                        "score": int(step.get("score") or 0),
+                    }
+                )
+
+            decisive_axes = sorted(
+                [axis for axis in axis_evidence if int(axis.get("score") or 0) > 0],
+                key=lambda axis: -int(axis.get("score") or 0),
+            )[:5]
+            reality_keys = {"protrusion", "rooting", "position", "hidden_stems", "branch_interactions"}
+            reality_axes = [axis for axis in axis_evidence if axis["key"] in reality_keys]
+            operation_depth = dict(basis.get("ten_god_operation_depth", {}) or {})
+            exact_specificity = dict(basis.get("exact_ten_god_specificity", {}) or {})
+            relevance = dict(basis.get("pattern_center_relevance", {}) or {})
+            return {
+                "source": source,
+                "judgment_order": [axis["axis"] for axis in axis_evidence],
+                "monthly_authority": {
+                    "pattern": profile.primary_pattern,
+                    "month_branch": profile.month_branch,
+                    "month_branch_label": BRANCH_LABELS.get(profile.month_branch, profile.month_branch),
+                    "month_command_ten_god": profile.month_command_ten_god,
+                    "month_command_label": TEN_GOD_LABELS.get(
+                        profile.month_command_ten_god,
+                        profile.month_command_ten_god,
+                    ),
+                    "active_hidden_ten_god": profile.active_hidden_ten_god,
+                    "active_hidden_ten_god_label": TEN_GOD_LABELS.get(
+                        profile.active_hidden_ten_god,
+                        profile.active_hidden_ten_god,
+                    ),
+                },
+                "axis_evidence": axis_evidence,
+                "decisive_axes": decisive_axes,
+                "reality_axes": reality_axes,
+                "pattern_center_relevance": {
+                    "label": str(relevance.get("label") or ""),
+                    "score": int(relevance.get("score") or 0),
+                    "direct_center_actor": bool(relevance.get("direct_center_actor")),
+                    "same_group_as_center": bool(relevance.get("same_group_as_center")),
+                    "pattern_center_bridge": bool(relevance.get("pattern_center_bridge")),
+                },
+                "operation_depth": {
+                    "state": str(operation_depth.get("state") or ""),
+                    "grade_state": str(operation_depth.get("grade_state") or ""),
+                    "relation_state": str(operation_depth.get("relation_state") or ""),
+                    "score": int(operation_depth.get("score") or 0),
+                    "major_tags": unique_limited(operation_depth.get("major_tags"), limit=5),
+                    "support_tags": unique_limited(operation_depth.get("support_tags"), limit=5),
+                    "caution_tags": unique_limited(operation_depth.get("caution_tags"), limit=5),
+                },
+                "exact_ten_god_specificity": {
+                    "score": int(exact_specificity.get("score") or 0),
+                    "ten_gods": unique_limited(exact_specificity.get("ten_gods"), limit=3),
+                    "domains": unique_limited(exact_specificity.get("domains"), limit=5),
+                    "pair_state": str(exact_specificity.get("pair_state") or ""),
+                },
+            }
+
+        def center_core_action_card_payload(center_item: dict[str, object], rank: int) -> dict[str, object]:
+            source = str(center_item.get("source") or "")
+            action_identity = dict(center_item.get("action_identity", {}) or {})
+            projection = dict(center_item.get("real_world_projection", {}) or {})
+            role = dict(center_item.get("selection_role", {}) or {})
+            center_axis = dict(center_item.get("center_judgment_axis", {}) or {})
+
+            primary_axes = card_axis_labels(projection.get("axis_labels"), limit=4)
+            primary_domains = unique_limited(
+                projection.get("primary_domains") or projection.get("primary_axes"),
+                limit=4,
+            )
+            primary_domain_labels = domain_label_list(primary_domains, limit=4)
+            judgment_label = str(center_axis.get("label") or "중심 작용")
+
+            if source == "dual":
+                first_label = str(action_identity.get("first_ten_god_label") or "")
+                second_label = str(action_identity.get("second_ten_god_label") or "")
+                primary_label = str(action_identity.get("primary_actor_label") or first_label)
+                secondary_label = str(action_identity.get("secondary_actor_label") or second_label)
+                activation_profile = dict(action_identity.get("activation_order_profile", {}) or {})
+                first_order = dict(activation_profile.get("first_then_second", {}) or {})
+                second_order = dict(activation_profile.get("second_then_first", {}) or {})
+                first_targets = unique_limited(first_order.get("entry_event_targets"), limit=5)
+                first_results = unique_limited(first_order.get("result_event_targets"), limit=5)
+                second_targets = unique_limited(second_order.get("entry_event_targets"), limit=5)
+                second_results = unique_limited(second_order.get("result_event_targets"), limit=5)
+                event_targets = unique_limited(
+                    [
+                        *first_targets,
+                        *first_results,
+                        *second_targets,
+                        *second_results,
+                    ],
+                    limit=7,
+                )
+                card_title = f"{first_label}·{second_label} 작용"
+                actors = {
+                    "primary_actor_label": primary_label,
+                    "secondary_actor_label": secondary_label,
+                }
+                timing_order = {
+                    "first_then_second": {
+                        "entry_label": str(first_order.get("entry_ten_god_label") or first_label),
+                        "result_label": str(first_order.get("follow_ten_god_label") or second_label),
+                        "entry_targets": first_targets,
+                        "result_targets": first_results,
+                    },
+                    "second_then_first": {
+                        "entry_label": str(second_order.get("entry_ten_god_label") or second_label),
+                        "result_label": str(second_order.get("follow_ten_god_label") or first_label),
+                        "entry_targets": second_targets,
+                        "result_targets": second_results,
+                    },
+                }
+                summary_items = unique_limited(
+                    [
+                        f"중심 십신은 {primary_label}, 보조 십신은 {secondary_label}입니다.",
+                        f"{judgment_label}{ro_particle(judgment_label)} 판정합니다.",
+                        f"현실 영역은 {join_labels(primary_axes)}입니다." if primary_axes else "",
+                        f"사건은 {join_labels(event_targets)}에서 먼저 드러납니다." if event_targets else "",
+                    ],
+                    limit=4,
+                )
+            else:
+                acting_label = str(action_identity.get("acting_ten_god_label") or "")
+                event_manifestations = dict(center_item.get("event_manifestations", {}) or {})
+                event_targets = unique_limited(
+                    [
+                        *primary_axes,
+                        *domain_label_list(event_manifestations.keys(), limit=5),
+                    ],
+                    limit=7,
+                )
+                card_title = f"{acting_label} 작용"
+                actors = {
+                    "acting_ten_god_label": acting_label,
+                    "relation_to_pattern": str(action_identity.get("relation_to_pattern") or ""),
+                }
+                timing_order = {
+                    "single_activation": {
+                        "entry_label": acting_label,
+                        "event_targets": event_targets,
+                    }
+                }
+                summary_items = unique_limited(
+                    [
+                        f"중심 십신은 {acting_label}입니다.",
+                        f"{judgment_label}{ro_particle(judgment_label)} 판정합니다.",
+                        f"현실 영역은 {join_labels(primary_axes)}입니다." if primary_axes else "",
+                        f"사건은 {join_labels(event_targets)}에서 먼저 드러납니다." if event_targets else "",
+                    ],
+                    limit=4,
+                )
+
+            return {
+                "rank": rank,
+                "source": source,
+                "title": card_title,
+                "original_title": str(center_item.get("title") or ""),
+                "center_score": int(center_item.get("center_score") or 0),
+                "role": {
+                    "code": str(role.get("code") or ""),
+                    "label": str(role.get("label") or ""),
+                },
+                "judgment": {
+                    "code": str(center_axis.get("code") or ""),
+                    "label": str(center_axis.get("label") or ""),
+                    "score": int(center_axis.get("score") or 0),
+                },
+                "actors": actors,
+                "primary_axes": primary_axes,
+                "primary_domains": primary_domains,
+                "primary_domain_labels": primary_domain_labels,
+                "event_targets": event_targets,
+                "timing_order": timing_order,
+                "basis_summary": center_card_basis_summary(center_item),
+                "summary_items": summary_items,
+            }
+
+        center_core_candidates = center_core_action_candidates()
+        center_core_payloads = [
+            center_core_action_payload(candidate)
+            for candidate in center_core_candidates
+        ]
+        flow_activated_core_payloads = [
+            flow_activated_core_action_payload(candidate)
+            for candidate in flow_activated_core_action_candidates()
+        ]
+        center_core_cards = [
+            center_core_action_card_payload(center_item, rank)
+            for rank, center_item in enumerate(center_core_payloads, start=1)
+        ]
+
+        return {
+            "rule_version": profile.rule_version,
+            "primary_pattern": profile.primary_pattern,
+            "primary_ten_god": profile.primary_ten_god,
+            "primary_ten_god_label": TEN_GOD_LABELS.get(profile.primary_ten_god, profile.primary_ten_god),
+            "primary_ten_god_operation_face": ten_god_operation_face_payload(profile.primary_ten_god),
+            "primary_group": profile.primary_group,
+            "family": profile.family,
+            "formation_state": profile.formation_state,
+            "clarity_state": profile.clarity_state,
+            "month_branch": profile.month_branch,
+            "month_branch_label": BRANCH_LABELS.get(profile.month_branch, profile.month_branch),
+            "month_command_stem": profile.month_command_stem,
+            "month_command_ten_god": profile.month_command_ten_god,
+            "month_command_label": TEN_GOD_LABELS.get(profile.month_command_ten_god, profile.month_command_ten_god),
+            "active_hidden_stem": profile.active_hidden_stem,
+            "active_hidden_ten_god": profile.active_hidden_ten_god,
+            "active_hidden_ten_god_label": TEN_GOD_LABELS.get(
+                profile.active_hidden_ten_god,
+                profile.active_hidden_ten_god,
+            ),
+            "protruded_month_stems": list(profile.protruded_month_stems),
+            "favorable_elements": list(profile.favorable_elements),
+            "favorable_element_labels": [ELEMENT_LABELS.get(element, element) for element in profile.favorable_elements],
+            "unfavorable_elements": list(profile.unfavorable_elements),
+            "unfavorable_element_labels": [ELEMENT_LABELS.get(element, element) for element in profile.unfavorable_elements],
+            "success_conditions": list(profile.success_conditions),
+            "failure_conditions": list(profile.failure_conditions),
+            "basis_codes": list(profile.basis_codes),
+            "decision_notes": list(profile.decision_notes),
+            "candidates": [candidate_payload(candidate) for candidate in profile.candidates[:6]],
+            "ten_god_action_matches": [
+                action_match_payload(match)
+                for match in profile.ten_god_action_matches[:8]
+            ],
+            "dual_ten_god_action_matches": [
+                dual_action_match_payload(match)
+                for match in profile.dual_ten_god_action_matches[:10]
+            ],
+            "center_ten_god_action_matches": [
+                action_match_payload(match)
+                for match in sorted(profile.ten_god_action_matches, key=single_action_rank)[:3]
+            ],
+            "center_dual_ten_god_action_matches": [
+                dual_action_match_payload(match)
+                for match in center_dual_action_matches()
+            ],
+            "center_core_action_matches": [
+                *center_core_payloads
+            ],
+            "flow_activated_core_action_matches": [
+                *flow_activated_core_payloads
+            ],
+            "center_core_action_cards": center_core_cards,
+        }
+
     def combination_payload(signal) -> dict[str, object]:
         return {
             "signal_id": signal.signal_id,
@@ -3797,6 +7854,7 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
             "combination_key": signal.combination_key,
             "positions": list(signal.positions),
             "stems": list(signal.stems),
+            "ordered_stems": list(signal.ordered_stems),
             "branches": list(signal.branches),
             "elements": list(signal.elements),
             "source_rule": signal.source_rule,
@@ -3809,6 +7867,31 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
             "monthly_variant_note": signal.monthly_variant_note,
             "day_master_variant_note": signal.day_master_variant_note,
         }
+
+    def element_combination_evidence_signals() -> list[object]:
+        visible_pairs = [
+            signal
+            for signal in element_combination_profile.heavenly_stem_signals
+            if len(signal.stems) == 2
+        ]
+
+        def visible_rank(signal) -> tuple[int, int, str]:
+            positions = {str(position).split(":", 1)[0] for position in signal.positions}
+            return (
+                0 if "day" in positions else 1,
+                0 if "month" in positions else 1,
+                signal.signal_id,
+            )
+
+        selected_visible: list[object] = []
+        seen_element_pairs: set[tuple[str, ...]] = set()
+        for signal in sorted(visible_pairs, key=visible_rank):
+            element_pair = tuple(sorted(set(signal.elements)))
+            if element_pair in seen_element_pairs:
+                continue
+            seen_element_pairs.add(element_pair)
+            selected_visible.append(signal)
+        return selected_visible + list(element_combination_profile.month_hidden_visible_signals)
 
     def directional_interaction_payload(signal) -> dict[str, object]:
         return {
@@ -4062,6 +8145,9 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
     domain_decision_facets = _domain_decision_facet_payload(
         profile,
         cycle_regulation_profile if isinstance(cycle_regulation_profile, dict) else None,
+        gyeokguk_profile,
+        analysis.chart_structure,
+        analysis.expert_adjudication,
     )
     timing_decision_facets = _timing_decision_payload(analysis)
     output_goal_coverage = _output_goal_coverage_payload(
@@ -4082,12 +8168,14 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
         "month_governance_context": month_governance_payload(),
         "branch_reality_context": branch_reality_payload(),
         "cycle_regulation_context": cycle_regulation_payload(),
+        "gyeokguk_contextual_context": gyeokguk_contextual_payload,
         "output_goal_contract": output_goal_contract,
         "domain_decision_facets": domain_decision_facets,
         "timing_decision_facets": timing_decision_facets,
         "output_goal_coverage": output_goal_coverage,
         "auxiliary_context": auxiliary_context_payload(),
         "pattern_context": pattern_context_payload(),
+        "gyeokguk_context": gyeokguk_context_payload(),
         "career_field_rule_version": career_field_profile.rule_version,
         "career_interpretation_principle": career_field_profile.interpretation_principle,
         "career_field_summary": list(career_field_profile.summary_sentences),
@@ -4126,12 +8214,17 @@ def _life_feature_summary(analysis: AnalysisResult) -> dict[str, object]:
             domain: list(notes)
             for domain, notes in element_combination_profile.domain_notes.items()
         },
+        "element_combination_evidence_signals": [
+            element_combination_payload(signal)
+            for signal in element_combination_evidence_signals()
+        ],
         "top_element_combination_signals": [
             element_combination_payload(signal)
             for signal in (
                 list(element_combination_profile.heavenly_stem_signals)
                 + list(element_combination_profile.stem_branch_signals)
                 + list(element_combination_profile.hidden_stem_signals)
+                + list(element_combination_profile.month_hidden_visible_signals)
             )
             if signal.signal_id in set(element_combination_profile.top_signal_ids)
         ],
@@ -4193,6 +8286,7 @@ def build_product_output(
     omitted = [packet.packet_id for packet in analysis.event_packets if packet.packet_id not in selected_ids]
     items: list[ProductOutputItem] = []
     birth_year = analysis.trace.get("birth_year")
+    shared_judgment_materials: dict[Domain, dict[str, Any]] = {}
 
     for packet in selected:
         summary_filter = filter_risk_language(_summary(packet))
@@ -4243,7 +8337,12 @@ def build_product_output(
                 relationship_status_label=RELATIONSHIP_STATUS_LABELS[packet.relationship_status],
                 relationship_context=_relationship_context(packet),
                 feature_axes=list(packet.feature_axes),
-                judgment_context=build_domain_judgment_context(analysis, packet),
+                judgment_context=build_domain_judgment_context(
+                    analysis,
+                    packet,
+                    shared_materials_by_domain=shared_judgment_materials,
+                ),
+                expert_projection_summary=dict(packet.expert_projection_summary),
             )
         )
 
@@ -4251,6 +8350,9 @@ def build_product_output(
     domain_coverage = _domain_coverage(analysis, items)
     target_years = list(analysis.trace.get("target_years", []))
     life_feature_summary = _life_feature_summary(analysis)
+    expert_summary = dict(analysis.expert_adjudication.summary) if analysis.expert_adjudication is not None else {}
+    if expert_summary:
+        life_feature_summary["expert_summary"] = expert_summary
     if isinstance(birth_year, int):
         life_feature_summary["birth_year"] = birth_year
     catalog_entries = attach_catalog_content_blocks(
@@ -4296,4 +8398,5 @@ def build_product_output(
         premium_candidate_sections=premium_candidate_sections,
         premium_detail_sections=premium_detail_sections,
         premium_profile_contract=premium_product_surface_contract(tier),
+        expert_summary=expert_summary,
     )

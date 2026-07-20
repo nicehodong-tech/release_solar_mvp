@@ -23,7 +23,9 @@ from .directional_interactions import build_directional_interaction_profile
 from .element_combinations import build_element_combination_profile
 from .elements import build_element_profile
 from .features import build_life_feature_profile
-from .interactions import find_natal_interactions
+from .gyeokguk import build_gyeokguk_profile
+from .gyeokguk_contextual import build_gyeokguk_contextual_profile
+from .interactions import build_natal_branch_pairs, find_natal_interactions
 from .models import ChartStructure, PositionSignal
 from .month_governance import build_month_governance_profile
 from .month_hidden_phase import build_month_hidden_phase_profile
@@ -73,6 +75,17 @@ POSITION_TEN_GOD_CONTEXTS: dict[str, dict[str, object]] = {
 
 def _birth_time_unknown(chart: BirthChartResult) -> bool:
     return bool(getattr(chart, "calculation_trace", {}).get("birth_time_unknown"))
+
+
+def _inferred_gender(chart: BirthChartResult) -> str:
+    """Recover the input gender from the daeun direction contract."""
+
+    if chart.daeun_direction not in {"forward", "backward"}:
+        return "unknown"
+    yang_year = chart.year_pillar.stem_index % 2 == 0
+    if yang_year:
+        return "male" if chart.daeun_direction == "forward" else "female"
+    return "male" if chart.daeun_direction == "backward" else "female"
 
 
 def _pillars(chart: BirthChartResult):
@@ -135,6 +148,7 @@ def build_chart_structure(chart: BirthChartResult) -> ChartStructure:
     element_profile = build_element_profile(chart)
     ten_god_profile = build_ten_god_profile(chart)
     interactions = find_natal_interactions(chart)
+    branch_pair_combinations = build_natal_branch_pairs(chart, interactions)
     auxiliary = build_auxiliary_profile(chart)
     position_signals = _position_signals(chart)
     combination_profile = build_combination_profile(chart, position_signals)
@@ -153,9 +167,20 @@ def build_chart_structure(chart: BirthChartResult) -> ChartStructure:
         position_signals=position_signals,
         month_hidden_phase=month_hidden_phase_profile,
     )
+    gyeokguk_profile = build_gyeokguk_profile(
+        day_master_stem=chart.day_pillar.stem_key,
+        element_profile=element_profile,
+        ten_god_profile=ten_god_profile,
+        position_signals=position_signals,
+        pattern_profile=pattern_profile,
+        month_governance_profile=month_governance_profile,
+        branch_interactions=interactions,
+        month_hidden_phase=month_hidden_phase_profile,
+    )
     cycle_regulation_profile = build_cycle_regulation_profile(
         SimpleNamespace(
             day_master_element=element_profile.day_master_element,
+            month_branch=chart.month_pillar.branch_key,
             element_profile=element_profile,
             ten_god_profile=ten_god_profile,
             position_signals=position_signals,
@@ -175,6 +200,7 @@ def build_chart_structure(chart: BirthChartResult) -> ChartStructure:
         integrated_saju_profile,
         cycle_regulation_profile,
         month_governance_profile,
+        gyeokguk_profile,
     )
     source_personality_profile = build_source_personality_profile(
         day_stem_key=chart.day_pillar.stem_key,
@@ -211,6 +237,12 @@ def build_chart_structure(chart: BirthChartResult) -> ChartStructure:
         tags.append(f"month_command_{month_governance_profile.month_command_ten_god}")
     if month_governance_profile.regular_pattern:
         tags.append(f"month_regular_pattern_{month_governance_profile.regular_pattern}")
+    if gyeokguk_profile.primary_pattern:
+        tags.append(f"gyeokguk_{gyeokguk_profile.primary_pattern}")
+    if gyeokguk_profile.formation_state:
+        tags.append(f"gyeokguk_formation_{gyeokguk_profile.formation_state}")
+    if gyeokguk_profile.clarity_state:
+        tags.append(f"gyeokguk_clarity_{gyeokguk_profile.clarity_state}")
     if month_hidden_phase_profile.active_stem:
         tags.append(f"month_hidden_phase_{month_hidden_phase_profile.active_phase}_{month_hidden_phase_profile.active_stem}")
     if month_hidden_phase_profile.active_ten_god:
@@ -261,6 +293,7 @@ def build_chart_structure(chart: BirthChartResult) -> ChartStructure:
         ten_god_profile=ten_god_profile,
         position_signals=position_signals,
         branch_interactions=interactions,
+        branch_pair_combinations=branch_pair_combinations,
         auxiliary_profile=auxiliary,
         combination_profile=combination_profile,
         element_combination_profile=element_combination_profile,
@@ -272,11 +305,13 @@ def build_chart_structure(chart: BirthChartResult) -> ChartStructure:
         month_governance_profile=month_governance_profile,
         chart_types=chart_types,
         pattern_profile=pattern_profile,
+        gyeokguk_profile=gyeokguk_profile,
         life_feature_profile=life_feature_profile,
         source_personality_profile=source_personality_profile,
         source_reading_profile=source_reading_profile,
         career_field_profile=career_field_profile,
         structure_tags=list(dict.fromkeys(tags)),
+        gender=_inferred_gender(chart),
         warnings=warnings,
     )
-    return replace(structure, cycle_regulation_profile=build_cycle_regulation_profile(structure))
+    return replace(structure, gyeokguk_contextual_profile=build_gyeokguk_contextual_profile(structure))

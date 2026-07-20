@@ -1,4 +1,4 @@
-﻿"""Customer-facing report rendering for product outputs.
+"""Customer-facing report rendering for product outputs.
 
 This layer consumes an already-built ProductOutput. It does not recalculate the
 chart judgment; it only shapes the structured judgment into mobile, web, and
@@ -7728,6 +7728,14 @@ FACTOR_POSITION_LABELS = {
     "hour": "시주",
 }
 
+FACTOR_POSITION_SUFFIX_LABELS = {
+    "stem": "천간",
+    "branch": "지지",
+    "branch_main": "지지 본기",
+    "hidden": "지장간",
+    "visible": "천간",
+}
+
 FACTOR_POSITION_REALITY_SENTENCES = {
     "year": (
         "처음 만나는 사람은 당신의 말투와 태도를 먼저 기억합니다. 첫인상과 평판에도 오래 남습니다.",
@@ -7971,11 +7979,10 @@ def _factor_positions(positions: list[str]) -> str:
     labels: list[str] = []
     for position in positions:
         base, _, suffix = str(position).partition(":")
-        label = FACTOR_POSITION_LABELS.get(base, str(position))
-        if suffix == "stem":
-            label = f"{label} 천간"
-        elif suffix:
-            label = f"{label} {suffix}"
+        label = FACTOR_POSITION_LABELS.get(base) or "명식"
+        suffix_label = FACTOR_POSITION_SUFFIX_LABELS.get(suffix)
+        if suffix_label:
+            label = f"{label} {suffix_label}"
         labels.append(label)
     return _factor_join(labels) or "명식 안"
 

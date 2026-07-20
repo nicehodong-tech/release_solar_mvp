@@ -7,6 +7,7 @@ from .models import (
     AuxiliaryProfile,
     BranchInteraction,
     ElementProfile,
+    GyeokgukProfile,
     IntegratedSajuProfile,
     LifeFeatureProfile,
     LifeFeatureScore,
@@ -47,15 +48,36 @@ def _interaction_count(interactions: list[BranchInteraction], relation_types: se
 
 def _circulation_bonus(profile: ElementProfile) -> int:
     return {
-        "smooth": 8,
-        "usable": 5,
-        "partial": 1,
-        "blocked": -6,
+        "smooth": 6,
+        "usable": 3,
+        "partial": 0,
+        "blocked": -8,
     }.get(profile.circulation_level, 0)
 
 
 def _strength_bonus(profile: ElementProfile) -> int:
     return round((profile.day_master_strength_score - 50) * 0.25)
+
+
+def _required_role_penalty(amount: float, *, threshold: float = 0.75, scale: float = 6.0) -> float:
+    """Deduct only when an axis-defining ten-god function is materially absent."""
+
+    return max(0.0, threshold - amount) * scale
+
+
+def _pattern_function_bonus(profile: GyeokgukProfile | None) -> int:
+    """Return realization quality, not mere pattern-identification confidence."""
+
+    if profile is None:
+        return 0
+    return {
+        "properly_formed": 4,
+        "formed_with_conditions": 2,
+        "partially_formed": 0,
+        "latent_but_usable": 0,
+        "weak_or_fragmented": -4,
+        "undetermined": 0,
+    }.get(profile.formation_state, 0)
 
 
 def _element_quality(profile: ElementProfile, element: str) -> int:
@@ -342,6 +364,241 @@ CYCLE_SIGNAL_AXIS_LINKS = {
     "controls_resource_to_output": ("communication_expression", "career_achievement", "decision_consistency", "affection_expression", "misunderstanding_prevention"),
     "controls_output_to_officer": ("responsibility_capacity", "organization_adaptability", "reputation_maintenance", "role_authority_alignment"),
     "controls_officer_to_peer": ("self_direction", "responsibility_capacity", "leadership_potential", "shared_asset_boundary", "inlaw_boundary_strength"),
+}
+
+GYEOKGUK_DOMAIN_ALIASES = {
+    "money": ("money",),
+    "career": ("career", "honor"),
+    "relationship": ("love", "social"),
+    "marriage": ("marriage",),
+    "personality": ("personality",),
+    "reputation": ("honor", "social"),
+}
+
+GYEOKGUK_CLASSICAL_AXIS_EFFECTS: dict[str, dict[str, float]] = {
+    "siksang_saengjae": {
+        "income_expansion": 4.8,
+        "money_potential": 3.8,
+        "reward_claim_strength": 3.2,
+        "business_expansion": 3.4,
+        "career_achievement": 2.5,
+        "communication_expression": 2.0,
+    },
+    "jaesaenggwan": {
+        "reward_claim_strength": 3.7,
+        "ownership_clarity": 3.2,
+        "deal_selection": 2.8,
+        "responsibility_capacity": 3.6,
+        "role_authority_alignment": 3.5,
+        "honor_recognition": 2.8,
+        "promotion_visibility": 2.5,
+    },
+    "jaeseong_generates_gwanseong": {
+        "reward_claim_strength": 3.4,
+        "ownership_clarity": 3.0,
+        "deal_selection": 2.6,
+        "responsibility_capacity": 3.2,
+        "role_authority_alignment": 3.2,
+        "honor_recognition": 2.6,
+    },
+    "gwanin_sangsaeng": {
+        "honor_recognition": 4.0,
+        "organization_adaptability": 3.8,
+        "reputation_maintenance": 3.6,
+        "academic_expertise": 3.2,
+        "crisis_recovery": 2.8,
+        "marriage_stability": 2.4,
+    },
+    "gwanseong_generates_inseong": {
+        "honor_recognition": 3.4,
+        "organization_adaptability": 3.2,
+        "academic_expertise": 2.9,
+        "crisis_recovery": 2.5,
+        "household_stability": 2.0,
+    },
+    "salin_sangsaeng": {
+        "responsibility_capacity": 4.0,
+        "crisis_recovery": 3.8,
+        "career_achievement": 3.0,
+        "academic_expertise": 2.6,
+        "marriage_crisis_management": 2.4,
+    },
+    "siksin_jesal": {
+        "responsibility_capacity": 4.0,
+        "career_achievement": 3.5,
+        "crisis_recovery": 3.5,
+        "organization_adaptability": 2.6,
+        "reputation_maintenance": 2.4,
+    },
+    "siksang_controls_gwanseong": {
+        "responsibility_capacity": 2.8,
+        "career_achievement": 2.7,
+        "crisis_recovery": 2.5,
+        "communication_expression": 2.1,
+        "organization_adaptability": -1.6,
+    },
+    "sanggwan_gyeongwan": {
+        "communication_expression": 3.2,
+        "business_expansion": 2.4,
+        "honor_recognition": -4.4,
+        "reputation_maintenance": -4.0,
+        "organization_adaptability": -4.0,
+        "role_authority_alignment": -3.4,
+        "marriage_stability": -2.2,
+    },
+    "jaegeukin": {
+        "practical_planning": 2.6,
+        "deal_selection": 2.4,
+        "investment_trading_sense": 2.0,
+        "academic_expertise": -2.6,
+        "decision_consistency": -2.2,
+        "conflict_recovery": -1.8,
+    },
+    "wealth_controls_resource": {
+        "practical_planning": 2.4,
+        "deal_selection": 2.2,
+        "investment_trading_sense": 1.8,
+        "academic_expertise": -2.2,
+        "decision_consistency": -1.9,
+    },
+    "bigeop_jaengjae": {
+        "self_direction": 2.0,
+        "leadership_potential": 1.5,
+        "business_expansion": 1.8,
+        "asset_retention": -4.8,
+        "shared_asset_boundary": -4.7,
+        "ownership_clarity": -4.0,
+        "spending_control": -3.0,
+        "household_finance_alignment": -2.6,
+    },
+    "bigeop_controls_wealth": {
+        "business_expansion": 2.0,
+        "self_direction": 1.6,
+        "asset_retention": -3.2,
+        "shared_asset_boundary": -3.1,
+        "ownership_clarity": -2.8,
+    },
+    "gwanseong_controls_bigeop": {
+        "shared_asset_boundary": 4.1,
+        "ownership_clarity": 3.8,
+        "loss_avoidance": 3.4,
+        "boundary_management": 3.2,
+        "responsibility_capacity": 3.0,
+        "role_authority_alignment": 2.8,
+    },
+    "inseong_dosik": {
+        "academic_expertise": 2.9,
+        "decision_consistency": 2.4,
+        "communication_expression": -4.1,
+        "income_expansion": -3.5,
+        "career_achievement": -3.0,
+        "reward_claim_strength": -2.8,
+        "relationship_progression": -2.2,
+    },
+    "inseong_controls_output": {
+        "academic_expertise": 2.6,
+        "decision_consistency": 2.2,
+        "communication_expression": -3.7,
+        "income_expansion": -3.0,
+        "career_achievement": -2.6,
+    },
+    "siksang_overload": {
+        "communication_expression": 2.0,
+        "business_expansion": 1.5,
+        "reputation_maintenance": -3.5,
+        "organization_adaptability": -3.2,
+        "spending_control": -2.4,
+        "relationship_stability": -2.1,
+    },
+    "gwansal_honhap": {
+        "responsibility_capacity": -3.6,
+        "role_authority_alignment": -3.4,
+        "organization_adaptability": -2.8,
+        "marriage_stability": -2.5,
+        "crisis_recovery": 1.2,
+    },
+    "gwansal_overload": {
+        "responsibility_capacity": -4.0,
+        "role_authority_alignment": -3.8,
+        "organization_adaptability": -3.4,
+        "marriage_crisis_management": -2.8,
+        "crisis_recovery": -2.2,
+    },
+    "jaesaengsal": {
+        "responsibility_capacity": 1.8,
+        "career_achievement": 1.6,
+        "role_authority_alignment": -2.8,
+        "loss_avoidance": -2.4,
+        "marriage_crisis_management": -1.8,
+    },
+    "jaeda_sinyak_risk": {
+        "money_potential": 1.6,
+        "asset_retention": -4.2,
+        "loss_avoidance": -3.8,
+        "spending_control": -3.4,
+        "shared_asset_boundary": -3.0,
+        "crisis_recovery": -2.2,
+    },
+    "inbi_overload": {
+        "decision_consistency": 2.0,
+        "academic_expertise": 1.7,
+        "income_expansion": -3.0,
+        "business_expansion": -2.8,
+        "relationship_progression": -2.2,
+        "change_adaptability": -2.0,
+    },
+    "bigeop_generates_siksang": {
+        "communication_expression": 2.8,
+        "career_achievement": 2.4,
+        "business_expansion": 2.2,
+        "income_expansion": 1.9,
+        "relationship_progression": 1.6,
+    },
+    "inseong_generates_bigeop": {
+        "self_direction": 2.4,
+        "decision_consistency": 2.2,
+        "household_stability": 1.8,
+        "asset_retention": -1.8,
+        "shared_asset_boundary": -1.6,
+    },
+    "gwanseong_same_group": {
+        "honor_recognition": 2.0,
+        "responsibility_capacity": -2.4,
+        "role_authority_alignment": -2.2,
+        "organization_adaptability": -1.8,
+        "reputation_maintenance": -1.6,
+    },
+    "wealth_same_group": {
+        "money_potential": 2.2,
+        "income_expansion": 1.6,
+        "asset_retention": -2.8,
+        "ownership_clarity": -2.2,
+        "loss_avoidance": -2.2,
+        "spending_control": -1.8,
+    },
+    "siksang_same_group": {
+        "communication_expression": 2.4,
+        "career_achievement": 1.8,
+        "income_expansion": 1.6,
+        "reputation_maintenance": -2.2,
+        "organization_adaptability": -1.7,
+    },
+    "inseong_same_group": {
+        "academic_expertise": 2.8,
+        "decision_consistency": 2.2,
+        "practical_planning": 1.6,
+        "change_adaptability": -2.3,
+        "communication_expression": -1.9,
+        "relationship_progression": -1.6,
+    },
+    "bigeop_same_group": {
+        "self_direction": 2.7,
+        "leadership_potential": 2.0,
+        "shared_asset_boundary": -2.8,
+        "asset_retention": -2.2,
+        "relationship_stability": -2.0,
+        "boundary_management": -1.8,
+    },
 }
 
 
@@ -775,10 +1032,10 @@ def _cycle_axis_primary_context_codes(
 
     polarity = str(signal.get("polarity") or "mixed")
     if polarity == "pressure":
-        return basis_codes[:1], counter_signals[:2]
+        return basis_codes[:3], counter_signals[:4]
     if polarity == "mixed":
-        return basis_codes[:2], counter_signals[:1]
-    return basis_codes[:2], counter_signals[:1]
+        return basis_codes[:4], counter_signals[:2]
+    return basis_codes[:5], counter_signals[:2]
 
 
 def _cycle_regulation_axis_adjustments(
@@ -1003,6 +1260,192 @@ def _apply_month_governance_axis_adjustments(
 ) -> list[LifeFeatureScore]:
     axis_keys = {axis.key for axis in axes}
     adjustments = _month_governance_axis_adjustments(month_governance_profile, axis_keys)
+    adjusted: list[LifeFeatureScore] = []
+    for axis in axes:
+        adjustment = adjustments.get(axis.key)
+        if not adjustment:
+            adjusted.append(axis)
+            continue
+        basis_codes = adjustment["basis_codes"]
+        counter_signals = adjustment["counter_signals"]
+        assert isinstance(basis_codes, list)
+        assert isinstance(counter_signals, list)
+        adjusted.append(
+            _axis(
+                axis.key,
+                axis.category,
+                axis.label,
+                axis.score + float(adjustment["score"]),
+                list(axis.basis_codes) + [str(code) for code in basis_codes],
+                list(axis.counter_signals) + [str(code) for code in counter_signals],
+            )
+        )
+    return adjusted
+
+
+def _gyeokguk_domain_axis_keys(domains: list[str], axis_keys: set[str]) -> list[str]:
+    keys: list[str] = []
+    for domain in domains:
+        for alias in GYEOKGUK_DOMAIN_ALIASES.get(str(domain), (str(domain),)):
+            keys.extend(DOMAIN_AXIS_LINKS.get(alias, ()))
+    return [key for key in dict.fromkeys(keys) if key in axis_keys]
+
+
+def _gyeokguk_classical_tags(basis_codes: list[str]) -> list[str]:
+    tags: list[str] = []
+    prefixes = (
+        "gyeokguk_single_classical_action:",
+        "gyeokguk_dual_classical_action:",
+        "gyeokguk_dual_first_single_classical_action:",
+        "gyeokguk_dual_second_single_classical_action:",
+    )
+    for code in basis_codes:
+        text = str(code)
+        for prefix in prefixes:
+            if text.startswith(prefix):
+                tags.append(text.removeprefix(prefix))
+                break
+    return list(dict.fromkeys(tags))
+
+
+def _gyeokguk_context_multiplier(match: object, *, delta: float, source: str) -> float:
+    verdict = str(getattr(match, "verdict", "") or "")
+    context_state = str(getattr(match, "context_judgment_state", "") or "")
+    month_fit = str(getattr(match, "month_fit_state", "") or "")
+    presence_score = int(getattr(match, "presence_score", 0) or 0)
+    counter_count = len(list(getattr(match, "counter_signals", []) or []))
+    pattern_state = str(getattr(match, "pattern_combination_state", "") or getattr(match, "pattern_effect_state", "") or "")
+    base = 0.62 + min(0.58, max(0, presence_score - 32) / 95)
+    if source == "dual":
+        base += 0.12
+    if context_state in {
+        "constructive_by_context",
+        "context_strengthens_action",
+        "context_strengthens_pair",
+        "structure_supports_expression",
+        "medicine_can_work",
+        "medicine_or_regulator",
+    }:
+        base += 0.22 if delta >= 0 else -0.12
+    if verdict in {"constructive_action", "constructive_dual_action", "center_reinforced", "feeds_pattern_source"}:
+        base += 0.16 if delta >= 0 else -0.08
+    if month_fit in {"supports_month_command", "usable_by_month_command", "both_supported_by_month_command"}:
+        base += 0.14 if delta >= 0 else -0.06
+    if pattern_state in {"pattern_support", "pattern_center_support", "medicine_can_work"}:
+        base += 0.08 if delta >= 0 else -0.04
+
+    if context_state in {
+        "risk_by_context",
+        "risk_is_reinforced",
+        "month_pressure_confirms_risk",
+        "context_weakens_action",
+        "context_weakens_pair",
+    }:
+        base += 0.2 if delta < 0 else -0.18
+    if verdict in {"risk_activated", "risk_dual_action", "destructive_action", "overload_action"}:
+        base += 0.2 if delta < 0 else -0.18
+    if month_fit in {
+        "harms_month_command",
+        "one_side_pressure_by_month_command",
+        "both_pressure_by_month_command",
+    }:
+        base += 0.12 if delta < 0 else -0.12
+    if counter_count:
+        base += min(0.16, counter_count * 0.04) if delta < 0 else -min(0.16, counter_count * 0.04)
+    return max(0.28, min(1.42, base))
+
+
+def _gyeokguk_match_salience(match: object, *, source: str) -> float:
+    score = float(getattr(match, "presence_score", 0) or 0)
+    domains = len(list(getattr(match, "domain_priority", []) or []))
+    tags = len(_gyeokguk_classical_tags(list(getattr(match, "basis_codes", []) or [])))
+    salience = score + domains * 4 + tags * 2
+    context_state = str(getattr(match, "context_judgment_state", "") or "")
+    if context_state in {"context_strengthens_action", "context_strengthens_pair", "medicine_can_work"}:
+        salience += 12
+    if context_state in {"risk_is_reinforced", "month_pressure_confirms_risk"}:
+        salience += 14
+    if source == "dual":
+        salience += 10
+    return salience
+
+
+def _gyeokguk_axis_adjustments(
+    gyeokguk_profile: GyeokgukProfile | None,
+    axis_keys: set[str],
+) -> dict[str, dict[str, object]]:
+    adjustments: dict[str, dict[str, object]] = {}
+    if gyeokguk_profile is None:
+        return adjustments
+
+    matches: list[tuple[str, object]] = [
+        *[("dual", match) for match in list(gyeokguk_profile.dual_ten_god_action_matches or [])],
+        *[("single", match) for match in list(gyeokguk_profile.ten_god_action_matches or [])],
+    ]
+    matches.sort(key=lambda item: _gyeokguk_match_salience(item[1], source=item[0]), reverse=True)
+    seen: set[tuple[str, str, str, str]] = set()
+    axis_totals: dict[str, float] = {}
+    for source, match in matches[:14]:
+        basis_codes = [str(code) for code in list(getattr(match, "basis_codes", []) or [])]
+        counter_signals = [str(code) for code in list(getattr(match, "counter_signals", []) or [])]
+        tags = _gyeokguk_classical_tags(basis_codes)
+        if not tags:
+            continue
+        domains = [str(domain) for domain in list(getattr(match, "domain_priority", []) or [])]
+        domain_axis_keys = _gyeokguk_domain_axis_keys(domains[:3], axis_keys)
+        signature_base = (
+            str(getattr(match, "pattern", "") or ""),
+            str(getattr(match, "rule_key", "") or ""),
+            str(getattr(match, "exact_pair_key", "") or str(getattr(match, "action_key", "") or "")),
+        )
+        for tag in tags[:5]:
+            tag_effects = GYEOKGUK_CLASSICAL_AXIS_EFFECTS.get(tag, {})
+            if not tag_effects:
+                continue
+            signature = (*signature_base, tag)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            for axis_key, raw_delta in tag_effects.items():
+                if axis_key not in axis_keys:
+                    continue
+                if domain_axis_keys and axis_key not in domain_axis_keys and abs(raw_delta) < 3.0:
+                    continue
+                multiplier = _gyeokguk_context_multiplier(match, delta=raw_delta, source=source)
+                delta = raw_delta * multiplier
+                if source == "single":
+                    delta *= 0.82
+                current = axis_totals.get(axis_key, 0.0)
+                next_total = max(-9.0, min(9.0, current + delta))
+                applied = next_total - current
+                if abs(applied) < 0.18:
+                    continue
+                axis_totals[axis_key] = next_total
+                basis = [
+                    f"feature_gyeokguk_{source}_{axis_key}_{tag}",
+                    f"feature_gyeokguk_pattern_{gyeokguk_profile.primary_pattern}",
+                ]
+                counters: list[str] = []
+                if applied < 0:
+                    counters.append(f"feature_gyeokguk_counter_{source}_{axis_key}_{tag}")
+                if counter_signals and applied < 0:
+                    counters.extend(counter_signals[:2])
+                _add_axis_adjustment(
+                    adjustments,
+                    axis_key,
+                    score=applied,
+                    basis_codes=basis + basis_codes[:3],
+                    counter_signals=counters,
+                )
+    return adjustments
+
+
+def _apply_gyeokguk_axis_adjustments(
+    axes: list[LifeFeatureScore],
+    gyeokguk_profile: GyeokgukProfile | None,
+) -> list[LifeFeatureScore]:
+    axis_keys = {axis.key for axis in axes}
+    adjustments = _gyeokguk_axis_adjustments(gyeokguk_profile, axis_keys)
     adjusted: list[LifeFeatureScore] = []
     for axis in axes:
         adjustment = adjustments.get(axis.key)
@@ -1251,8 +1694,7 @@ def _axis(
     )
 
 
-def _sal_present(auxiliary: AuxiliaryProfile, sal_key: str) -> bool:
-    return any(sal_key in values for values in auxiliary.sal_by_position.values())
+AUXILIARY_DIRECT_SCORE_WEIGHTS: dict[str, float] = {}
 
 
 def build_life_feature_profile(
@@ -1266,6 +1708,7 @@ def build_life_feature_profile(
     integrated_saju_profile: IntegratedSajuProfile | None = None,
     cycle_regulation_profile: dict[str, object] | None = None,
     month_governance_profile: MonthGovernanceProfile | None = None,
+    gyeokguk_profile: GyeokgukProfile | None = None,
 ) -> LifeFeatureProfile:
     """Build differentiated life-feature axes from natal structure."""
 
@@ -1283,9 +1726,11 @@ def build_life_feature_profile(
     day_conflict = _interaction_count(branch_interactions, {"clash", "punishment", "harm", "break", "self_punishment"}, "day")
     month_conflict = _interaction_count(branch_interactions, {"clash", "punishment", "harm", "break", "self_punishment"}, "month")
     combines = _interaction_count(branch_interactions, {"six_combine", "three_harmony", "three_harmony_half", "three_meeting"})
-    peach = 5 if _sal_present(auxiliary_profile, "peach_blossom") else 0
-    travel = 4 if _sal_present(auxiliary_profile, "travel_horse") else 0
-    pattern_bonus = 5 if pattern_profile.pattern_confidence in {"high", "medium_high"} else 0
+    # 신살은 보조 근거와 표시 재료로만 사용하며 본체 지표를 직접 가감하지 않는다.
+    _ = auxiliary_profile
+    # Confidence says how clearly a pattern was identified, not whether it
+    # functions well. Only the formation state may raise or lower a life axis.
+    pattern_bonus = _pattern_function_bonus(gyeokguk_profile)
     day_element = element_profile.day_master_element
     role_elements = {
         "peer": day_element,
@@ -1350,7 +1795,6 @@ def build_life_feature_profile(
             + output * 8
             + element_quality["wealth"] * 0.4
             + element_quality["output"] * 0.6
-            + travel
             + circulation
             - month_conflict * 3,
             (
@@ -1424,7 +1868,7 @@ def build_life_feature_profile(
             + officer * 4
             + element_quality["resource"] * 0.6
             + element_quality["officer"] * 0.3
-            + max(0, strength)
+            + strength
             - peer * 6
             - wealth * 1.5,
             ["feature_resource_retention", "feature_officer_order"]
@@ -1445,7 +1889,7 @@ def build_life_feature_profile(
             + element_quality["wealth"] * 0.35
             + element_quality["officer"] * 0.5
             + element_quality["resource"] * 0.35
-            + max(0, strength) * 0.35
+            + strength * 0.35
             - peer * 4.5
             - day_conflict * 3,
             ["feature_wealth_property_right", "feature_officer_title_standard", "feature_resource_document_basis"]
@@ -1469,7 +1913,7 @@ def build_life_feature_profile(
             + element_quality["officer"] * 0.45
             + element_quality["resource"] * 0.35
             + element_quality["wealth"] * 0.25
-            + max(0, strength) * 0.25
+            + strength * 0.25
             - peer * 5
             - day_conflict * 3
             - month_conflict * 1.5,
@@ -1495,7 +1939,7 @@ def build_life_feature_profile(
             + element_quality["resource"] * 0.4
             - output * 3
             - peer * 4
-            + max(0, strength),
+            + strength,
             ["feature_officer_control", "feature_resource_planning"]
             + element_basis["officer"]
             + element_basis["resource"],
@@ -1518,7 +1962,6 @@ def build_life_feature_profile(
             + element_quality["wealth"] * 0.5
             + element_quality["output"] * 0.5
             + element_quality["resource"] * 0.2
-            + travel
             + circulation
             - month_conflict * 2,
             ["feature_wealth_trade", "feature_output_market", "feature_resource_review"]
@@ -1540,7 +1983,7 @@ def build_life_feature_profile(
             + element_quality["resource"] * 0.4
             + element_quality["officer"] * 0.3
             + element_quality["wealth"] * 0.3
-            + max(0, strength) * 0.4
+            + strength * 0.4
             - peer * 2
             - output,
             ["feature_resource_money_attitude", "feature_officer_money_standard", "feature_wealth_value_sense"]
@@ -1562,7 +2005,7 @@ def build_life_feature_profile(
             + element_quality["officer"] * 0.4
             + element_quality["resource"] * 0.4
             + element_quality["wealth"] * 0.3
-            + max(0, strength) * 0.4
+            + strength * 0.4
             - sang_gwan * 2
             - day_conflict * 3,
             ["feature_contract_review", "feature_resource_review", "feature_officer_standard"]
@@ -1583,7 +2026,7 @@ def build_life_feature_profile(
             + officer * 5
             + element_quality["resource"] * 0.5
             + element_quality["officer"] * 0.5
-            + max(0, strength) * 0.5
+            + strength * 0.5
             - peer * 3
             - output * 2
             - day_conflict * 2,
@@ -1609,7 +2052,7 @@ def build_life_feature_profile(
             + element_quality["output"] * 0.2
             + circulation
             + pattern_bonus
-            + max(0, strength) * 0.5
+            + strength * 0.5
             - month_conflict * 1.5,
             ["feature_wealth_growth", "feature_resource_accumulation", "feature_output_to_wealth"]
             + element_basis["wealth"]
@@ -1651,7 +2094,6 @@ def build_life_feature_profile(
             + jeong_gwan * 4
             + element_quality["officer"] * 0.6
             + element_quality["resource"] * 0.4
-            + peach
             - sang_gwan * 2,
             ["feature_officer_recognition", "feature_resource_reputation"]
             + element_basis["officer"]
@@ -1675,7 +2117,6 @@ def build_life_feature_profile(
             + element_quality["officer"] * 0.55
             + element_quality["output"] * 0.25
             + element_quality["resource"] * 0.3
-            + peach * 0.5
             + pattern_bonus * 0.5
             - sang_gwan * 2.2
             - month_conflict * 2.5,
@@ -1760,7 +2201,6 @@ def build_life_feature_profile(
             43
             + output * 7
             + element_quality["output"] * 0.5
-            + peach
             + combines * 4
             + peer * 2
             - day_conflict * 3,
@@ -1778,8 +2218,7 @@ def build_life_feature_profile(
             + element_quality["wealth"] * 0.45
             + element_quality["officer"] * 0.35
             + element_quality["resource"] * 0.25
-            + peach
-            + max(0, strength) * 0.25
+            + strength * 0.25
             - day_conflict * 4
             - peer * 1.5,
             ["feature_love_selectivity", "feature_wealth_attraction", "feature_officer_partner_standard"]
@@ -1803,7 +2242,6 @@ def build_life_feature_profile(
             + element_quality["resource"] * 0.35
             + element_quality["wealth"] * 0.35
             + element_quality["officer"] * 0.25
-            + peach * 0.6
             - day_conflict * 3.5
             - peer * 1.5,
             ["feature_resource_affection_trust", "feature_wealth_affection_reality", "feature_officer_affection_commitment"]
@@ -1825,7 +2263,6 @@ def build_life_feature_profile(
             + wealth * 3
             + officer * 3
             + combines * 5
-            + peach
             + element_quality["output"] * 0.45
             + element_quality["wealth"] * 0.25
             + element_quality["officer"] * 0.25
@@ -1871,7 +2308,6 @@ def build_life_feature_profile(
             + output * 7
             + peer * 2
             + combines * 2
-            + peach
             + element_quality["output"] * 0.6
             + element_quality["peer"] * 0.2
             - resource * 2
@@ -1918,7 +2354,7 @@ def build_life_feature_profile(
             + combines * 3
             + element_quality["resource"] * 0.4
             + element_quality["officer"] * 0.35
-            + max(0, strength) * 0.25
+            + strength * 0.25
             - day_conflict * 3
             - peer * 1.5,
             ["feature_resource_relationship_memory", "feature_officer_relationship_closure", "feature_connection_signal"]
@@ -1939,7 +2375,6 @@ def build_life_feature_profile(
             + peer * 3
             + element_quality["wealth"] * 0.5
             + element_quality["output"] * 0.5
-            + travel
             + circulation
             - resource * 1.5,
             ["feature_wealth_trade", "feature_output_market", "feature_peer_drive"]
@@ -1993,7 +2428,6 @@ def build_life_feature_profile(
             + jeong_gwan * 3
             + element_quality["officer"] * 0.5
             + element_quality["resource"] * 0.4
-            + peach
             - sang_gwan * 3
             - month_conflict * 2
             - day_conflict,
@@ -2021,7 +2455,9 @@ def build_life_feature_profile(
             + element_quality["resource"] * 0.3
             + strength
             + circulation
-            - day_conflict * 2,
+            - day_conflict * 2
+            - _required_role_penalty(officer, scale=7.0)
+            - _required_role_penalty(resource, scale=4.0),
             ["feature_officer_responsibility", "feature_pyeon_gwan_pressure_handling", "feature_resource_support"]
             + element_basis["officer"]
             + element_basis["resource"],
@@ -2044,7 +2480,7 @@ def build_life_feature_profile(
             + element_quality["officer"] * 0.5
             + element_quality["resource"] * 0.35
             + element_quality["wealth"] * 0.25
-            + max(0, strength) * 0.3
+            + strength * 0.3
             + pattern_bonus * 0.3
             - peer * 2.5
             - day_conflict * 2
@@ -2085,7 +2521,7 @@ def build_life_feature_profile(
             + officer * 5
             + element_quality["resource"] * 0.4
             + element_quality["officer"] * 0.4
-            + max(0, strength)
+            + strength
             - sang_gwan * 3
             - day_conflict * 4,
             ["feature_resource_review", "feature_officer_consistency"]
@@ -2101,7 +2537,6 @@ def build_life_feature_profile(
             43
             + output * 8
             + element_quality["output"] * 0.6
-            + peach
             + combines * 2
             + peer * 2
             - resource * 1.5,
@@ -2117,7 +2552,7 @@ def build_life_feature_profile(
             + resource * 4
             + element_quality["officer"] * 0.4
             + element_quality["resource"] * 0.4
-            + max(0, strength)
+            + strength
             - day_conflict * 6
             - peer * 2,
             ["feature_officer_boundary", "feature_resource_self_protection"]
@@ -2154,7 +2589,6 @@ def build_life_feature_profile(
             + output * 3
             + element_quality["output"] * 0.3
             + combines * 4
-            + travel
             + circulation
             - month_conflict * 3,
             ["feature_connection_signal", "feature_change_mobility"] + element_basis["output"],
@@ -2169,7 +2603,7 @@ def build_life_feature_profile(
             + resource * 3
             + element_quality["resource"] * 0.3
             + combines * 5
-            + max(0, strength)
+            + strength
             - day_conflict * 8
             - peer * 2,
             ["feature_day_palace_relationship", "feature_connection_signal"] + element_basis["resource"],
@@ -2186,6 +2620,8 @@ def build_life_feature_profile(
             + element_quality["resource"] * 0.2
             + combines * 4
             - day_conflict * 9
+            - _required_role_penalty(officer, scale=6.0)
+            - _required_role_penalty(resource, scale=5.0)
             + (4 if _position_has(position_signals, "day", "marriage") else 0),
             ["feature_day_palace_marriage", "feature_responsibility_support"]
             + element_basis["officer"]
@@ -2208,7 +2644,9 @@ def build_life_feature_profile(
             + element_quality["resource"] * 0.2
             + (5 if _position_has(position_signals, "day", "marriage") else 0)
             - day_conflict * 7
-            - peer * 1.5,
+            - peer * 1.5
+            - _required_role_penalty(officer, scale=6.0)
+            - _required_role_penalty(wealth, scale=6.0),
             ["feature_spouse_match", "feature_day_palace_marriage", "feature_officer_partner_standard"]
             + element_basis["officer"]
             + element_basis["wealth"]
@@ -2232,7 +2670,10 @@ def build_life_feature_profile(
             + element_quality["resource"] * 0.3
             + (4 if _position_has(position_signals, "day", "marriage") else 0)
             - day_conflict * 5
-            - peer * 2,
+            - peer * 2
+            - _required_role_penalty(officer, scale=5.0)
+            - _required_role_penalty(wealth, scale=5.0)
+            - _required_role_penalty(resource, scale=3.0),
             ["feature_spouse_support", "feature_officer_partner_reliability", "feature_wealth_household_resource"]
             + element_basis["officer"]
             + element_basis["wealth"]
@@ -2255,9 +2696,11 @@ def build_life_feature_profile(
             + element_quality["officer"] * 0.4
             + element_quality["wealth"] * 0.3
             + element_quality["resource"] * 0.3
-            + max(0, strength) * 0.25
+            + strength * 0.25
             - sang_gwan * 1.5
-            - day_conflict * 5,
+            - day_conflict * 5
+            - _required_role_penalty(officer, scale=6.0)
+            - _required_role_penalty(wealth, scale=5.0),
             ["feature_marriage_timing", "feature_officer_commitment", "feature_wealth_household_reality"]
             + element_basis["officer"]
             + element_basis["wealth"]
@@ -2279,9 +2722,11 @@ def build_life_feature_profile(
             + element_quality["wealth"] * 0.35
             + element_quality["officer"] * 0.25
             + (4 if _position_has(position_signals, "day", "marriage") else 0)
-            + max(0, strength) * 0.25
+            + strength * 0.25
             - day_conflict * 5
-            - peer * 2,
+            - peer * 2
+            - _required_role_penalty(resource, scale=5.0)
+            - _required_role_penalty(wealth, scale=5.0),
             ["feature_household_stability", "feature_resource_care", "feature_wealth_household_reality"]
             + element_basis["resource"]
             + element_basis["wealth"]
@@ -2304,7 +2749,9 @@ def build_life_feature_profile(
             + element_quality["officer"] * 0.3
             + (3 if _position_has(position_signals, "day", "marriage") else 0)
             - peer * 3.5
-            - day_conflict * 4,
+            - day_conflict * 4
+            - _required_role_penalty(wealth, scale=7.0)
+            - _required_role_penalty(officer, scale=4.0),
             ["feature_wealth_couple_finance", "feature_resource_couple_record", "feature_officer_couple_rule"]
             + element_basis["wealth"]
             + element_basis["resource"]
@@ -2329,7 +2776,9 @@ def build_life_feature_profile(
             + element_quality["wealth"] * 0.2
             + (4 if _position_has(position_signals, "day", "marriage") else 0)
             - day_conflict * 4
-            - peer,
+            - peer
+            - _required_role_penalty(officer, scale=6.0)
+            - _required_role_penalty(resource, scale=5.0),
             ["feature_family_responsibility", "feature_resource_care", "feature_officer_household_order"]
             + element_basis["resource"]
             + element_basis["officer"]
@@ -2349,9 +2798,11 @@ def build_life_feature_profile(
             + element_quality["officer"] * 0.35
             + element_quality["resource"] * 0.35
             + element_quality["wealth"] * 0.2
-            + max(0, strength) * 0.25
+            + strength * 0.25
             - day_conflict * 4
-            - peer * 2.5,
+            - peer * 2.5
+            - _required_role_penalty(officer, scale=5.0)
+            - _required_role_penalty(resource, scale=6.0),
             ["feature_officer_inlaw_boundary", "feature_resource_family_record", "feature_wealth_family_responsibility"]
             + element_basis["officer"]
             + element_basis["resource"]
@@ -2368,12 +2819,15 @@ def build_life_feature_profile(
             46
             + resource * 5
             + officer * 3
+            + output * 3
             + combines * 4
             + element_quality["resource"] * 0.5
             + element_quality["officer"] * 0.3
-            + max(0, strength)
+            + strength
             + circulation
-            - day_conflict * 5,
+            - day_conflict * 5
+            - _required_role_penalty(resource, scale=6.0)
+            - _required_role_penalty(output, scale=5.0),
             ["feature_relationship_repair", "feature_resource_recovery", "feature_officer_boundary"]
             + element_basis["resource"]
             + element_basis["officer"],
@@ -2388,13 +2842,16 @@ def build_life_feature_profile(
             44
             + resource * 5
             + officer * 4
+            + output * 2
             + combines * 3
             + element_quality["resource"] * 0.45
             + element_quality["officer"] * 0.35
-            + max(0, strength) * 0.3
+            + strength * 0.3
             + circulation * 0.5
             - day_conflict * 5
-            - month_conflict * 1.5,
+            - month_conflict * 1.5
+            - _required_role_penalty(resource, scale=6.0)
+            - _required_role_penalty(officer, scale=5.0),
             ["feature_resource_marriage_recovery", "feature_officer_marriage_rule", "feature_connection_signal"]
             + element_basis["resource"]
             + element_basis["officer"],
@@ -2410,7 +2867,7 @@ def build_life_feature_profile(
             47
             + resource * 5
             + element_quality["resource"] * 0.6
-            + max(0, strength)
+            + strength
             + circulation
             + len(element_profile.useful_elements) * 2
             - day_conflict * 2,
@@ -2423,6 +2880,7 @@ def build_life_feature_profile(
     axes = _apply_reception_axis_adjustments(axes, stem_reception_profile, integrated_saju_profile)
     axes = _apply_month_governance_axis_adjustments(axes, month_governance_profile)
     axes = _apply_cycle_regulation_axis_adjustments(axes, cycle_regulation_profile)
+    axes = _apply_gyeokguk_axis_adjustments(axes, gyeokguk_profile)
 
     axis_map = {axis.key: axis for axis in axes}
     top_axis_keys = [axis.key for axis in sorted(axes, key=lambda item: item.score, reverse=True)[:5]]

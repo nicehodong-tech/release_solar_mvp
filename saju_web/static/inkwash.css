@@ -5411,12 +5411,12 @@ body[data-view="premium"] .premium-life-stage-summary span {
   }
 
   body[data-view="premium"] .premium-visual-metric-card header {
-    grid-template-columns: minmax(0, 1fr) minmax(58px, auto);
+    grid-template-columns: minmax(0, 1fr) minmax(92px, auto);
     gap: 8px;
   }
 
   body[data-view="premium"] .premium-visual-metric-level {
-    min-width: 58px;
+    min-width: 92px;
   }
 
   body[data-view="premium"] .premium-visual-metric-level b {

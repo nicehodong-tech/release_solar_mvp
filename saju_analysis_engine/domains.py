@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import lru_cache
 from typing import Any
 
 from saju_birth_engine.models import BirthChartResult
@@ -13,6 +14,7 @@ from .constants import (
     ELEMENT_CONTROLS,
     ELEMENT_GENERATED_BY,
     ELEMENT_GENERATES,
+    ELEMENTS,
     DOMAIN_ORDER,
     TEN_GOD_GROUPS,
 )
@@ -1031,6 +1033,7 @@ def _natal_position_adjustments(structure: ChartStructure, domain: str) -> dict[
         support_code = f"{code}_useful_relation"
         burden_code = f"{code}_burden_relation"
         overuse_code = f"{code}_overuse_relation"
+        friction_code = f"{code}_structural_friction"
         if relation.relation_type in {"six_combine", "three_harmony", "three_harmony_half"}:
             if polarity.polarity == "burdensome":
                 totals["risk"] += _scale_delta(5, weight)
@@ -1051,6 +1054,11 @@ def _natal_position_adjustments(structure: ChartStructure, domain: str) -> dict[
                 totals["opportunity"] += _scale_delta(5, weight)
                 totals["probability"] += _scale_delta(2, weight)
                 totals["basis_codes"].append(support_code)
+                totals["risk"] += max(
+                    1,
+                    _scale_delta(7 * float(polarity.effective_friction or 0.0), weight),
+                )
+                totals["counter_signals"].append(friction_code)
             else:
                 totals["risk"] += _scale_delta(5 if polarity.polarity == "mixed" else 7, weight)
                 totals["probability"] += _scale_delta(1, weight)
@@ -1062,8 +1070,11 @@ def _natal_position_adjustments(structure: ChartStructure, domain: str) -> dict[
             if polarity.polarity == "supportive":
                 totals["opportunity"] += _scale_delta(3, weight)
                 totals["basis_codes"].append(support_code)
-                totals["risk"] += _scale_delta(1, weight)
-                totals["counter_signals"].append(code)
+                totals["risk"] += max(
+                    1,
+                    _scale_delta(5 * float(polarity.effective_friction or 0.0), weight),
+                )
+                totals["counter_signals"].append(friction_code)
             else:
                 totals["risk"] += _scale_delta(3 if polarity.polarity == "mixed" else 5, weight)
                 totals["counter_signals"].append(burden_code if polarity.polarity == "burdensome" else code)
@@ -1334,24 +1345,37 @@ def _combination_adjustments(structure: ChartStructure, domain: str) -> dict[str
     basis_codes: list[str] = []
     counter_signals: list[str] = []
 
+    grouped_signals: dict[str, list[Any]] = {}
     for signal in signals_for_domain(structure.combination_profile, domain, limit=12):
+        grouped_signals.setdefault(signal.combination_key, []).append(signal)
+
+    support_rank = 0
+    burden_rank = 0
+    for grouped in grouped_signals.values():
+        signal = max(grouped, key=lambda item: {"high": 3, "moderate": 2, "low": 1}.get(item.strength, 1))
         strength_bonus = {"high": 3, "moderate": 2, "low": 1}.get(signal.strength, 1)
-        if signal.basis_codes:
-            opportunity += strength_bonus
-            probability += 1 if signal.strength in {"high", "moderate"} else 0
-            basis_codes.extend(signal.basis_codes)
-        if signal.counter_signals:
-            risk += strength_bonus
-            probability -= 1 if signal.strength == "high" else 0
-            counter_signals.extend(signal.counter_signals)
+        grouped_basis_codes = list(dict.fromkeys(code for item in grouped for code in item.basis_codes))
+        grouped_counter_signals = list(dict.fromkeys(code for item in grouped for code in item.counter_signals))
+        if grouped_basis_codes:
+            support_rank += 1
+            rank_weight = 1.0 / support_rank
+            opportunity += strength_bonus * rank_weight
+            probability += (1 if signal.strength in {"high", "moderate"} else 0) * rank_weight
+            basis_codes.extend(grouped_basis_codes)
+        if grouped_counter_signals:
+            burden_rank += 1
+            rank_weight = 1.0 / burden_rank
+            risk += strength_bonus * rank_weight
+            probability -= (1 if signal.strength == "high" else 0) * rank_weight
+            counter_signals.extend(grouped_counter_signals)
         if signal.layer in {"heavenly_stem", "ten_god_chain"} and signal.strength == "high":
-            change += 1
+            change += 1.0 / max(1, support_rank)
 
     return {
-        "opportunity": opportunity,
-        "risk": risk,
-        "change": change,
-        "probability": probability,
+        "opportunity": round(opportunity),
+        "risk": round(risk),
+        "change": round(change),
+        "probability": round(probability),
         "basis_codes": list(dict.fromkeys(basis_codes)),
         "counter_signals": list(dict.fromkeys(counter_signals)),
     }
@@ -1502,9 +1526,7 @@ def _cycle_signal_selection_rank(domain: str, signal: dict[str, Any]) -> tuple[i
     )
 
 
-def _cycle_signal_flow_hits(signal: dict[str, Any], flow: FlowSignal) -> dict[str, Any]:
-    flow_elements = {str(element) for element in list(flow.activated_elements or []) if str(element)}
-    flow_groups = _flow_ten_god_groups(flow)
+def _cycle_signal_static_flow_facts(signal: dict[str, Any]) -> dict[str, Any]:
     source_element = str(signal.get("source_element") or "")
     target_element = str(signal.get("target_element") or "")
     source_group = str(signal.get("source_group") or "")
@@ -1515,9 +1537,118 @@ def _cycle_signal_flow_hits(signal: dict[str, Any], flow: FlowSignal) -> dict[st
     transform_group = str(signal.get("transform_group") or "")
     chain_elements = {str(element) for element in list(signal.get("elements") or []) if str(element)}
     chain_groups = {str(group) for group in list(signal.get("groups") or []) if str(group)}
-    activated_elements = {str(element) for element in list(signal.get("activated_elements") or []) if str(element)}
-    activated_groups = {str(group) for group in list(signal.get("activated_groups") or []) if str(group)}
-    original_groups = {str(group) for group in list(signal.get("original_groups") or []) if str(group)}
+    activated_elements = {
+        str(element) for element in list(signal.get("activated_elements") or []) if str(element)
+    }
+    activated_groups = {
+        str(group) for group in list(signal.get("activated_groups") or []) if str(group)
+    }
+    original_groups = {
+        str(group) for group in list(signal.get("original_groups") or []) if str(group)
+    }
+    signal_elements = {
+        source_element,
+        target_element,
+        bridge_element,
+        transform_element,
+        *chain_elements,
+        *activated_elements,
+    }
+    signal_groups = {
+        source_group,
+        target_group,
+        bridge_group,
+        transform_group,
+        *chain_groups,
+        *activated_groups,
+        *original_groups,
+    }
+    role_elements = {
+        element
+        for element in (source_element, target_element, bridge_element, transform_element)
+        if element
+    }
+    role_groups = {
+        group
+        for group in (source_group, target_group, bridge_group, transform_group)
+        if group
+    }
+    return {
+        "source_element": source_element,
+        "target_element": target_element,
+        "source_group": source_group,
+        "target_group": target_group,
+        "bridge_element": bridge_element,
+        "bridge_group": bridge_group,
+        "transform_element": transform_element,
+        "transform_group": transform_group,
+        "chain_elements": chain_elements,
+        "chain_groups": chain_groups,
+        "activated_elements": activated_elements,
+        "activated_groups": activated_groups,
+        "original_groups": original_groups,
+        "role_elements": role_elements,
+        "role_groups": role_groups,
+        "all_hit_elements": role_elements | chain_elements | activated_elements,
+        "all_hit_groups": role_groups | chain_groups | activated_groups | original_groups,
+        "signal_elements": {element for element in signal_elements if element},
+        "signal_groups": {group for group in signal_groups if group},
+        "element_group_map": _cycle_signal_element_group_map(signal),
+    }
+
+
+def _cycle_flow_static_context(flow: FlowSignal, domain: str) -> dict[str, Any]:
+    return {
+        "flow_elements": {
+            str(element) for element in list(flow.activated_elements or []) if str(element)
+        },
+        "flow_groups": _flow_ten_god_groups(flow),
+        "code_hit_index": _cycle_signal_flow_code_hit_index(flow, domain),
+        "relation_activations": [
+            (
+                str(getattr(interaction, "relation_type", "")),
+                {
+                    str(element)
+                    for element in relation_activated_elements(interaction)
+                    if str(element)
+                },
+            )
+            for interaction in list(flow.branch_interactions or [])
+        ],
+    }
+
+
+def _cycle_signal_flow_hits(
+    signal: dict[str, Any],
+    flow: FlowSignal,
+    *,
+    flow_context: dict[str, Any] | None = None,
+    signal_facts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    flow_elements = (
+        flow_context.get("flow_elements") or set()
+        if isinstance(flow_context, dict)
+        else {str(element) for element in list(flow.activated_elements or []) if str(element)}
+    )
+    flow_groups = (
+        flow_context.get("flow_groups") or set()
+        if isinstance(flow_context, dict)
+        else _flow_ten_god_groups(flow)
+    )
+    facts = signal_facts or _cycle_signal_static_flow_facts(signal)
+    source_element = str(facts.get("source_element") or "")
+    target_element = str(facts.get("target_element") or "")
+    source_group = str(facts.get("source_group") or "")
+    target_group = str(facts.get("target_group") or "")
+    bridge_element = str(facts.get("bridge_element") or "")
+    bridge_group = str(facts.get("bridge_group") or "")
+    transform_element = str(facts.get("transform_element") or "")
+    transform_group = str(facts.get("transform_group") or "")
+    chain_elements = facts.get("chain_elements") or set()
+    chain_groups = facts.get("chain_groups") or set()
+    activated_elements = facts.get("activated_elements") or set()
+    activated_groups = facts.get("activated_groups") or set()
+    original_groups = facts.get("original_groups") or set()
 
     hit_points: list[str] = []
     if source_element in flow_elements or source_group in flow_groups:
@@ -1533,14 +1664,14 @@ def _cycle_signal_flow_hits(signal: dict[str, Any], flow: FlowSignal) -> dict[st
     if (activated_elements & flow_elements) or (activated_groups & flow_groups):
         hit_points.append("branch")
     if not hit_points and (
-        ({source_element, target_element, bridge_element, transform_element} | activated_elements) & flow_elements
-        or ({source_group, target_group, bridge_group, transform_group} | activated_groups | original_groups) & flow_groups
+        ((facts.get("role_elements") or set()) | activated_elements) & flow_elements
+        or ((facts.get("role_groups") or set()) | activated_groups | original_groups) & flow_groups
     ):
         hit_points.append("edge")
     return {
         "hit_points": list(dict.fromkeys(hit_points)),
-        "hit_elements": sorted(({source_element, target_element, bridge_element, transform_element} | chain_elements | activated_elements) & flow_elements),
-        "hit_groups": sorted(({source_group, target_group, bridge_group, transform_group} | chain_groups | activated_groups | original_groups) & flow_groups),
+        "hit_elements": sorted((facts.get("all_hit_elements") or set()) & flow_elements),
+        "hit_groups": sorted((facts.get("all_hit_groups") or set()) & flow_groups),
     }
 
 
@@ -1567,13 +1698,15 @@ def _cycle_signal_flow_edge_contexts(
     source_hit_elements: list[str],
     relation_hit_elements: list[str],
     relation_hits: list[str],
+    *,
+    element_groups: dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
     month_cycle_fit = dict(signal.get("month_cycle_fit_context") or {})
     edge_contexts = [edge for edge in list(month_cycle_fit.get("edge_contexts") or []) if isinstance(edge, dict)]
     if not edge_contexts:
         return []
 
-    element_groups = _cycle_signal_element_group_map(signal)
+    element_groups = element_groups or _cycle_signal_element_group_map(signal)
     groups_from_elements: set[str] = set()
     for element in [*source_hit_elements, *relation_hit_elements]:
         groups_from_elements.update(element_groups.get(str(element), set()))
@@ -1614,29 +1747,7 @@ def _cycle_signal_flow_edge_contexts(
     return results
 
 
-def _cycle_signal_flow_activation_context(domain: str, signal: dict[str, Any], flow: FlowSignal) -> dict[str, Any]:
-    hits = _cycle_signal_flow_hits(signal, flow)
-    signal_id = str(signal.get("signal_id") or "")
-    relation = str(signal.get("relation") or "")
-    signal_elements = {
-        str(signal.get("source_element") or ""),
-        str(signal.get("target_element") or ""),
-        str(signal.get("bridge_element") or ""),
-        str(signal.get("transform_element") or ""),
-        *[str(element) for element in list(signal.get("elements") or [])],
-        *[str(element) for element in list(signal.get("activated_elements") or [])],
-    }
-    signal_elements = {element for element in signal_elements if element}
-    signal_groups = {
-        str(signal.get("source_group") or ""),
-        str(signal.get("target_group") or ""),
-        str(signal.get("bridge_group") or ""),
-        str(signal.get("transform_group") or ""),
-        *[str(group) for group in list(signal.get("groups") or [])],
-        *[str(group) for group in list(signal.get("activated_groups") or [])],
-        *[str(group) for group in list(signal.get("original_groups") or [])],
-    }
-    signal_groups = {group for group in signal_groups if group}
+def _cycle_signal_flow_code_hit_index(flow: FlowSignal, domain: str) -> dict[str, set[str]]:
     domain_score = dict((flow.domain_scores or {}).get(domain, {}) or {})
     flow_codes = [
         *[str(code) for code in list(flow.basis_codes or [])],
@@ -1650,8 +1761,61 @@ def _cycle_signal_flow_activation_context(domain: str, signal: dict[str, Any], f
     source_hit_elements: list[str] = []
     strength = 0.0
 
+    code_hit_index: dict[str, set[str]] = {
+        prefix: set()
+        for prefix in (
+            "annual_stem_",
+            "annual_branch_main_",
+            "year_branch_",
+            "annual_branch_hidden_",
+            "daeun_stem_",
+            "daeun_branch_main_",
+            "daeun_branch_hidden_",
+        )
+    }
+    for code in flow_codes:
+        text = str(code)
+        for prefix in code_hit_index:
+            if not text.startswith(prefix):
+                continue
+            for element in ELEMENTS:
+                if f"_{element}" in text:
+                    code_hit_index[prefix].add(element)
+    return code_hit_index
+
+
+def _cycle_signal_flow_activation_context(
+    domain: str,
+    signal: dict[str, Any],
+    flow: FlowSignal,
+    *,
+    code_hit_index: dict[str, set[str]] | None = None,
+    flow_context: dict[str, Any] | None = None,
+    signal_facts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    facts = signal_facts or _cycle_signal_static_flow_facts(signal)
+    hits = _cycle_signal_flow_hits(
+        signal,
+        flow,
+        flow_context=flow_context,
+        signal_facts=facts,
+    )
+    signal_id = str(signal.get("signal_id") or "")
+    relation = str(signal.get("relation") or "")
+    signal_elements = facts.get("signal_elements") or set()
+    signal_groups = facts.get("signal_groups") or set()
+    code_hit_index = (
+        code_hit_index
+        or (flow_context or {}).get("code_hit_index")
+        or _cycle_signal_flow_code_hit_index(flow, domain)
+    )
+    source_hits: list[str] = []
+    direct_source_hits: list[str] = []
+    source_hit_elements: list[str] = []
+    strength = 0.0
+
     def code_hits(prefix: str, element: str) -> bool:
-        return any(code.startswith(prefix) and f"_{element}" in code for code in flow_codes)
+        return element in code_hit_index.get(prefix, set())
 
     for element in signal_elements:
         if code_hits("annual_stem_", element):
@@ -1685,7 +1849,11 @@ def _cycle_signal_flow_activation_context(domain: str, signal: dict[str, Any], f
             source_hit_elements.append(element)
             strength += 0.62
 
-    flow_groups = _flow_ten_god_groups(flow)
+    flow_groups = (
+        flow_context.get("flow_groups") or set()
+        if isinstance(flow_context, dict)
+        else _flow_ten_god_groups(flow)
+    )
     source_hit_groups: list[str] = []
     if signal_groups & flow_groups:
         group_hits = sorted(signal_groups & flow_groups)
@@ -1696,9 +1864,22 @@ def _cycle_signal_flow_activation_context(domain: str, signal: dict[str, Any], f
 
     relation_hits: list[str] = []
     relation_hit_elements: list[str] = []
-    for interaction in list(flow.branch_interactions or []):
-        activated = {str(element) for element in relation_activated_elements(interaction) if str(element)}
-        relation_type = str(getattr(interaction, "relation_type", ""))
+    relation_activations = (
+        list(flow_context.get("relation_activations") or [])
+        if isinstance(flow_context, dict)
+        else [
+            (
+                str(getattr(interaction, "relation_type", "")),
+                {
+                    str(element)
+                    for element in relation_activated_elements(interaction)
+                    if str(element)
+                },
+            )
+            for interaction in list(flow.branch_interactions or [])
+        ]
+    )
+    for relation_type, activated in relation_activations:
         matched = sorted(activated & signal_elements)
         if matched:
             relation_hits.append(relation_type)
@@ -1738,6 +1919,7 @@ def _cycle_signal_flow_activation_context(domain: str, signal: dict[str, Any], f
         source_hit_elements,
         relation_hit_elements,
         relation_hits,
+        element_groups=facts.get("element_group_map") or {},
     )
     active_edge_count = sum(1 for edge in edge_flow_contexts if edge.get("active"))
     soft_active_edge_count = sum(1 for edge in edge_flow_contexts if edge.get("soft_active"))
@@ -1908,8 +2090,8 @@ def _cycle_signal_flow_codes(
     }
 
 
-def _cycle_signal_basis_codes(signal: dict[str, Any]) -> list[str]:
-    codes = [str(code) for code in list(signal.get("basis_codes") or []) if str(code)]
+@lru_cache(maxsize=4096)
+def _cycle_signal_basis_codes_cached(codes: tuple[str, ...]) -> tuple[str, ...]:
     priority_prefixes = (
         "cycle_classical_",
         "cycle_judgment_",
@@ -1951,7 +2133,12 @@ def _cycle_signal_basis_codes(signal: dict[str, Any]) -> list[str]:
         for code in codes
         if code.startswith(("cycle_role_", "cycle_month_fit_", "element_cycle_", "element_cycle_month_fit_"))
     ]
-    return list(dict.fromkeys([*priority[:10], *pattern[:6], *condition[:8], *branch_reality[:6], *context[:5]]))
+    return tuple(dict.fromkeys([*priority[:10], *pattern[:6], *condition[:8], *branch_reality[:6], *context[:5]]))
+
+
+def _cycle_signal_basis_codes(signal: dict[str, Any]) -> list[str]:
+    codes = tuple(str(code) for code in list(signal.get("basis_codes") or []) if str(code))
+    return list(_cycle_signal_basis_codes_cached(codes))
 
 
 def _cycle_signal_effect(domain: str, signal: dict[str, Any]) -> tuple[dict[str, float], bool]:
@@ -2382,16 +2569,11 @@ def _flow_contextual_cycle_signal_effect(
     return effect, has_cost
 
 
-def _cycle_regulation_adjustments(structure: ChartStructure, flow: FlowSignal, domain: str) -> dict[str, Any]:
+def _prepared_cycle_regulation_signals(
+    structure: ChartStructure,
+    domain: str,
+) -> list[dict[str, Any]]:
     profile = structure.cycle_regulation_profile or build_cycle_regulation_profile(structure)
-    totals: dict[str, Any] = {
-        "opportunity": 0.0,
-        "risk": 0.0,
-        "change": 0.0,
-        "probability": 0.0,
-        "basis_codes": [],
-        "counter_signals": [],
-    }
     domain_signals = [
         signal
         for signal in list(profile.get("signals") or [])
@@ -2450,13 +2632,59 @@ def _cycle_regulation_adjustments(structure: ChartStructure, flow: FlowSignal, d
         *pressure_signals[:4],
         *domain_signals[:6],
     ]
-    signals = list({str(signal.get("signal_id") or ""): signal for signal in selected_signals}.values())[:18]
+    signals = list({str(signal.get("signal_id") or ""): signal for signal in selected_signals}.values())[:36]
+    prepared: list[dict[str, Any]] = []
     for signal in signals:
         effect, has_cost = _cycle_signal_effect(domain, signal)
         if not effect:
             continue
-        activation = _cycle_signal_flow_activation_context(domain, signal, flow)
         effect, has_cost = _contextual_cycle_signal_effect(domain, signal, effect, has_cost)
+        status = str(signal.get("status") or "")
+        signal_id = str(signal.get("signal_id") or "")
+        prepared.append(
+            {
+                "signal": signal,
+                "signal_flow_facts": _cycle_signal_static_flow_facts(signal),
+                "effect": effect,
+                "has_cost": has_cost,
+                "basis_code": f"cycle_regulation_{domain}_{signal_id}_{status}",
+                "signal_basis_codes": _cycle_signal_basis_codes(signal),
+            }
+        )
+    return prepared
+
+
+def _cycle_regulation_adjustments(
+    structure: ChartStructure,
+    flow: FlowSignal,
+    domain: str,
+    *,
+    prepared_signals: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    totals: dict[str, Any] = {
+        "opportunity": 0.0,
+        "risk": 0.0,
+        "change": 0.0,
+        "probability": 0.0,
+        "basis_codes": [],
+        "counter_signals": [],
+    }
+    prepared = prepared_signals if prepared_signals is not None else _prepared_cycle_regulation_signals(structure, domain)
+    flow_context = _cycle_flow_static_context(flow, domain)
+    flow_code_hit_index = flow_context["code_hit_index"]
+    for prepared_signal in prepared:
+        signal = prepared_signal["signal"]
+        signal_flow_facts = prepared_signal.get("signal_flow_facts")
+        effect = dict(prepared_signal["effect"])
+        has_cost = bool(prepared_signal["has_cost"])
+        activation = _cycle_signal_flow_activation_context(
+            domain,
+            signal,
+            flow,
+            code_hit_index=flow_code_hit_index,
+            flow_context=flow_context,
+            signal_facts=signal_flow_facts if isinstance(signal_flow_facts, dict) else None,
+        )
         effect, has_cost = _flow_contextual_cycle_signal_effect(
             domain,
             signal,
@@ -2468,9 +2696,7 @@ def _cycle_regulation_adjustments(structure: ChartStructure, flow: FlowSignal, d
         weight = _cycle_signal_weight(domain, signal, flow, activation=activation)
         for metric in ("opportunity", "risk", "change", "probability"):
             totals[metric] += _scale_delta(float(effect.get(metric, 0) or 0), weight)
-        status = str(signal.get("status") or "")
-        signal_id = str(signal.get("signal_id") or "")
-        basis_code = f"cycle_regulation_{domain}_{signal_id}_{status}"
+        basis_code = str(prepared_signal["basis_code"])
         if any(float(effect.get(metric, 0) or 0) > 0 for metric in ("opportunity", "probability")) or float(effect.get("risk", 0) or 0) < 0:
             totals["basis_codes"].append(basis_code)
         if has_cost or float(effect.get("risk", 0) or 0) > 0 or float(effect.get("probability", 0) or 0) < 0:
@@ -2488,7 +2714,7 @@ def _cycle_regulation_adjustments(structure: ChartStructure, flow: FlowSignal, d
         )
         totals["basis_codes"].extend(flow_codes["basis_codes"])
         totals["counter_signals"].extend(flow_codes["counter_signals"])
-        for code in _cycle_signal_basis_codes(signal):
+        for code in list(prepared_signal["signal_basis_codes"]):
             text = str(code)
             if text:
                 totals["basis_codes"].append(text)
@@ -2632,9 +2858,20 @@ def build_event_packets(
 ) -> list[EventPacket]:
     selected_domains = domains or list(DOMAIN_ORDER)  # type: ignore[assignment]
     packets: list[EventPacket] = []
+    static_domain_context: dict[str, dict[str, Any]] = {}
+    for domain in selected_domains:
+        feature_axes = _feature_axes_for_domain(structure, domain)
+        static_domain_context[domain] = {
+            "combination_adjustments": _combination_adjustments(structure, domain),
+            "natal_adjustments": _natal_position_adjustments(structure, domain),
+            "feature_axes": feature_axes,
+            "feature_adjustments": _feature_axis_adjustments(domain, feature_axes),
+            "cycle_regulation_signals": _prepared_cycle_regulation_signals(structure, domain),
+        }
 
     for flow in flow_signals:
         for domain in selected_domains:
+            domain_context = static_domain_context[domain]
             data: dict[str, Any] = flow.domain_scores[domain]
             raw_opportunity = data["opportunity"]
             raw_risk = data["risk"]
@@ -2646,14 +2883,14 @@ def build_event_packets(
             probability = raw_probability
             basis_codes = list(data["basis_codes"])
             counter_signals = list(data["counter_signals"])
-            combination_adjustments = _combination_adjustments(structure, domain)
+            combination_adjustments = domain_context["combination_adjustments"]
             opportunity = _clip(opportunity + combination_adjustments["opportunity"])
             risk = _clip(risk + combination_adjustments["risk"])
             change = _clip(change + combination_adjustments["change"])
             probability = _clip(probability + combination_adjustments["probability"])
             basis_codes = combination_adjustments["basis_codes"] + basis_codes
             counter_signals = combination_adjustments["counter_signals"] + counter_signals
-            natal_adjustments = _natal_position_adjustments(structure, domain)
+            natal_adjustments = domain_context["natal_adjustments"]
             opportunity = _clip(opportunity + natal_adjustments["opportunity"])
             risk = _clip(risk + natal_adjustments["risk"])
             change = _clip(change + natal_adjustments["change"])
@@ -2667,15 +2904,20 @@ def build_event_packets(
             probability = _clip(probability + pattern_adjustments["probability"])
             basis_codes = pattern_adjustments["basis_codes"] + basis_codes
             counter_signals = pattern_adjustments["counter_signals"] + counter_signals
-            cycle_adjustments = _cycle_regulation_adjustments(structure, flow, domain)
+            cycle_adjustments = _cycle_regulation_adjustments(
+                structure,
+                flow,
+                domain,
+                prepared_signals=domain_context["cycle_regulation_signals"],
+            )
             opportunity = _clip(opportunity + cycle_adjustments["opportunity"])
             risk = _clip(risk + cycle_adjustments["risk"])
             change = _clip(change + cycle_adjustments["change"])
             probability = _clip(probability + cycle_adjustments["probability"])
             basis_codes = cycle_adjustments["basis_codes"] + basis_codes
             counter_signals = cycle_adjustments["counter_signals"] + counter_signals
-            feature_axes = _feature_axes_for_domain(structure, domain)
-            feature_adjustments = _feature_axis_adjustments(domain, feature_axes)
+            feature_axes = domain_context["feature_axes"]
+            feature_adjustments = domain_context["feature_adjustments"]
             opportunity = _clip(opportunity + feature_adjustments["opportunity"])
             risk = _clip(risk + feature_adjustments["risk"])
             change = _clip(change + feature_adjustments["change"])
