@@ -24,17 +24,17 @@ WEB_ROOT = Path(__file__).resolve().parent / "static"
 LOGGER = logging.getLogger("saju_web")
 CANONICAL_HOST = "aisajuleehyeon.com"
 WWW_HOST = "www.aisajuleehyeon.com"
-API_CACHE_MAX_ENTRIES = 24
-API_CACHE_MAX_BYTES = 24 * 1024 * 1024
+API_CACHE_MAX_ENTRIES = 64
+API_CACHE_MAX_BYTES = 48 * 1024 * 1024
 API_CACHE_COMPRESSION_LEVEL = 1
 API_CACHE_VERSION = "judgment-v20-trait-layer"
 _API_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 _API_CACHE_LOCK = Lock()
 _API_CACHE_BYTES = 0
-API_DETAIL_KEY_MAX_ENTRIES = 32
+API_DETAIL_KEY_MAX_ENTRIES = 256
 _API_DETAIL_KEYS: "OrderedDict[str, str]" = OrderedDict()
 _API_DETAIL_KEYS_LOCK = Lock()
-API_JOB_MAX_ENTRIES = 32
+API_JOB_MAX_ENTRIES = 128
 API_JOB_MAX_PENDING = 8
 API_JOB_STALE_SECONDS = 180
 _API_JOBS: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
@@ -108,6 +108,10 @@ def _detail_key_get(token: str) -> str | None:
             return None
         _API_DETAIL_KEYS.move_to_end(token)
         return cache_key
+
+
+def _job_cache_key(job_id: str, job: dict[str, Any] | None = None) -> str:
+    return str(_detail_key_get(job_id) or (job or {}).get("cacheKey") or "")
 
 
 def _cache_get(key: str) -> bytes | None:
@@ -340,6 +344,7 @@ def _reserve_judgment_job(job_id: str, cache_key: str) -> tuple[dict[str, Any], 
         job = {
             "status": "queued",
             "message": "분석 요청을 접수했습니다.",
+            "cacheKey": cache_key,
             "createdAt": now,
             "updatedAt": now,
             "runId": run_id,
@@ -560,7 +565,7 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": {"message": "분석 작업을 찾을 수 없습니다."}}, 404)
             return
         if job.get("status") in {"initial", "done"}:
-            cache_key = _detail_key_get(job_id)
+            cache_key = _job_cache_key(job_id, job)
             completed_data = _cache_get(cache_key) if cache_key else None
             if completed_data is not None:
                 detail_token = _detail_token_from_cache_key(cache_key) if cache_key else job_id
@@ -590,10 +595,10 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         if not token:
             self._send_json({"ok": False, "error": {"message": "상세 결과 번호가 없습니다."}}, 400)
             return
-        cache_key = _detail_key_get(token)
+        job = _job_snapshot(token)
+        cache_key = _job_cache_key(token, job)
         full_data = _cache_get(cache_key) if cache_key else None
         if full_data is None:
-            job = _job_snapshot(token)
             if job and job.get("status") in {"queued", "running", "initial"}:
                 self._send_json(_pending_response(token, job), 202)
                 return
