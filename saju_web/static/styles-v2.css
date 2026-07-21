@@ -11238,8 +11238,8 @@ summary {
 }
 
 .detail-root .contextual-keyword-group {
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 6px;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 8px;
   min-width: 0;
   padding: 8px;
   align-content: start;
@@ -11254,10 +11254,40 @@ summary {
   overflow-wrap: anywhere;
 }
 
+@media (max-width: 560px) {
+  .detail-root .contextual-evidence-card header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .detail-root .contextual-evidence-card header strong {
+    min-width: 0;
+  }
+
+  .detail-root .contextual-evidence-card header em {
+    justify-self: start;
+    max-width: 100%;
+    line-height: 1.35;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .detail-root .contextual-keyword-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detail-root .contextual-keyword-group,
+  .detail-root .contextual-keyword-group:last-child:nth-child(odd) {
+    grid-column: auto;
+    grid-template-columns: 58px minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 370px) {
   .detail-root .contextual-keyword-group {
-    grid-template-columns: 34px minmax(0, 1fr);
-    gap: 5px;
+    grid-template-columns: 52px minmax(0, 1fr);
+    gap: 7px;
     padding: 7px;
   }
 
