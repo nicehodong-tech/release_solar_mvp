@@ -6,7 +6,7 @@ from typing import Any
 
 
 ENGINE_MANIFEST_SCHEMA_VERSION = "saju_service_manifest_v1"
-ANALYSIS_ENGINE_VERSION = "analysis_engine_mvp_2026_06_08"
+ANALYSIS_ENGINE_VERSION = "analysis_engine_mvp_2026_07_22_hidden_stem_complete"
 PRODUCT_CATALOG_VERSION = "product_catalog_v1"
 CUSTOMER_LANGUAGE_POLICY_VERSION = "customer_language_policy_v1"
 REPORT_RENDERER_VERSION = "customer_report_renderer_v1"

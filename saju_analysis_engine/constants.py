@@ -57,18 +57,20 @@ BRANCH_METADATA = {
 }
 
 BRANCH_HIDDEN_STEMS = {
-    "ja": [("gye", 1.0)],
+    # Keep the main qi first because month-command and branch-main rules use
+    # index zero. Residual and middle qi follow with lower weights.
+    "ja": [("gye", 0.8), ("im", 0.2)],
     "chuk": [("gi", 0.6), ("gye", 0.25), ("sin", 0.15)],
     "in": [("gap", 0.6), ("byeong", 0.25), ("mu", 0.15)],
-    "myo": [("eul", 1.0)],
+    "myo": [("eul", 0.8), ("gap", 0.2)],
     "jin": [("mu", 0.6), ("eul", 0.25), ("gye", 0.15)],
     "sa": [("byeong", 0.6), ("mu", 0.25), ("gyeong", 0.15)],
-    "o": [("jeong", 0.7), ("gi", 0.3)],
+    "o": [("jeong", 0.6), ("gi", 0.25), ("byeong", 0.15)],
     "mi": [("gi", 0.6), ("jeong", 0.25), ("eul", 0.15)],
     "sin": [("gyeong", 0.6), ("im", 0.25), ("mu", 0.15)],
-    "yu": [("sin", 1.0)],
+    "yu": [("sin", 0.8), ("gyeong", 0.2)],
     "sul": [("mu", 0.6), ("sin", 0.25), ("jeong", 0.15)],
-    "hae": [("im", 0.7), ("gap", 0.3)],
+    "hae": [("im", 0.6), ("gap", 0.25), ("mu", 0.15)],
 }
 
 POSITION_STEM_WEIGHTS = {
