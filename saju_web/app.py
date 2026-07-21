@@ -7,23 +7,45 @@ import gzip
 import hashlib
 import json
 import logging
+import multiprocessing
+import os
 import secrets
+import signal
+import statistics
 import time
-from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict, deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock, Semaphore
+from threading import Lock, Semaphore, Thread
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .report_service import build_report_payload
+from .worker import build_report_bytes, worker_identity
 
 
 WEB_ROOT = Path(__file__).resolve().parent / "static"
 LOGGER = logging.getLogger("saju_web")
 CANONICAL_HOST = "aisajuleehyeon.com"
 WWW_HOST = "www.aisajuleehyeon.com"
+SERVER_STARTED_AT = time.time()
+# Spawned calculation workers must share one hash seed. Several legacy engine
+# selectors use set membership internally, so a random process seed can change
+# tie ordering even when the chart is identical.
+os.environ.setdefault("PYTHONHASHSEED", "0")
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+API_ANALYSIS_WORKERS = _env_int("SAJU_ANALYSIS_WORKERS", 2, minimum=1, maximum=2)
 API_CACHE_MAX_ENTRIES = 64
 API_CACHE_MAX_BYTES = 48 * 1024 * 1024
 API_CACHE_COMPRESSION_LEVEL = 1
@@ -34,13 +56,24 @@ _API_CACHE_BYTES = 0
 API_DETAIL_KEY_MAX_ENTRIES = 256
 _API_DETAIL_KEYS: "OrderedDict[str, str]" = OrderedDict()
 _API_DETAIL_KEYS_LOCK = Lock()
-API_JOB_MAX_ENTRIES = 128
-API_JOB_MAX_PENDING = 8
-API_JOB_STALE_SECONDS = 180
+API_JOB_MAX_ENTRIES = 192
+API_JOB_MAX_PENDING = _env_int("SAJU_JOB_MAX_PENDING", 12, minimum=4, maximum=24)
+API_JOB_STALE_SECONDS = _env_int("SAJU_JOB_STALE_SECONDS", 600, minimum=180, maximum=1800)
+API_JOB_ESTIMATED_SECONDS = _env_int("SAJU_JOB_ESTIMATED_SECONDS", 15, minimum=5, maximum=60)
 _API_JOBS: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _API_JOBS_LOCK = Lock()
-_API_JOB_SEMAPHORE = Semaphore(1)
-_API_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="saju-analysis")
+_API_JOB_SEMAPHORE = Semaphore(API_ANALYSIS_WORKERS)
+_API_JOB_EXECUTOR = ThreadPoolExecutor(
+    max_workers=API_ANALYSIS_WORKERS,
+    thread_name_prefix="saju-coordinator",
+)
+_API_BUILD_EXECUTOR_LOCK = Lock()
+_API_BUILD_EXECUTOR: ProcessPoolExecutor | None = None
+_API_BUILD_FALLBACK_LOCK = Lock()
+_API_JOB_DURATION_SAMPLES: "deque[float]" = deque(maxlen=32)
+_API_JOB_DURATION_LOCK = Lock()
+MAX_REQUEST_BODY_BYTES = 64 * 1024
+STATIC_GZIP_SUFFIXES = {".css", ".html", ".js", ".json", ".svg", ".txt", ".xml"}
 MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -54,6 +87,64 @@ MIME_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
+
+
+def _new_build_executor() -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(
+        max_workers=API_ANALYSIS_WORKERS,
+        mp_context=multiprocessing.get_context("spawn"),
+        max_tasks_per_child=32,
+    )
+
+
+def _build_executor() -> ProcessPoolExecutor:
+    global _API_BUILD_EXECUTOR
+    with _API_BUILD_EXECUTOR_LOCK:
+        if _API_BUILD_EXECUTOR is None:
+            _API_BUILD_EXECUTOR = _new_build_executor()
+        return _API_BUILD_EXECUTOR
+
+
+def _replace_broken_build_executor(broken: ProcessPoolExecutor) -> None:
+    global _API_BUILD_EXECUTOR
+    with _API_BUILD_EXECUTOR_LOCK:
+        if _API_BUILD_EXECUTOR is not broken:
+            return
+        broken.shutdown(wait=False, cancel_futures=True)
+        _API_BUILD_EXECUTOR = _new_build_executor()
+
+
+def _compute_report_bytes(payload: dict[str, Any]) -> bytes:
+    for attempt in range(2):
+        executor = _build_executor()
+        try:
+            return executor.submit(build_report_bytes, payload).result()
+        except BrokenProcessPool:
+            LOGGER.exception("analysis worker pool stopped unexpectedly attempt=%s", attempt + 1)
+            _replace_broken_build_executor(executor)
+    LOGGER.error("analysis worker pool recovery failed; using serialized in-process fallback")
+    with _API_BUILD_FALLBACK_LOCK:
+        return build_report_bytes(payload)
+
+
+def _warm_analysis_workers() -> set[int]:
+    executor = _build_executor()
+    # Keep the probes overlapping so every configured process is started.
+    futures = [
+        executor.submit(worker_identity, 0.15)
+        for _ in range(API_ANALYSIS_WORKERS * 2)
+    ]
+    return {int(future.result(timeout=45)) for future in futures}
+
+
+def _shutdown_executors() -> None:
+    global _API_BUILD_EXECUTOR
+    _API_JOB_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    with _API_BUILD_EXECUTOR_LOCK:
+        executor = _API_BUILD_EXECUTOR
+        _API_BUILD_EXECUTOR = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
@@ -151,6 +242,71 @@ def _cache_set(key: str, data: bytes) -> None:
         while len(_API_CACHE) > API_CACHE_MAX_ENTRIES or _API_CACHE_BYTES > API_CACHE_MAX_BYTES:
             _, removed = _API_CACHE.popitem(last=False)
             _API_CACHE_BYTES = max(0, _API_CACHE_BYTES - len(removed))
+
+
+def _record_job_duration(seconds: float) -> None:
+    if seconds <= 0:
+        return
+    with _API_JOB_DURATION_LOCK:
+        _API_JOB_DURATION_SAMPLES.append(float(seconds))
+
+
+def _estimated_job_duration() -> float:
+    with _API_JOB_DURATION_LOCK:
+        samples = tuple(_API_JOB_DURATION_SAMPLES)
+    if not samples:
+        return float(API_JOB_ESTIMATED_SECONDS)
+    return max(5.0, min(90.0, float(statistics.median(samples))))
+
+
+def _active_jobs_locked(now: float) -> list[tuple[str, dict[str, Any]]]:
+    active = [
+        (candidate_id, candidate)
+        for candidate_id, candidate in _API_JOBS.items()
+        if str(candidate.get("status") or "") in {"queued", "running", "initial"}
+        and (now - float(candidate.get("updatedAt") or candidate.get("createdAt") or 0))
+        < API_JOB_STALE_SECONDS
+    ]
+    return sorted(active, key=lambda item: float(item[1].get("createdAt") or 0))
+
+
+def _job_runtime_fields_locked(job_id: str, job: dict[str, Any], now: float) -> dict[str, Any]:
+    active = _active_jobs_locked(now)
+    status = str(job.get("status") or "")
+    jobs_ahead = 0
+    if status == "queued":
+        for candidate_id, _candidate in active:
+            if candidate_id == job_id:
+                break
+            jobs_ahead += 1
+    batches_ahead = (jobs_ahead + API_ANALYSIS_WORKERS - 1) // API_ANALYSIS_WORKERS
+    return {
+        "activeJobs": len(active),
+        "jobsAhead": jobs_ahead,
+        "queuePosition": jobs_ahead + 1 if status == "queued" else 0,
+        "workerCount": API_ANALYSIS_WORKERS,
+        "estimatedWaitSeconds": int(round(batches_ahead * _estimated_job_duration())),
+    }
+
+
+def _operational_snapshot() -> dict[str, Any]:
+    now = time.time()
+    with _API_JOBS_LOCK:
+        active = _active_jobs_locked(now)
+        running = sum(1 for _, job in active if str(job.get("status") or "") == "running")
+        queued = sum(1 for _, job in active if str(job.get("status") or "") == "queued")
+    with _API_CACHE_LOCK:
+        cache_entries = len(_API_CACHE)
+        cache_bytes = _API_CACHE_BYTES
+    return {
+        "ok": True,
+        "status": "healthy",
+        "version": API_CACHE_VERSION,
+        "uptimeSeconds": int(max(0, now - SERVER_STARTED_AT)),
+        "analysisWorkers": API_ANALYSIS_WORKERS,
+        "jobs": {"running": running, "queued": queued, "capacity": API_JOB_MAX_PENDING},
+        "cache": {"entries": cache_entries, "compressedBytes": cache_bytes},
+    }
 
 
 def _strip_initial_section(section: dict[str, Any]) -> dict[str, Any]:
@@ -297,7 +453,9 @@ def _job_snapshot(job_id: str) -> dict[str, Any] | None:
         if job is None:
             return None
         _API_JOBS.move_to_end(job_id)
-        return dict(job)
+        snapshot = dict(job)
+        snapshot.update(_job_runtime_fields_locked(job_id, job, time.time()))
+        return snapshot
 
 
 def _job_update_if_current(job_id: str, run_id: str, **updates: Any) -> bool:
@@ -324,20 +482,22 @@ def _reserve_judgment_job(job_id: str, cache_key: str) -> tuple[dict[str, Any], 
                 status == "done" and cache_available
             ):
                 _API_JOBS.move_to_end(job_id)
-                return dict(existing), False
+                snapshot = dict(existing)
+                snapshot.update(_job_runtime_fields_locked(job_id, existing, now))
+                return snapshot, False
 
-        active_jobs = sum(
-            1
-            for candidate in _API_JOBS.values()
-            if str(candidate.get("status") or "") in {"queued", "running", "initial"}
-            and (now - float(candidate.get("updatedAt") or candidate.get("createdAt") or 0))
-            < API_JOB_STALE_SECONDS
-        )
-        if active_jobs >= API_JOB_MAX_PENDING:
+        active_jobs = _active_jobs_locked(now)
+        if len(active_jobs) >= API_JOB_MAX_PENDING:
+            estimated_wait = (
+                (len(active_jobs) + API_ANALYSIS_WORKERS - 1) // API_ANALYSIS_WORKERS
+            ) * _estimated_job_duration()
             return {
                 "status": "busy",
-                "message": "현재 분석 요청이 많아 잠시 순서를 조정하고 있습니다.",
-                "retryAfterMs": 2500,
+                "message": "현재 분석 요청이 많습니다. 접수 순서를 확보하는 중입니다.",
+                "retryAfterMs": 5000,
+                "activeJobs": len(active_jobs),
+                "workerCount": API_ANALYSIS_WORKERS,
+                "estimatedWaitSeconds": int(round(estimated_wait)),
             }, False
 
         run_id = secrets.token_hex(12)
@@ -361,10 +521,13 @@ def _reserve_judgment_job(job_id: str, cache_key: str) -> tuple[dict[str, Any], 
                 next(candidate_id for candidate_id in _API_JOBS if candidate_id != job_id),
             )
             _API_JOBS.pop(removable_id, None)
-        return dict(job), True
+        snapshot = dict(job)
+        snapshot.update(_job_runtime_fields_locked(job_id, job, now))
+        return snapshot, True
 
 
 def _run_judgment_job(job_id: str, cache_key: str, payload: dict[str, Any], run_id: str) -> None:
+    started = time.perf_counter()
     try:
         with _API_JOB_SEMAPHORE:
             if not _job_update_if_current(
@@ -375,35 +538,58 @@ def _run_judgment_job(job_id: str, cache_key: str, payload: dict[str, Any], run_
                 startedAt=time.time(),
             ):
                 return
+            LOGGER.info("analysis_started job=%s", job_id[:12])
             cached = _cache_get(cache_key)
             if cached is not None:
+                duration = time.perf_counter() - started
                 _job_update_if_current(
                     job_id,
                     run_id,
                     status="done",
                     cacheStatus="HIT",
+                    durationMs=int(round(duration * 1000)),
                     finishedAt=time.time(),
                 )
+                LOGGER.info("analysis_cache_hit job=%s duration_ms=%s", job_id[:12], int(round(duration * 1000)))
                 return
-            full_result = build_report_payload(_payload_for_build(payload), defer_detail=False)
-            full_data = _json_bytes(full_result)
+            full_data = _compute_report_bytes(_payload_for_build(payload))
             _cache_set(cache_key, full_data)
+            duration = time.perf_counter() - started
+            _record_job_duration(duration)
             _job_update_if_current(
                 job_id,
                 run_id,
                 status="done",
                 cacheStatus="MISS",
+                durationMs=int(round(duration * 1000)),
                 finishedAt=time.time(),
             )
+            LOGGER.info(
+                "analysis_completed job=%s duration_ms=%s bytes=%s",
+                job_id[:12],
+                int(round(duration * 1000)),
+                len(full_data),
+            )
     except ValueError as exc:
-        _job_update_if_current(job_id, run_id, status="error", errorMessage=str(exc), finishedAt=time.time())
+        duration = time.perf_counter() - started
+        _job_update_if_current(
+            job_id,
+            run_id,
+            status="error",
+            errorMessage=str(exc),
+            durationMs=int(round(duration * 1000)),
+            finishedAt=time.time(),
+        )
+        LOGGER.warning("analysis_rejected job=%s duration_ms=%s", job_id[:12], int(round(duration * 1000)))
     except Exception:
+        duration = time.perf_counter() - started
         LOGGER.exception("judgment job failed job_id=%s", job_id)
         _job_update_if_current(
             job_id,
             run_id,
             status="error",
             errorMessage="사주 분석 생성 중 오류가 발생했습니다.",
+            durationMs=int(round(duration * 1000)),
             finishedAt=time.time(),
         )
 
@@ -424,14 +610,43 @@ def _ensure_judgment_job(job_id: str, cache_key: str, payload: dict[str, Any]) -
 def _pending_response(job_id: str, job: dict[str, Any] | None) -> dict[str, Any]:
     status = str((job or {}).get("status") or "queued")
     message = str((job or {}).get("message") or "분석 결과를 준비하고 있습니다.")
+    jobs_ahead = int((job or {}).get("jobsAhead") or 0)
+    estimated_wait = int((job or {}).get("estimatedWaitSeconds") or 0)
+    if status == "queued" and jobs_ahead > 0:
+        message = f"앞선 분석 {jobs_ahead}건을 순서대로 처리하고 있습니다."
+    elif status == "queued":
+        message = "분석을 시작할 준비를 마쳤습니다."
+    elif status == "running":
+        message = "명식을 계산하고 운의 강약을 정리하고 있습니다."
     return {
         "ok": False,
         "pending": True,
         "jobId": job_id,
         "status": status,
         "message": message,
-        "retryAfterMs": 900,
+        "retryAfterMs": 1100 if status == "running" else 1400,
+        "jobsAhead": jobs_ahead,
+        "queuePosition": int((job or {}).get("queuePosition") or 0),
+        "activeJobs": int((job or {}).get("activeJobs") or 0),
+        "workerCount": int((job or {}).get("workerCount") or API_ANALYSIS_WORKERS),
+        "estimatedWaitSeconds": estimated_wait,
     }
+
+
+@lru_cache(maxsize=64)
+def _static_payload(path_text: str, modified_ns: int, size: int) -> tuple[bytes, bytes | None, str]:
+    path = Path(path_text)
+    data = path.read_bytes()
+    compressed = gzip.compress(data, compresslevel=5) if path.suffix.lower() in STATIC_GZIP_SUFFIXES and len(data) > 1024 else None
+    etag_seed = f"{path.name}:{modified_ns}:{size}".encode("utf-8")
+    etag = '"' + hashlib.sha256(etag_seed).hexdigest()[:20] + '"'
+    return data, compressed, etag
+
+
+class SajuHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 128
 
 
 class SajuWebHandler(BaseHTTPRequestHandler):
@@ -441,6 +656,9 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         if self._redirect_to_canonical_host():
             return
         parsed = urlparse(self.path)
+        if parsed.path == "/healthz":
+            self._send_json(_operational_snapshot(), 200)
+            return
         if parsed.path == "/api/judgment-status":
             self._handle_judgment_status(parsed.query)
             return
@@ -468,6 +686,12 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             content_length = 0
+        if content_length < 0 or content_length > MAX_REQUEST_BODY_BYTES:
+            self._send_json(
+                {"ok": False, "error": {"message": "요청 데이터의 크기가 허용 범위를 벗어났습니다."}},
+                413,
+            )
+            return
         raw_body = self.rfile.read(content_length)
         try:
             payload = json.loads(raw_body.decode("utf-8") or "{}")
@@ -498,6 +722,7 @@ class SajuWebHandler(BaseHTTPRequestHandler):
                             "error": {"message": job.get("message")},
                         },
                         429,
+                        headers={"Retry-After": "5"},
                     )
                     return
                 if job.get("status") == "done":
@@ -535,8 +760,7 @@ class SajuWebHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(_pending_response(job_id, job), 202)
                 return
-            result = build_report_payload(_payload_for_build(payload))
-            data = _json_bytes(result)
+            data = _compute_report_bytes(_payload_for_build(payload))
             _cache_set(cache_key, data)
         except ValueError as exc:
             self._send_json({"ok": False, "error": {"message": str(exc)}}, 400)
@@ -626,17 +850,43 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         if relative.endswith("/"):
             relative += "index.html"
         target = (WEB_ROOT / relative).resolve()
-        if not str(target).startswith(str(WEB_ROOT.resolve())) or not target.is_file():
+        try:
+            target.relative_to(WEB_ROOT.resolve())
+        except ValueError:
+            self._send_json({"ok": False, "error": {"message": "파일을 찾을 수 없습니다."}}, 404)
+            return
+        if not target.is_file():
             self._send_json({"ok": False, "error": {"message": "파일을 찾을 수 없습니다."}}, 404)
             return
         content_type = MIME_TYPES.get(target.suffix.lower(), "application/octet-stream")
-        data = target.read_bytes()
+        stat = target.stat()
+        data, compressed, etag = _static_payload(str(target), stat.st_mtime_ns, stat.st_size)
+        cache_control = (
+            "no-cache"
+            if target.suffix.lower() == ".html"
+            else "public, max-age=604800, stale-while-revalidate=86400"
+        )
+        if (self.headers.get("If-None-Match") or "").strip() == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        accepts_gzip = "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+        response_data = compressed if accepts_gzip and compressed is not None else data
         self.send_response(200)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("ETag", etag)
+        self.send_header("Vary", "Accept-Encoding")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if response_data is compressed:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(response_data)))
         self.end_headers()
         if include_body:
-            self.wfile.write(data)
+            self.wfile.write(response_data)
 
     def _redirect_to_canonical_host(self) -> bool:
         host = (self.headers.get("Host") or "").split(":", 1)[0].strip().lower()
@@ -650,21 +900,38 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         return True
 
-    def _send_json(self, payload: dict[str, Any], status: int) -> None:
+    def _send_json(
+        self,
+        payload: dict[str, Any],
+        status: int,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         data = _json_bytes(payload)
-        self._send_json_bytes(data, status)
+        self._send_json_bytes(data, status, headers=headers)
 
-    def _send_json_bytes(self, data: bytes, status: int, cache_status: str | None = None) -> None:
+    def _send_json_bytes(
+        self,
+        data: bytes,
+        status: int,
+        cache_status: str | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         accepts_gzip = "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
         response_data = gzip.compress(data, compresslevel=5) if accepts_gzip and len(data) > 1024 else data
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Vary", "Accept-Encoding")
+        self.send_header("X-Content-Type-Options", "nosniff")
         if response_data is not data:
             self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(response_data)))
         if cache_status:
             self.send_header("X-Saju-Cache", cache_status)
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(response_data)
 
@@ -675,11 +942,47 @@ class SajuWebHandler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local saju web MVP.")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", default=8765, type=int)
+    parser.add_argument("--port", default=int(os.environ.get("PORT", "8765")), type=int)
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), SajuWebHandler)
-    print(f"Serving saju web MVP at http://{args.host}:{args.port}")
-    server.serve_forever()
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("SAJU_LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    try:
+        worker_pids = _warm_analysis_workers()
+        LOGGER.info(
+            "analysis_workers_ready workers=%s processes=%s max_pending=%s",
+            API_ANALYSIS_WORKERS,
+            len(worker_pids),
+            API_JOB_MAX_PENDING,
+        )
+    except Exception:
+        LOGGER.exception("analysis worker warmup failed; requests will use the recovery path")
+
+    server = SajuHTTPServer((args.host, args.port), SajuWebHandler)
+
+    def request_shutdown(signum: int, _frame: object) -> None:
+        LOGGER.info("shutdown_requested signal=%s", signum)
+        Thread(target=server.shutdown, name="saju-shutdown", daemon=True).start()
+
+    for signal_name in ("SIGTERM", "SIGINT"):
+        shutdown_signal = getattr(signal, signal_name, None)
+        if shutdown_signal is not None:
+            signal.signal(shutdown_signal, request_shutdown)
+
+    LOGGER.info(
+        "server_ready url=http://%s:%s workers=%s cache_mb=%s",
+        args.host,
+        args.port,
+        API_ANALYSIS_WORKERS,
+        API_CACHE_MAX_BYTES // (1024 * 1024),
+    )
+    try:
+        server.serve_forever(poll_interval=0.25)
+    finally:
+        server.server_close()
+        _shutdown_executors()
+        LOGGER.info("server_stopped")
 
 
 if __name__ == "__main__":

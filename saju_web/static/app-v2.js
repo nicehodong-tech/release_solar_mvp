@@ -31,6 +31,7 @@ const state = {
   loadingTimer: null,
   loadingValue: 8,
   loadingStartedAt: 0,
+  loadingCeiling: 94,
   navIndex: 0,
   historyReady: false,
   metricDisplayContext: "none",
@@ -4627,6 +4628,19 @@ async function submitReport() {
 
 const RETRYABLE_ANALYSIS_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
+function pendingAnalysisMessage(data) {
+  const status = String((data && data.status) || "queued");
+  const jobsAhead = Math.max(0, Number((data && data.jobsAhead) || 0));
+  const estimatedWaitSeconds = Math.max(0, Number((data && data.estimatedWaitSeconds) || 0));
+  if (status === "queued" && jobsAhead > 0) {
+    const waitCopy = estimatedWaitSeconds > 0 ? ` 약 ${estimatedWaitSeconds}초 내외가 예상됩니다.` : "";
+    return `앞선 분석 ${jobsAhead}건을 순서대로 처리하고 있습니다.${waitCopy}`;
+  }
+  if (status === "queued") return "분석 순서를 확보했습니다. 잠시 후 계산을 시작합니다.";
+  if (status === "running") return "명식을 계산하고 운의 강약을 정리하고 있습니다.";
+  return String((data && data.message) || "분석 결과를 준비하고 있습니다.");
+}
+
 async function fetchAnalysisJson(url, options = {}, maxAttempts = 4) {
   let lastError = null;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -4638,15 +4652,16 @@ async function fetchAnalysisJson(url, options = {}, maxAttempts = 4) {
       if (RETRYABLE_ANALYSIS_STATUSES.has(response.status) && attempt + 1 < maxAttempts) {
         const retryAfterMs = Number(data && data.retryAfterMs);
         if (response.status === 429) {
+          state.loadingCeiling = Math.min(state.loadingCeiling, 42);
           updateLoading(
-            Math.max(state.loadingValue, 72),
+            Math.max(state.loadingValue, 34),
             (data && (data.message || (data.error && data.error.message))) ||
               "현재 분석 요청이 많아 잠시 순서를 조정하고 있습니다.",
           );
         }
         await wait(
           Number.isFinite(retryAfterMs) && retryAfterMs > 0
-            ? Math.min(retryAfterMs, 4000)
+            ? Math.min(retryAfterMs, 6000)
             : Math.min(700 * (2 ** attempt), 2800),
         );
         continue;
@@ -4674,6 +4689,8 @@ async function requestJudgment(payload, recoveryDepth = 0) {
     body: JSON.stringify({ ...payload, async: true }),
   }, 30);
   if (response.status === 202 && data && data.pending && data.jobId) {
+    state.loadingCeiling = data.status === "running" ? 94 : 58;
+    updateLoading(Math.max(state.loadingValue, 24), pendingAnalysisMessage(data));
     return pollJudgment(data.jobId, payload, recoveryDepth);
   }
   if (!response.ok || !(data && data.ok)) {
@@ -4689,6 +4706,8 @@ async function pollJudgment(jobId, payload, recoveryDepth = 0) {
       headers: { Accept: "application/json" },
     }, 3);
     if (response.status === 202 && data && data.pending) {
+      state.loadingCeiling = data.status === "running" ? 94 : 58;
+      updateLoading(Math.max(state.loadingValue, data.status === "running" ? 46 : 28), pendingAnalysisMessage(data));
       continue;
     }
     if ([404, 409, 500].includes(response.status) && recoveryDepth < 2) {
@@ -4838,11 +4857,12 @@ function startLoading() {
   cancelLoading();
   state.loadingValue = 8;
   state.loadingStartedAt = Date.now();
+  state.loadingCeiling = 94;
   loadingFill.classList.remove("is-completing");
   updateLoading(8, loadingMessages[0]);
   state.loadingTimer = window.setInterval(() => {
     const elapsed = Math.max(0, Date.now() - state.loadingStartedAt);
-    const estimated = Math.min(94, 8 + 86 * (1 - Math.exp(-elapsed / 16000)));
+    const estimated = Math.min(state.loadingCeiling, 8 + 86 * (1 - Math.exp(-elapsed / 16000)));
     const next = Math.max(state.loadingValue, estimated);
     const messageIndex = Math.min(
       loadingMessages.length - 1,

@@ -2,7 +2,7 @@ name: aisaju-leehyeon
 app: python@3.12
 options:
   install: python3 -m pip install -r requirements.txt
-  build: python3 -m compileall saju_web saju_analysis_engine saju_birth_engine
+  build: python3 -m compileall -q saju_web saju_analysis_engine saju_birth_engine scripts
   ports: 8765/http
   start: python3 -m saju_web.app --host 0.0.0.0 --port 8765
 context:
@@ -10,4 +10,3 @@ context:
     url: https://github.com/nicehodong-tech/release_solar_mvp.git
     branch: main
   preset: python-flask
-
