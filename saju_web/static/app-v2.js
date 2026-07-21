@@ -208,7 +208,7 @@ function showCoupangAffiliatePopup() {
       <strong class="affiliate-popup-visit">쿠팡 방문하기</strong>
       <p class="affiliate-popup-disclosure">쿠팡 파트너스 활동의 일환으로 일정액의 수수료를 제공받습니다.</p>
       <div class="affiliate-popup-actions">
-        <a class="affiliate-popup-primary" href="${escapeHtml(COUPANG_PARTNERS_URL)}" target="_blank" rel="nofollow sponsored noopener noreferrer">쿠팡 방문하고 결과 보기</a>
+        <a class="affiliate-popup-primary" href="${escapeHtml(COUPANG_PARTNERS_URL)}" target="_blank" rel="nofollow sponsored noopener noreferrer" data-google-interstitial="false">쿠팡 방문하고 결과 보기</a>
       </div>
     </div>
   `;
@@ -4392,6 +4392,19 @@ function currentHistoryEntry(screenName = state.activeScreen, options = {}) {
   };
 }
 
+function detailHashForKey(detailKey = "domains") {
+  const normalizedKey = String(detailKey || "domains").split(":")[0];
+  const hashByDetail = {
+    domains: "premium-section-1",
+    timing: "timing",
+    year_2026: "year-2026",
+    year_2027: "year-2027",
+    contextual: "basis",
+    basis: "basis",
+  };
+  return hashByDetail[normalizedKey] || normalizedKey || "premium";
+}
+
 function urlForHistoryScreen(screenName, options = {}) {
   const url = new URL(window.location.href);
   if (screenName === "report") {
@@ -4399,15 +4412,7 @@ function urlForHistoryScreen(screenName, options = {}) {
     return url.toString();
   }
   if (screenName === "detail") {
-    const detailKey = String(options.detail || state.activeDetail || "domains").split(":")[0];
-    const hashByDetail = {
-      domains: "premium-section-1",
-      timing: "timing",
-      year_2026: "year-2026",
-      year_2027: "year-2027",
-      contextual: "basis",
-    };
-    url.hash = hashByDetail[detailKey] || detailKey || "premium";
+    url.hash = detailHashForKey(options.detail || state.activeDetail || "domains");
     return url.toString();
   }
   if (screenName === "home") {
@@ -4943,8 +4948,8 @@ function renderReport(payload) {
   ];
   reportRoot.innerHTML = reportParts.join("");
 
-  reportRoot.querySelectorAll("[data-open-detail]").forEach((button) => {
-    button.addEventListener("click", () => openDetail(button.dataset.openDetail));
+  reportRoot.querySelectorAll("[data-open-detail]").forEach((control) => {
+    control.addEventListener("click", () => openDetail(control.dataset.openDetail));
   });
 
   state.detailToken = String(
@@ -5066,13 +5071,13 @@ function renderReportEntryBoard(screenContract, sections) {
       </div>
       <div class="report-entry-grid">
         ${entries.map((card) => `
-          <button class="report-entry-card report-entry-${escapeHtml(card.key)}" type="button" data-open-detail="${escapeHtml(card.key)}" aria-label="${escapeHtml(card.title)} 열기">
+          <a class="report-entry-card report-entry-${escapeHtml(card.key)}" href="#${escapeHtml(detailHashForKey(card.key))}" data-open-detail="${escapeHtml(card.key)}" aria-label="${escapeHtml(card.title)} 열기">
             <span class="report-entry-symbol">${escapeHtml(card.icon)}</span>
             <span class="report-entry-copy">
               <strong>${escapeHtml(card.title)}</strong>
               <small>${escapeHtml(card.copy)}</small>
             </span>
-          </button>
+          </a>
         `).join("")}
       </div>
     </section>
@@ -5456,7 +5461,7 @@ function renderDomainDirectCard({ section, index }) {
   const meta = domainLandingMeta(section);
   const focusLabel = meta.strongLabel || meta.primaryLabel || meta.watchLabel || "";
   return `
-    <button class="domain-direct-card ${metricToneClassFromGrade(grade)}" type="button" data-open-detail="domains:${index}" aria-label="${escapeHtml(title)} 열기">
+    <a class="domain-direct-card ${metricToneClassFromGrade(grade)}" href="#${escapeHtml(detailHashForKey(`domains:${index}`))}" data-open-detail="domains:${index}" aria-label="${escapeHtml(title)} 열기">
       <span class="section-symbol">${escapeHtml(sectionSymbols[domain] || sectionSymbols.default)}</span>
       <span class="domain-direct-copy">
         <strong>${escapeHtml(title)}</strong>
@@ -5467,7 +5472,7 @@ function renderDomainDirectCard({ section, index }) {
           ? `<b class="metric-grade-value ${metricGradeClassFromLabel(grade)}">${escapeHtml(grade)}</b>`
           : "<em>상세</em>"}
       </span>
-    </button>
+    </a>
   `;
 }
 

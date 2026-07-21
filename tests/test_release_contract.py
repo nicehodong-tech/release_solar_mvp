@@ -278,12 +278,32 @@ class WebProductContractTests(unittest.TestCase):
     def test_static_assets_use_current_contract(self) -> None:
         index_html = (RELEASE_ROOT / "saju_web" / "static" / "index.html").read_text(encoding="utf-8")
         app_js = (RELEASE_ROOT / "saju_web" / "static" / "app-v2.js").read_text(encoding="utf-8")
-        self.assertIn("production-release-v54", index_html)
+        self.assertIn("production-release-v55", index_html)
         self.assertIn("annualGroupAggregateItems", app_js)
         self.assertIn("total_indicator_labels", app_js)
         self.assertIn("rawMetricJudgmentStateType", app_js)
         self.assertIn("metricDisplayStateType", app_js)
         self.assertNotIn('data-submit-tier="free"', index_html)
+
+    def test_web_interstitial_is_safe_until_ad_unit_is_configured(self) -> None:
+        index_html = (RELEASE_ROOT / "saju_web" / "static" / "index.html").read_text(encoding="utf-8")
+        gam_js = (RELEASE_ROOT / "saju_web" / "static" / "gam-interstitial.js").read_text(encoding="utf-8")
+        self.assertIn('name="google-ad-manager-interstitial-unit" content=""', index_html)
+        self.assertIn("/gam-interstitial.js?v=gam-web-interstitial-v1", index_html)
+        self.assertIn("securepubads.g.doubleclick.net/tag/js/gpt.js", gam_js)
+        self.assertIn("OutOfPageFormat.INTERSTITIAL", gam_js)
+        self.assertIn("unhideWindow: false", gam_js)
+        self.assertIn("navBar: false", gam_js)
+        self.assertIn("inactivity: false", gam_js)
+        self.assertIn("endOfArticle: false", gam_js)
+
+    def test_web_interstitial_only_uses_natural_internal_transitions(self) -> None:
+        index_html = (RELEASE_ROOT / "saju_web" / "static" / "index.html").read_text(encoding="utf-8")
+        app_js = (RELEASE_ROOT / "saju_web" / "static" / "app-v2.js").read_text(encoding="utf-8")
+        self.assertIn('<a class="report-entry-card', app_js)
+        self.assertIn('<a class="domain-direct-card', app_js)
+        self.assertIn('data-google-interstitial="false">쿠팡 방문하고 결과 보기', app_js)
+        self.assertGreaterEqual(index_html.count('data-google-interstitial="false"'), 2)
 
 
 if __name__ == "__main__":
