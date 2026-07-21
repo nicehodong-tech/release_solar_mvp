@@ -887,12 +887,28 @@ function aggregateGradeFromMetricItems(items, fallback = "", contextKey = "") {
   return metricGradeFromAverage(grades, fallback);
 }
 
+function annualGroupAggregateItems(group) {
+  const items = uniqueAggregateMetricItems(group && group.items);
+  const declaredLabels = new Set(
+    asArray(group && group.total_indicator_labels)
+      .map((label) => String(label || "").trim())
+      .filter(Boolean),
+  );
+  if (!declaredLabels.size) return items;
+  const declaredItems = items.filter((item) => {
+    const sourceLabel = String(item && (item.source_label || item.sourceLabel) || "").trim();
+    const displayLabel = String(item && (item.label || item.title) || "").trim();
+    return declaredLabels.has(sourceLabel || displayLabel) || declaredLabels.has(displayLabel);
+  });
+  return declaredItems.length ? declaredItems : items;
+}
+
 function rawAnnualGroupAggregateGrade(group, fallback = "") {
-  return rawAggregateGradeFromMetricItems(group && group.items, fallback);
+  return rawAggregateGradeFromMetricItems(annualGroupAggregateItems(group), fallback);
 }
 
 function annualGroupAggregateGrade(group, fallback = "", contextKey = "") {
-  return aggregateGradeFromMetricItems(group && group.items, fallback, contextKey);
+  return aggregateGradeFromMetricItems(annualGroupAggregateItems(group), fallback, contextKey);
 }
 
 function rawSectionAggregateGrade(section, fallback = "") {
@@ -936,8 +952,8 @@ function judgmentGradeForScore(score, fallback = "") {
   return band ? band.label : fallback;
 }
 
-// The helpers below are presentation-only. They may adjust grades and bars,
-// but their output must not be used to select judgment copy or engine meaning.
+// The helpers below are presentation-only. They may align grades, bars, and
+// the matching UI status sentence, but they never write back to engine data.
 function metricGradeBand(score, contextKey = "") {
   const rawBand = rawMetricGradeBand(score);
   if (!rawBand) return null;
@@ -1204,14 +1220,19 @@ function currentUserSubject() {
   return name ? `${name}님은` : "당신은";
 }
 
-function metricJudgmentStateType(item, score = metricScore(item)) {
+function rawMetricJudgmentStateType(item, score = metricScore(item)) {
   if (!Number.isFinite(score)) return "normal";
   return semanticStateForGrade(rawMetricGradeForItem(item, score));
 }
 
+function metricDisplayStateType(item, score = metricScore(item), contextKey = "") {
+  if (!Number.isFinite(score)) return "normal";
+  return semanticStateForGrade(metricItemDisplayGrade(item, contextKey, score));
+}
+
 function metricStateLead(item, score = metricScore(item)) {
   const subject = currentUserSubject();
-  const stateType = metricJudgmentStateType(item, score);
+  const stateType = metricDisplayStateType(item, score);
   if (stateType === "good") {
     return `${subject} 이 지표가 좋게 나타나는군요.`;
   }
@@ -1531,7 +1552,7 @@ function metricBody(item, fallback = "지표별로 결과가 달라지는 대목
 
 function metricBodyParagraphs(item, fallback = "지표별로 결과가 달라지는 대목입니다.") {
   const score = metricScore(item);
-  const stateType = metricJudgmentStateType(item, score);
+  const stateType = metricDisplayStateType(item, score);
   const baseBody = metricBaseBody(item, fallback);
   if (stateType === "normal") {
     return [baseBody, metricStateLead(item, score)].filter(Boolean);
@@ -1557,7 +1578,7 @@ function renderAnnualMetricBodyParagraphs(item, domainKey, fallback = "연간 �
   const entry = annualMetricDescriptionEntry(item, domainKey);
   if (!entry) return renderMetricBodyParagraphs(item, fallback);
   const score = metricScore(item);
-  const stateType = metricJudgmentStateType(item, score);
+  const stateType = metricDisplayStateType(item, score, domainKey);
   const displayKey = normalizeMetricDescriptionKey(item && item.label);
   const sourceKey = normalizeMetricDescriptionKey(item && (item.source_label || item.sourceLabel));
   const convertedToPositiveAxis = Boolean(displayKey && sourceKey && displayKey !== sourceKey);

@@ -1038,6 +1038,72 @@ def _cycle_axis_primary_context_codes(
     return basis_codes[:5], counter_signals[:2]
 
 
+def _cycle_axis_evidence_family(item: dict[str, object]) -> str:
+    """Group structural signals that must remain auditable after score pruning."""
+
+    relation = str(item.get("relation") or "")
+    if relation in {"hidden_protrusion", "visible_root"}:
+        return "rooting"
+    return relation
+
+
+def _preserve_cycle_axis_evidence(
+    adjustments: dict[str, dict[str, object]],
+    axis_key: str,
+    ranked_candidates: list[dict[str, object]],
+    scored_candidates: list[dict[str, object]],
+) -> None:
+    """Retain decisive structural evidence without changing the axis score.
+
+    Only nine candidates participate in the numerical adjustment.  Branch
+    relations and other structural signals can still be relevant to the axis
+    even when their score candidate loses that ranking.  Their primary code is
+    therefore retained as evidence-only data with a zero score contribution.
+    """
+
+    preserved_families = {
+        _cycle_axis_evidence_family(item)
+        for item in scored_candidates
+        if _cycle_axis_evidence_family(item)
+    }
+    for family in ("branch_cycle", "stem_combine", "rooting", "chain"):
+        if family in preserved_families:
+            continue
+        representative = next(
+            (
+                item
+                for item in ranked_candidates
+                if _cycle_axis_evidence_family(item) == family
+            ),
+            None,
+        )
+        if representative is None:
+            continue
+        polarity = str(representative.get("polarity") or "mixed")
+        basis_code = str(representative.get("basis_code") or "")
+        counter_code = str(representative.get("counter_code") or "")
+        if polarity == "pressure":
+            _add_axis_adjustment(
+                adjustments,
+                axis_key,
+                counter_signals=[counter_code] if counter_code else [],
+            )
+        elif polarity == "mixed":
+            _add_axis_adjustment(
+                adjustments,
+                axis_key,
+                basis_codes=[basis_code] if basis_code else [],
+                counter_signals=[counter_code] if counter_code else [],
+            )
+        else:
+            _add_axis_adjustment(
+                adjustments,
+                axis_key,
+                basis_codes=[basis_code] if basis_code else [],
+            )
+        preserved_families.add(family)
+
+
 def _cycle_regulation_axis_adjustments(
     cycle_regulation_profile: dict[str, object] | None,
     axis_keys: set[str],
@@ -1068,7 +1134,7 @@ def _cycle_regulation_axis_adjustments(
             else 4
         )
         direct_axis_keys = set(CYCLE_SIGNAL_AXIS_LINKS.get(signal_id, ()))
-        for axis_index, axis_key in enumerate(axis_candidates[:candidate_limit]):
+        for axis_index, axis_key in enumerate(axis_candidates):
             priority = _cycle_signal_salience(signal) - axis_index * 7
             if axis_key in direct_axis_keys:
                 priority += 18
@@ -1085,17 +1151,21 @@ def _cycle_regulation_axis_adjustments(
                     "counter_code": counter_code,
                     "context_basis_codes": context_basis_codes,
                     "context_counter_signals": context_counter_signals,
+                    "relation": str(signal.get("relation") or ""),
+                    "signal_id": signal_id,
+                    "score_eligible": axis_index < candidate_limit,
                 }
             )
 
     for axis_key, candidates in axis_signal_candidates.items():
         ranked = sorted(candidates, key=lambda item: -float(item["priority"]))
-        pressure = [item for item in ranked if item["polarity"] == "pressure"][:3]
-        support = [item for item in ranked if item["polarity"] == "support"][:3]
-        mixed = [item for item in ranked if item["polarity"] == "mixed"][:2]
+        score_ranked = [item for item in ranked if item.get("score_eligible") is True]
+        pressure = [item for item in score_ranked if item["polarity"] == "pressure"][:3]
+        support = [item for item in score_ranked if item["polarity"] == "support"][:3]
+        mixed = [item for item in score_ranked if item["polarity"] == "mixed"][:2]
         selected: list[dict[str, object]] = []
         seen_ids: set[str] = set()
-        for item in [*ranked[:6], *pressure, *support, *mixed]:
+        for item in [*score_ranked[:6], *pressure, *support, *mixed]:
             code_key = str(item.get("basis_code") or item.get("counter_code") or item.get("priority"))
             if code_key in seen_ids:
                 continue
@@ -1140,6 +1210,7 @@ def _cycle_regulation_axis_adjustments(
                     basis_codes=[basis_code, *context_basis_codes],
                     counter_signals=context_counter_signals,
                 )
+        _preserve_cycle_axis_evidence(adjustments, axis_key, ranked, selected)
     return adjustments
 
 

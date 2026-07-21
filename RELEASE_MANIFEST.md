@@ -10,6 +10,7 @@
 - `saju_analysis_engine/data/`: 엔진 실행에 필요한 JSON, JSONL, CSV 데이터
 - `saju_analysis_engine/data/명리 핵심어 파일 2/`: 종합 근거 화면에 그대로 사용하는 검증 원문 17개
 - `saju_birth_engine/`: 양력 기준 명식 산출 엔진
+- `tests/`: 현재 상품 화면·엔진 근거·연간 지표 계약 회귀 검사
 - `web_app.py`: 로컬 실행용 진입점
 - `Procfile`, `render.yaml`, `runtime.txt`: 서버 배포 준비 파일
 
