@@ -64,7 +64,8 @@ PORT=8765
 - 화면은 대기 순서와 예상 시간을 표시하며, 진행률은 뒤로 움직이지 않습니다.
 - 동일 입력의 결과는 압축 캐시에서 재사용합니다.
 - 정적 파일은 gzip, ETag, 브라우저 캐시를 사용합니다.
-- `/healthz`는 워커 수, 활성 작업, 대기 작업, 최근 처리 시간, 캐시 사용량을 반환합니다.
+- `/healthz`는 워커 수, 활성 작업, 대기 작업, 최장 실행 시간, 캐시 사용량을 반환합니다.
+- 실행 중인 단일 분석이 120초를 넘으면 `/healthz`는 HTTP 503과 `degraded`를 반환합니다.
 
 ## 5. 배포 직후 점검
 
@@ -79,7 +80,8 @@ python3 scripts/operational_check.py https://aisajuleehyeon.com --concurrency 2 
 ```text
 ok: true
 health.status: healthy
-health.workers: 2
+health.analysisWorkers: 2
+health.jobs.hardTimeoutSeconds: 120
 모든 분석 sections >= 10
 모든 분석 factors > 0
 known birth time: hour pillar present
@@ -104,7 +106,7 @@ Cloudtype 대시보드와 `/healthz`를 함께 확인합니다.
 ## 7. 장애 대응
 
 1. `/healthz`가 열리는지 확인합니다.
-2. `status`, `activeJobs`, `queuedJobs`, `recentMedianSeconds`를 확인합니다.
+2. `status`, `jobs.running`, `jobs.queued`, `jobs.oldestRunningSeconds`를 확인합니다.
 3. `analysis worker pool stopped unexpectedly` 로그가 있으면 Cloudtype에서 서비스 한 번만 재시작합니다.
 4. 재시작 후 운영 점검 스크립트를 실행합니다.
 5. 같은 장애가 반복되면 현재 배포를 중지하고 직전 Git 커밋으로 롤백합니다.
@@ -112,3 +114,16 @@ Cloudtype 대시보드와 `/healthz`를 함께 확인합니다.
 ## 8. 배포 원칙
 
 48시간 동안은 엔진, 지표, 문장, 화면 구조를 바꾸지 않습니다. 긴급 수정은 서버 안정성 또는 명백한 기능 장애에만 한정하며, 수정 뒤 운영 점검과 실제 모바일 화면 확인을 모두 통과해야 합니다.
+
+## 9. 현재 배포 기준
+
+```text
+main: c09dea6
+운영 안정화: e90d98a
+고착 분석 복구: c09dea6
+```
+
+배포 직후 `/healthz`가 404이면 새 커밋이 적용되지 않은 것입니다. Cloudtype 배포 이력에서
+`c09dea6`을 사용하는지 확인한 뒤 수동 재배포합니다. 문제가 생기면 `a396a6e`로 되돌리는 대신
+우선 `e90d98a`를 사용합니다. `e90d98a`에는 계산 격리, 큐, 압축 캐시, 과부하 방어가 모두 포함되어
+있고 장기 실행 헬스체크만 빠져 있습니다.
