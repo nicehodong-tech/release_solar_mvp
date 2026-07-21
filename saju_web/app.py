@@ -7,6 +7,7 @@ import gzip
 import hashlib
 import json
 import logging
+import secrets
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -23,17 +24,18 @@ WEB_ROOT = Path(__file__).resolve().parent / "static"
 LOGGER = logging.getLogger("saju_web")
 CANONICAL_HOST = "aisajuleehyeon.com"
 WWW_HOST = "www.aisajuleehyeon.com"
-API_CACHE_MAX_ENTRIES = 96
-API_CACHE_MAX_BYTES = 48 * 1024 * 1024
+API_CACHE_MAX_ENTRIES = 24
+API_CACHE_MAX_BYTES = 24 * 1024 * 1024
 API_CACHE_COMPRESSION_LEVEL = 1
 API_CACHE_VERSION = "judgment-v20-trait-layer"
 _API_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 _API_CACHE_LOCK = Lock()
 _API_CACHE_BYTES = 0
-API_DETAIL_KEY_MAX_ENTRIES = 96
+API_DETAIL_KEY_MAX_ENTRIES = 32
 _API_DETAIL_KEYS: "OrderedDict[str, str]" = OrderedDict()
 _API_DETAIL_KEYS_LOCK = Lock()
-API_JOB_MAX_ENTRIES = 64
+API_JOB_MAX_ENTRIES = 32
+API_JOB_MAX_PENDING = 8
 API_JOB_STALE_SECONDS = 180
 _API_JOBS: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _API_JOBS_LOCK = Lock()
@@ -320,7 +322,21 @@ def _reserve_judgment_job(job_id: str, cache_key: str) -> tuple[dict[str, Any], 
                 _API_JOBS.move_to_end(job_id)
                 return dict(existing), False
 
-        run_id = f"{time.time_ns():x}"
+        active_jobs = sum(
+            1
+            for candidate in _API_JOBS.values()
+            if str(candidate.get("status") or "") in {"queued", "running", "initial"}
+            and (now - float(candidate.get("updatedAt") or candidate.get("createdAt") or 0))
+            < API_JOB_STALE_SECONDS
+        )
+        if active_jobs >= API_JOB_MAX_PENDING:
+            return {
+                "status": "busy",
+                "message": "현재 분석 요청이 많아 잠시 순서를 조정하고 있습니다.",
+                "retryAfterMs": 2500,
+            }, False
+
+        run_id = secrets.token_hex(12)
         job = {
             "status": "queued",
             "message": "분석 요청을 접수했습니다.",
@@ -466,6 +482,19 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             if payload.get("async"):
                 job_id = detail_token
                 job = _ensure_judgment_job(job_id, cache_key, payload)
+                if job.get("status") == "busy":
+                    self._send_json(
+                        {
+                            "ok": False,
+                            "busy": True,
+                            "retryable": True,
+                            "message": job.get("message"),
+                            "retryAfterMs": job.get("retryAfterMs") or 2500,
+                            "error": {"message": job.get("message")},
+                        },
+                        429,
+                    )
+                    return
                 if job.get("status") == "done":
                     completed_data = _cache_get(cache_key)
                     if completed_data is None:

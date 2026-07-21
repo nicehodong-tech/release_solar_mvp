@@ -4636,7 +4636,19 @@ async function fetchAnalysisJson(url, options = {}, maxAttempts = 4) {
       const response = await fetch(url, { ...options, signal: controller.signal });
       const data = await response.json().catch(() => null);
       if (RETRYABLE_ANALYSIS_STATUSES.has(response.status) && attempt + 1 < maxAttempts) {
-        await wait(Math.min(700 * (2 ** attempt), 2800));
+        const retryAfterMs = Number(data && data.retryAfterMs);
+        if (response.status === 429) {
+          updateLoading(
+            Math.max(state.loadingValue, 72),
+            (data && (data.message || (data.error && data.error.message))) ||
+              "현재 분석 요청이 많아 잠시 순서를 조정하고 있습니다.",
+          );
+        }
+        await wait(
+          Number.isFinite(retryAfterMs) && retryAfterMs > 0
+            ? Math.min(retryAfterMs, 4000)
+            : Math.min(700 * (2 ** attempt), 2800),
+        );
         continue;
       }
       return { response, data };
@@ -4660,7 +4672,7 @@ async function requestJudgment(payload, recoveryDepth = 0) {
     method: "POST",
     headers: { "Content-Type": "application/json; charset=utf-8", Accept: "application/json" },
     body: JSON.stringify({ ...payload, async: true }),
-  });
+  }, 30);
   if (response.status === 202 && data && data.pending && data.jobId) {
     return pollJudgment(data.jobId, payload, recoveryDepth);
   }

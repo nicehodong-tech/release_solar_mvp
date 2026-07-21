@@ -743,7 +743,7 @@ def _product_metric_meaning_text_set() -> frozenset[str]:
         return frozenset()
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=1024)
 def _is_product_metric_meaning_text(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
@@ -751,7 +751,7 @@ def _is_product_metric_meaning_text(value: str) -> bool:
     return text in _product_metric_meaning_text_set()
 
 
-@lru_cache(maxsize=32768)
+@lru_cache(maxsize=8192)
 def _clean_customer_copy_text(value: str) -> str:
     raw_text = str(value or "").strip()
     if _is_product_metric_meaning_text(raw_text):
@@ -1151,7 +1151,7 @@ def _timing_target_years(birth_year: int, *, start_age: int = 1, end_age: int = 
     return list(range(start_year, end_year + 1))
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=2)
 def _analysis_context_cached(
     birth_date: str,
     birth_time: str,
@@ -9204,7 +9204,7 @@ def _product_metric_source_family(item: dict[str, Any]) -> str:
     return _compact_match_key(item.get("key") or item.get("source_key") or item.get("source_axis_key")) or "source"
 
 
-@lru_cache(maxsize=32768)
+@lru_cache(maxsize=8192)
 def _cached_product_metric_match_terms(values: tuple[str, ...]) -> frozenset[str]:
     terms: set[str] = set()
     for value in values:
@@ -9303,7 +9303,7 @@ def _product_metric_engine_token_alias_key_rows() -> tuple[tuple[str, tuple[str,
     )
 
 
-@lru_cache(maxsize=32768)
+@lru_cache(maxsize=8192)
 def _product_metric_engine_token_semantic_terms(token_key: str) -> frozenset[str]:
     terms: set[str] = set()
     for marker_key, aliases in _product_metric_engine_token_alias_key_rows():
@@ -9312,7 +9312,7 @@ def _product_metric_engine_token_semantic_terms(token_key: str) -> frozenset[str
     return frozenset(terms)
 
 
-@lru_cache(maxsize=32768)
+@lru_cache(maxsize=8192)
 def _cached_product_metric_engine_semantic_terms(values: tuple[str, ...]) -> tuple[str, ...]:
     terms = _product_metric_match_terms(*values)
     for value in values:
@@ -19507,7 +19507,7 @@ def _premium_screen_item_contract(section: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@lru_cache(maxsize=65536)
+@lru_cache(maxsize=16384)
 def _compact_match_key_cached(text: str) -> str:
     return re.sub(r"[\s·ㆍ\-\(\)]+", "", text)
 
