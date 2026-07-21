@@ -60,6 +60,7 @@ API_JOB_MAX_ENTRIES = 192
 API_JOB_MAX_PENDING = _env_int("SAJU_JOB_MAX_PENDING", 12, minimum=4, maximum=24)
 API_JOB_STALE_SECONDS = _env_int("SAJU_JOB_STALE_SECONDS", 600, minimum=180, maximum=1800)
 API_JOB_ESTIMATED_SECONDS = _env_int("SAJU_JOB_ESTIMATED_SECONDS", 15, minimum=5, maximum=60)
+API_JOB_HARD_TIMEOUT_SECONDS = _env_int("SAJU_JOB_HARD_TIMEOUT_SECONDS", 120, minimum=60, maximum=600)
 _API_JOBS: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _API_JOBS_LOCK = Lock()
 _API_JOB_SEMAPHORE = Semaphore(API_ANALYSIS_WORKERS)
@@ -295,16 +296,29 @@ def _operational_snapshot() -> dict[str, Any]:
         active = _active_jobs_locked(now)
         running = sum(1 for _, job in active if str(job.get("status") or "") == "running")
         queued = sum(1 for _, job in active if str(job.get("status") or "") == "queued")
+        running_ages = [
+            max(0.0, now - float(job.get("startedAt") or job.get("updatedAt") or now))
+            for _, job in active
+            if str(job.get("status") or "") == "running"
+        ]
+        oldest_running_seconds = max(running_ages, default=0.0)
     with _API_CACHE_LOCK:
         cache_entries = len(_API_CACHE)
         cache_bytes = _API_CACHE_BYTES
+    healthy = oldest_running_seconds < API_JOB_HARD_TIMEOUT_SECONDS
     return {
-        "ok": True,
-        "status": "healthy",
+        "ok": healthy,
+        "status": "healthy" if healthy else "degraded",
         "version": API_CACHE_VERSION,
         "uptimeSeconds": int(max(0, now - SERVER_STARTED_AT)),
         "analysisWorkers": API_ANALYSIS_WORKERS,
-        "jobs": {"running": running, "queued": queued, "capacity": API_JOB_MAX_PENDING},
+        "jobs": {
+            "running": running,
+            "queued": queued,
+            "capacity": API_JOB_MAX_PENDING,
+            "oldestRunningSeconds": int(round(oldest_running_seconds)),
+            "hardTimeoutSeconds": API_JOB_HARD_TIMEOUT_SECONDS,
+        },
         "cache": {"entries": cache_entries, "compressedBytes": cache_bytes},
     }
 
@@ -657,7 +671,8 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         if parsed.path == "/healthz":
-            self._send_json(_operational_snapshot(), 200)
+            snapshot = _operational_snapshot()
+            self._send_json(snapshot, 200 if snapshot.get("ok") else 503)
             return
         if parsed.path == "/api/judgment-status":
             self._handle_judgment_status(parsed.query)

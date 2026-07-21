@@ -45,6 +45,7 @@ SAJU_ANALYSIS_WORKERS=2
 SAJU_JOB_MAX_PENDING=12
 SAJU_JOB_STALE_SECONDS=600
 SAJU_JOB_ESTIMATED_SECONDS=15
+SAJU_JOB_HARD_TIMEOUT_SECONDS=120
 SAJU_LOG_LEVEL=INFO
 PORT=8765
 ```
@@ -53,6 +54,7 @@ PORT=8765
 - `SAJU_ANALYSIS_WORKERS=2`: 2 vCPU에서 분석 두 건을 병렬 처리합니다.
 - `SAJU_JOB_MAX_PENDING=12`: 과도한 요청을 무한 적재하지 않고 명시적으로 재시도시킵니다.
 - `SAJU_JOB_STALE_SECONDS=600`: 중단된 작업 상태를 10분 뒤 새 요청으로 교체할 수 있게 합니다.
+- `SAJU_JOB_HARD_TIMEOUT_SECONDS=120`: 단일 분석이 2분 이상 멈추면 헬스체크를 실패시켜 컨테이너 복구를 유도합니다.
 
 ## 4. 운영 계약
 
