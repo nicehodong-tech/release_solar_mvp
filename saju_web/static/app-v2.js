@@ -234,11 +234,11 @@ async function restoreAffiliateReport() {
       let initialPayload = record.payload;
       let result;
       try {
-        result = await hydrateInitialDetailPayload(initialPayload);
+        result = await hydrateInitialDetailPayload(initialPayload, record.request);
       } catch (_detailError) {
         initialPayload = await requestJudgment(record.request);
         persistReportSession(initialPayload, record.request);
-        result = await hydrateInitialDetailPayload(initialPayload);
+        result = await hydrateInitialDetailPayload(initialPayload, record.request);
       }
       state.payload = result;
       renderReport(result);
@@ -4612,7 +4612,7 @@ async function submitReport() {
   try {
     const initialResult = await requestJudgment(payload);
     persistReportSession(initialResult, payload);
-    const result = await hydrateInitialDetailPayload(initialResult);
+    const result = await hydrateInitialDetailPayload(initialResult, payload);
     state.payload = result;
     renderReport(result);
     await finishLoading();
@@ -4625,15 +4625,44 @@ async function submitReport() {
   }
 }
 
-async function requestJudgment(payload) {
-  const response = await fetch("/api/judgment", {
+const RETRYABLE_ANALYSIS_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+async function fetchAnalysisJson(url, options = {}, maxAttempts = 4) {
+  let lastError = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 25000);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      const data = await response.json().catch(() => null);
+      if (RETRYABLE_ANALYSIS_STATUSES.has(response.status) && attempt + 1 < maxAttempts) {
+        await wait(Math.min(700 * (2 ** attempt), 2800));
+        continue;
+      }
+      return { response, data };
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 >= maxAttempts) break;
+      await wait(Math.min(700 * (2 ** attempt), 2800));
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }
+  throw new Error(
+    lastError && lastError.name === "AbortError"
+      ? "분석 서버의 응답이 늦어지고 있습니다. 연결을 다시 시도해 주세요."
+      : "분석 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+  );
+}
+
+async function requestJudgment(payload, recoveryDepth = 0) {
+  const { response, data } = await fetchAnalysisJson("/api/judgment", {
     method: "POST",
     headers: { "Content-Type": "application/json; charset=utf-8", Accept: "application/json" },
     body: JSON.stringify({ ...payload, async: true }),
   });
-  const data = await response.json().catch(() => null);
   if (response.status === 202 && data && data.pending && data.jobId) {
-    return pollJudgment(data.jobId);
+    return pollJudgment(data.jobId, payload, recoveryDepth);
   }
   if (!response.ok || !(data && data.ok)) {
     throw new Error((data && data.error && data.error.message) || "분석 결과 생성에 실패했습니다.");
@@ -4641,15 +4670,18 @@ async function requestJudgment(payload) {
   return data;
 }
 
-async function pollJudgment(jobId) {
-  for (let index = 0; index < 90; index += 1) {
+async function pollJudgment(jobId, payload, recoveryDepth = 0) {
+  for (let index = 0; index < 150; index += 1) {
     await wait(index < 4 ? 900 : 1400);
-    const response = await fetch(`/api/judgment-status?jobId=${encodeURIComponent(jobId)}`, {
+    const { response, data } = await fetchAnalysisJson(`/api/judgment-status?jobId=${encodeURIComponent(jobId)}`, {
       headers: { Accept: "application/json" },
-    });
-    const data = await response.json().catch(() => null);
+    }, 3);
     if (response.status === 202 && data && data.pending) {
       continue;
+    }
+    if ([404, 409, 500].includes(response.status) && recoveryDepth < 2) {
+      updateLoading(Math.max(state.loadingValue, 86), "분석 서버와 결과를 다시 연결하고 있습니다.");
+      return requestJudgment(payload, recoveryDepth + 1);
     }
     if (!response.ok || !(data && data.ok)) {
       throw new Error((data && data.error && data.error.message) || "분석 결과 생성에 실패했습니다.");
@@ -4659,19 +4691,41 @@ async function pollJudgment(jobId) {
   throw new Error("분석 시간이 길어지고 있습니다. 잠시 후 다시 시도해 주세요.");
 }
 
-async function requestJudgmentDetail(token) {
-  const response = await fetch(`/api/judgment-detail?token=${encodeURIComponent(token)}`, {
-    headers: { Accept: "application/json" },
-  });
-  const data = await response.json().catch(() => null);
-  if (response.status === 202 && data && data.pending) {
-    await wait(900);
-    return requestJudgmentDetail(token);
+async function requestJudgmentDetail(token, requestPayload, recoveryDepth = 0) {
+  for (let index = 0; index < 150; index += 1) {
+    const { response, data } = await fetchAnalysisJson(
+      `/api/judgment-detail?token=${encodeURIComponent(token)}`,
+      { headers: { Accept: "application/json" } },
+      3,
+    );
+    if (response.status === 202 && data && data.pending) {
+      await wait(900);
+      continue;
+    }
+    if ([404, 409, 500].includes(response.status) && requestPayload && recoveryDepth < 2) {
+      updateLoading(Math.max(state.loadingValue, 94), "세부 결과를 다시 연결하고 있습니다.");
+      const recovered = await requestJudgment(requestPayload, recoveryDepth + 1);
+      const recoveredReport = (recovered && recovered.report && typeof recovered.report === "object")
+        ? recovered.report
+        : {};
+      const recoveredToken = String(
+        (recovered && (recovered.detailToken || recovered.detail_token)) ||
+          recoveredReport.detail_token ||
+          recoveredReport.detailToken ||
+          "",
+      ).trim();
+      const recoveredDeferred = Boolean(
+        (recovered && recovered.detailDeferred) || recoveredReport.detail_deferred,
+      );
+      if (!recoveredDeferred || !recoveredToken) return recovered;
+      return requestJudgmentDetail(recoveredToken, requestPayload, recoveryDepth + 1);
+    }
+    if (!response.ok || !(data && data.ok)) {
+      throw new Error((data && data.error && data.error.message) || "상세 결과를 불러오지 못했습니다.");
+    }
+    return data;
   }
-  if (!response.ok || !(data && data.ok)) {
-    throw new Error((data && data.error && data.error.message) || "상세 결과를 불러오지 못했습니다.");
-  }
-  return data;
+  throw new Error("세부 분석 시간이 길어지고 있습니다. 잠시 후 다시 시도해 주세요.");
 }
 
 function mergePayloads(basePayload, detailPayload) {
@@ -4694,7 +4748,7 @@ function mergePayloads(basePayload, detailPayload) {
   };
 }
 
-async function hydrateInitialDetailPayload(payload) {
+async function hydrateInitialDetailPayload(payload, requestPayload = null) {
   const report = (payload && payload.report && typeof payload.report === "object") ? payload.report : {};
   const token = String(
     (payload && (payload.detailToken || payload.detail_token)) ||
@@ -4705,7 +4759,7 @@ async function hydrateInitialDetailPayload(payload) {
   const deferred = Boolean((payload && payload.detailDeferred) || report.detail_deferred);
   if (!deferred || !token) return payload;
   updateLoading(Math.max(state.loadingValue, 92), "세부 지표와 근거를 함께 정리하고 있습니다.");
-  const detailPayload = await requestJudgmentDetail(token);
+  const detailPayload = await requestJudgmentDetail(token, requestPayload);
   return mergePayloads(payload, detailPayload);
 }
 

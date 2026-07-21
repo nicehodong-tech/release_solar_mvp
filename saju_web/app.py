@@ -6,11 +6,13 @@ import argparse
 import gzip
 import hashlib
 import json
+import logging
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock, Semaphore, Thread
+from threading import Lock, Semaphore
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -18,19 +20,25 @@ from .report_service import build_report_payload
 
 
 WEB_ROOT = Path(__file__).resolve().parent / "static"
+LOGGER = logging.getLogger("saju_web")
 CANONICAL_HOST = "aisajuleehyeon.com"
 WWW_HOST = "www.aisajuleehyeon.com"
 API_CACHE_MAX_ENTRIES = 96
+API_CACHE_MAX_BYTES = 48 * 1024 * 1024
+API_CACHE_COMPRESSION_LEVEL = 1
 API_CACHE_VERSION = "judgment-v20-trait-layer"
 _API_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 _API_CACHE_LOCK = Lock()
+_API_CACHE_BYTES = 0
 API_DETAIL_KEY_MAX_ENTRIES = 96
 _API_DETAIL_KEYS: "OrderedDict[str, str]" = OrderedDict()
 _API_DETAIL_KEYS_LOCK = Lock()
 API_JOB_MAX_ENTRIES = 64
+API_JOB_STALE_SECONDS = 180
 _API_JOBS: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _API_JOBS_LOCK = Lock()
 _API_JOB_SEMAPHORE = Semaphore(1)
+_API_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="saju-analysis")
 MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -102,19 +110,41 @@ def _detail_key_get(token: str) -> str | None:
 
 def _cache_get(key: str) -> bytes | None:
     with _API_CACHE_LOCK:
-        data = _API_CACHE.get(key)
-        if data is None:
+        compressed = _API_CACHE.get(key)
+        if compressed is None:
             return None
         _API_CACHE.move_to_end(key)
-        return data
+    try:
+        return gzip.decompress(compressed)
+    except (OSError, EOFError):
+        global _API_CACHE_BYTES
+        with _API_CACHE_LOCK:
+            removed = _API_CACHE.pop(key, None)
+            if removed is not None:
+                _API_CACHE_BYTES = max(0, _API_CACHE_BYTES - len(removed))
+        key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+        LOGGER.warning("discarded corrupt judgment cache entry key=%s", key_digest)
+        return None
+
+
+def _cache_contains(key: str) -> bool:
+    with _API_CACHE_LOCK:
+        return key in _API_CACHE
 
 
 def _cache_set(key: str, data: bytes) -> None:
+    global _API_CACHE_BYTES
+    compressed = gzip.compress(data, compresslevel=API_CACHE_COMPRESSION_LEVEL)
     with _API_CACHE_LOCK:
-        _API_CACHE[key] = data
+        previous = _API_CACHE.pop(key, None)
+        if previous is not None:
+            _API_CACHE_BYTES -= len(previous)
+        _API_CACHE[key] = compressed
+        _API_CACHE_BYTES += len(compressed)
         _API_CACHE.move_to_end(key)
-        while len(_API_CACHE) > API_CACHE_MAX_ENTRIES:
-            _API_CACHE.popitem(last=False)
+        while len(_API_CACHE) > API_CACHE_MAX_ENTRIES or _API_CACHE_BYTES > API_CACHE_MAX_BYTES:
+            _, removed = _API_CACHE.popitem(last=False)
+            _API_CACHE_BYTES = max(0, _API_CACHE_BYTES - len(removed))
 
 
 def _strip_initial_section(section: dict[str, Any]) -> dict[str, Any]:
@@ -264,52 +294,110 @@ def _job_snapshot(job_id: str) -> dict[str, Any] | None:
         return dict(job)
 
 
-def _job_update(job_id: str, **updates: Any) -> None:
+def _job_update_if_current(job_id: str, run_id: str, **updates: Any) -> bool:
     with _API_JOBS_LOCK:
-        job = _API_JOBS.setdefault(job_id, {})
+        job = _API_JOBS.get(job_id)
+        if job is None or str(job.get("runId") or "") != run_id:
+            return False
         job.update(updates)
         job["updatedAt"] = time.time()
         _API_JOBS.move_to_end(job_id)
+        return True
+
+
+def _reserve_judgment_job(job_id: str, cache_key: str) -> tuple[dict[str, Any], bool]:
+    now = time.time()
+    cache_available = _cache_contains(cache_key)
+    with _API_JOBS_LOCK:
+        existing = _API_JOBS.get(job_id)
+        if existing is not None:
+            status = str(existing.get("status") or "")
+            updated_at = float(existing.get("updatedAt") or existing.get("createdAt") or 0)
+            is_fresh = (now - updated_at) < API_JOB_STALE_SECONDS
+            if (status in {"queued", "running", "initial"} and is_fresh) or (
+                status == "done" and cache_available
+            ):
+                _API_JOBS.move_to_end(job_id)
+                return dict(existing), False
+
+        run_id = f"{time.time_ns():x}"
+        job = {
+            "status": "queued",
+            "message": "분석 요청을 접수했습니다.",
+            "createdAt": now,
+            "updatedAt": now,
+            "runId": run_id,
+        }
+        _API_JOBS[job_id] = job
+        _API_JOBS.move_to_end(job_id)
         while len(_API_JOBS) > API_JOB_MAX_ENTRIES:
-            _API_JOBS.popitem(last=False)
+            removable_id = next(
+                (
+                    candidate_id
+                    for candidate_id, candidate in _API_JOBS.items()
+                    if candidate_id != job_id and str(candidate.get("status") or "") in {"done", "error"}
+                ),
+                next(candidate_id for candidate_id in _API_JOBS if candidate_id != job_id),
+            )
+            _API_JOBS.pop(removable_id, None)
+        return dict(job), True
 
 
-def _run_judgment_job(job_id: str, cache_key: str, payload: dict[str, Any]) -> None:
-    _job_update(
-        job_id,
-        status="running",
-        message="명식을 계산하고 운의 강약을 정리하고 있습니다.",
-        startedAt=time.time(),
-    )
+def _run_judgment_job(job_id: str, cache_key: str, payload: dict[str, Any], run_id: str) -> None:
     try:
         with _API_JOB_SEMAPHORE:
+            if not _job_update_if_current(
+                job_id,
+                run_id,
+                status="running",
+                message="명식을 계산하고 운의 강약을 정리하고 있습니다.",
+                startedAt=time.time(),
+            ):
+                return
             cached = _cache_get(cache_key)
             if cached is not None:
-                _job_update(job_id, status="done", data=cached, cacheStatus="HIT")
+                _job_update_if_current(
+                    job_id,
+                    run_id,
+                    status="done",
+                    cacheStatus="HIT",
+                    finishedAt=time.time(),
+                )
                 return
             full_result = build_report_payload(_payload_for_build(payload), defer_detail=False)
             full_data = _json_bytes(full_result)
             _cache_set(cache_key, full_data)
-            _job_update(job_id, status="done", data=full_data, cacheStatus="MISS")
+            _job_update_if_current(
+                job_id,
+                run_id,
+                status="done",
+                cacheStatus="MISS",
+                finishedAt=time.time(),
+            )
     except ValueError as exc:
-        _job_update(job_id, status="error", errorMessage=str(exc))
+        _job_update_if_current(job_id, run_id, status="error", errorMessage=str(exc), finishedAt=time.time())
     except Exception:
-        _job_update(job_id, status="error", errorMessage="사주 분석 생성 중 오류가 발생했습니다.")
+        LOGGER.exception("judgment job failed job_id=%s", job_id)
+        _job_update_if_current(
+            job_id,
+            run_id,
+            status="error",
+            errorMessage="사주 분석 생성 중 오류가 발생했습니다.",
+            finishedAt=time.time(),
+        )
 
 
 def _ensure_judgment_job(job_id: str, cache_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    existing = _job_snapshot(job_id)
-    if existing is not None:
-        return existing
-    _job_update(
-        job_id,
-        status="queued",
-        message="분석 요청을 접수했습니다.",
-        createdAt=time.time(),
-    )
-    worker = Thread(target=_run_judgment_job, args=(job_id, cache_key, _payload_for_build(payload)), daemon=True)
-    worker.start()
-    return _job_snapshot(job_id) or {"status": "queued", "message": "분석 요청을 접수했습니다."}
+    job, should_start = _reserve_judgment_job(job_id, cache_key)
+    if should_start:
+        _API_JOB_EXECUTOR.submit(
+            _run_judgment_job,
+            job_id,
+            cache_key,
+            _payload_for_build(payload),
+            str(job.get("runId") or ""),
+        )
+    return _job_snapshot(job_id) or job
 
 
 def _pending_response(job_id: str, job: dict[str, Any] | None) -> dict[str, Any]:
@@ -321,6 +409,7 @@ def _pending_response(job_id: str, job: dict[str, Any] | None) -> dict[str, Any]
         "jobId": job_id,
         "status": status,
         "message": message,
+        "retryAfterMs": 900,
     }
 
 
@@ -377,22 +466,38 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             if payload.get("async"):
                 job_id = detail_token
                 job = _ensure_judgment_job(job_id, cache_key, payload)
-                if job.get("status") == "initial" and job.get("data"):
-                    self._send_json_bytes(
-                        _initial_payload_bytes_from_full_bytes(job["data"], detail_token),
-                        200,
-                        cache_status="INITIAL-SLIM",
-                    )
-                    return
-                if job.get("status") == "done" and job.get("data"):
-                    self._send_json_bytes(
-                        _initial_payload_bytes_from_full_bytes(job["data"], detail_token),
-                        200,
-                        cache_status=f"{str(job.get('cacheStatus') or 'JOB')}-SLIM",
-                    )
-                    return
+                if job.get("status") == "done":
+                    completed_data = _cache_get(cache_key)
+                    if completed_data is None:
+                        job = _ensure_judgment_job(job_id, cache_key, payload)
+                    else:
+                        self._send_json_bytes(
+                            _initial_payload_bytes_from_full_bytes(completed_data, detail_token),
+                            200,
+                            cache_status=f"{str(job.get('cacheStatus') or 'JOB')}-SLIM",
+                        )
+                        return
+                if job.get("status") == "initial":
+                    initial_data = _cache_get(cache_key)
+                    if initial_data is not None:
+                        self._send_json_bytes(
+                            _initial_payload_bytes_from_full_bytes(initial_data, detail_token),
+                            200,
+                            cache_status="INITIAL-SLIM",
+                        )
+                        return
                 if job.get("status") == "error":
-                    self._send_json({"ok": False, "error": {"message": job.get("errorMessage") or "분석 결과 생성에 실패했습니다."}}, 500)
+                    # A failure created after this request began is returned once.
+                    # The next POST replaces the terminal job and retries cleanly.
+                    self._send_json(
+                        {
+                            "ok": False,
+                            "error": {
+                                "message": job.get("errorMessage") or "분석 결과 생성에 실패했습니다."
+                            },
+                        },
+                        500,
+                    )
                     return
                 self._send_json(_pending_response(job_id, job), 202)
                 return
@@ -403,6 +508,7 @@ class SajuWebHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": {"message": str(exc)}}, 400)
             return
         except Exception:
+            LOGGER.exception("synchronous judgment request failed")
             self._send_json(
                 {"ok": False, "error": {"message": "사주 분석 생성 중 오류가 발생했습니다."}},
                 500,
@@ -424,22 +530,24 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         if job is None:
             self._send_json({"ok": False, "error": {"message": "분석 작업을 찾을 수 없습니다."}}, 404)
             return
-        if job.get("status") == "initial" and job.get("data"):
+        if job.get("status") in {"initial", "done"}:
             cache_key = _detail_key_get(job_id)
-            detail_token = _detail_token_from_cache_key(cache_key) if cache_key else job_id
-            self._send_json_bytes(
-                _initial_payload_bytes_from_full_bytes(job["data"], detail_token),
-                200,
-                cache_status="INITIAL-SLIM",
-            )
-            return
-        if job.get("status") == "done" and job.get("data"):
-            cache_key = _detail_key_get(job_id)
-            detail_token = _detail_token_from_cache_key(cache_key) if cache_key else job_id
-            self._send_json_bytes(
-                _initial_payload_bytes_from_full_bytes(job["data"], detail_token),
-                200,
-                cache_status=f"{str(job.get('cacheStatus') or 'JOB')}-SLIM",
+            completed_data = _cache_get(cache_key) if cache_key else None
+            if completed_data is not None:
+                detail_token = _detail_token_from_cache_key(cache_key) if cache_key else job_id
+                self._send_json_bytes(
+                    _initial_payload_bytes_from_full_bytes(completed_data, detail_token),
+                    200,
+                    cache_status=f"{str(job.get('cacheStatus') or 'JOB')}-SLIM",
+                )
+                return
+            self._send_json(
+                {
+                    "ok": False,
+                    "retryable": True,
+                    "error": {"message": "분석 서버가 갱신되었습니다. 결과를 다시 연결합니다."},
+                },
+                409,
             )
             return
         if job.get("status") == "error":
@@ -457,17 +565,23 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         full_data = _cache_get(cache_key) if cache_key else None
         if full_data is None:
             job = _job_snapshot(token)
-            if job and job.get("status") == "done" and job.get("data"):
-                full_data = job["data"]
-            elif job and job.get("status") in {"queued", "running", "initial"}:
+            if job and job.get("status") in {"queued", "running", "initial"}:
                 self._send_json(_pending_response(token, job), 202)
                 return
         if full_data is None:
-            self._send_json({"ok": False, "error": {"message": "상세 결과를 찾을 수 없습니다. 다시 분석해주세요."}}, 404)
+            self._send_json(
+                {
+                    "ok": False,
+                    "retryable": True,
+                    "error": {"message": "상세 결과 연결이 끊어졌습니다. 분석을 자동으로 복구합니다."},
+                },
+                409,
+            )
             return
         try:
             detail_data = _detail_payload_bytes_from_full_bytes(full_data, token)
         except Exception:
+            LOGGER.exception("judgment detail serialization failed token=%s", token)
             self._send_json({"ok": False, "error": {"message": "상세 결과를 정리하지 못했습니다."}}, 500)
             return
         self._send_json_bytes(detail_data, 200, cache_status="DETAIL")
