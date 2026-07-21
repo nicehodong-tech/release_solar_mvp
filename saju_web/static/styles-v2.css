@@ -689,11 +689,19 @@ button {
 
 .loading-bar i {
   display: block;
-  width: 8%;
+  width: 100%;
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, #d6a75c, #fff2cf);
-  transition: width 0.5s linear;
+  transform: scaleX(0.08);
+  transform-origin: left center;
+  transition: transform 0.14s linear;
+  will-change: transform;
+}
+
+.loading-bar i.is-completing {
+  transition-duration: 0.48s;
+  transition-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 .loading-panel p {

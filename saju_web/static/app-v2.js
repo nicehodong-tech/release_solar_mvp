@@ -4769,20 +4769,21 @@ function wait(ms) {
 }
 
 function startLoading() {
+  cancelLoading();
   state.loadingValue = 8;
   state.loadingStartedAt = Date.now();
+  loadingFill.classList.remove("is-completing");
   updateLoading(8, loadingMessages[0]);
   state.loadingTimer = window.setInterval(() => {
     const elapsed = Math.max(0, Date.now() - state.loadingStartedAt);
-    const next = Math.min(94, 8 + Math.floor(elapsed / 520) * 2);
-    if (next <= state.loadingValue) return;
-    state.loadingValue = next;
+    const estimated = Math.min(94, 8 + 86 * (1 - Math.exp(-elapsed / 16000)));
+    const next = Math.max(state.loadingValue, estimated);
     const messageIndex = Math.min(
       loadingMessages.length - 1,
       Math.max(0, Math.floor(((next - 8) / 86) * loadingMessages.length)),
     );
     updateLoading(next, loadingMessages[messageIndex]);
-  }, 700);
+  }, 80);
 }
 
 function cancelLoading() {
@@ -4798,13 +4799,17 @@ async function finishLoading() {
   if (elapsed < 900) {
     await wait(900 - elapsed);
   }
+  loadingFill.classList.add("is-completing");
   updateLoading(100, "분석을 마쳤습니다. 결과 화면을 열고 있습니다.");
-  await wait(650);
+  await wait(560);
+  loadingFill.classList.remove("is-completing");
 }
 
 function updateLoading(percent, message) {
-  loadingPercent.textContent = `${percent}%`;
-  loadingFill.style.width = `${percent}%`;
+  const normalized = Math.max(0, Math.min(100, Number(percent) || 0));
+  state.loadingValue = Math.max(state.loadingValue, normalized);
+  loadingPercent.textContent = `${Math.round(state.loadingValue)}%`;
+  loadingFill.style.transform = `scaleX(${(state.loadingValue / 100).toFixed(4)})`;
   loadingMessage.textContent = message;
 }
 
