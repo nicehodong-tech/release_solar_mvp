@@ -23,6 +23,10 @@ def _read_text(path: Path) -> str:
 @lru_cache(maxsize=1)
 def _find_dictionary_dir() -> Path | None:
     here = Path(__file__).resolve()
+    packaged = here.parent / "data" / "명리 핵심어 파일 2"
+    if packaged.is_dir() and (packaged / "00_파일목록_및_검증값.txt").is_file():
+        return packaged
+
     for base in (here.parent, *here.parents):
         if not base.exists():
             continue

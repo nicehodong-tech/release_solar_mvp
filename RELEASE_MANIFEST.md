@@ -8,6 +8,7 @@
 - `saju_web/static/assets/`: 동양화풍 UI 이미지 자산
 - `saju_analysis_engine/`: 사주 분석 엔진
 - `saju_analysis_engine/data/`: 엔진 실행에 필요한 JSON, JSONL, CSV 데이터
+- `saju_analysis_engine/data/명리 핵심어 파일 2/`: 종합 근거 화면에 그대로 사용하는 검증 원문 17개
 - `saju_birth_engine/`: 양력 기준 명식 산출 엔진
 - `web_app.py`: 로컬 실행용 진입점
 - `Procfile`, `render.yaml`, `runtime.txt`: 서버 배포 준비 파일
