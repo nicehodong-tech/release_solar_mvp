@@ -4859,6 +4859,7 @@ function mergeDeferredDetailPayload(detailPayload) {
     engineContract: normalized.engineContract,
     screenContract: normalized.screenContract,
     elementBalance: normalized.elementBalance,
+    dailyFortune: normalized.dailyFortune,
   };
 }
 
@@ -4959,6 +4960,7 @@ function renderReport(payload) {
     engineContract,
     screenContract,
     elementBalance,
+    dailyFortune,
   } = normalized;
   configureMetricDisplayAdjustment(sections);
   const nickname = String(new FormData(form).get("nickname") || "").trim() || "고객";
@@ -4966,6 +4968,7 @@ function renderReport(payload) {
 
   const reportParts = [
     renderReportHero(profile, screenContract, sections, nickname, chart),
+    renderDailyFortune(dailyFortune),
     renderReportEntryBoard(screenContract, sections),
   ];
   reportRoot.innerHTML = reportParts.join("");
@@ -4983,7 +4986,7 @@ function renderReport(payload) {
   );
   state.detailLoaded = !Boolean(payload.detailDeferred || report.detail_deferred);
   state.detailLoadingPromise = null;
-  state.detailPayload = { report, chart, profile, sections, factors, detailUnits, engineContract, screenContract, elementBalance };
+  state.detailPayload = { report, chart, profile, sections, factors, detailUnits, engineContract, screenContract, elementBalance, dailyFortune };
 }
 
 function normalizeReportPayload(payload) {
@@ -4999,6 +5002,7 @@ function normalizeReportPayload(payload) {
   const detailUnits = report.analysis_detail_units || {};
   const engineContract = report.analysis_engine_contract || {};
   const screenContract = report.analysis_screen_contract || {};
+  const dailyFortune = report.daily_fortune || report.dailyFortune || {};
   return {
     report,
     chart,
@@ -5008,6 +5012,7 @@ function normalizeReportPayload(payload) {
     detailUnits,
     engineContract,
     screenContract,
+    dailyFortune,
     elementBalance: calculateElementBalance(chart),
   };
 }
@@ -5025,6 +5030,60 @@ function renderReportHero(profile, screenContract, sections = [], nickname = "�
       <span class="report-hero-kicker">타고난 기질 유형</span>
       <h2>${escapeHtml(title)}</h2>
       <p>${escapeHtml(headline)}</p>
+    </section>
+  `;
+}
+
+const dailyFortuneIconKeys = Object.freeze({
+  mood: "personality",
+  career: "career",
+  money: "money",
+  love: "love",
+  social: "social",
+  family: "marriage",
+});
+
+function renderDailyFortune(dailyFortune = {}) {
+  const categories = asArray(dailyFortune.categories).filter((item) => item && item.key && item.title);
+  const overallGrade = String(dailyFortune.overall_grade || dailyFortune.overallGrade || "").trim();
+  if (!categories.length || metricGradeRank(overallGrade) < 0) return "";
+  const dateLabel = String(dailyFortune.date_label || dailyFortune.dateLabel || "오늘").trim();
+  const dayPillar = String(dailyFortune.day_pillar || dailyFortune.dayPillar || "").trim();
+  const summary = productText(dailyFortune.summary || "오늘의 영역별 흐름을 정리했습니다.");
+  return `
+    <section class="daily-fortune-board ${metricToneClassFromGrade(overallGrade)}" aria-labelledby="daily-fortune-title">
+      <div class="daily-fortune-head">
+        <span>${escapeHtml(dateLabel)}${dayPillar ? ` · ${escapeHtml(dayPillar)}일` : ""}</span>
+        <strong id="daily-fortune-title">오늘의 운세</strong>
+      </div>
+      <div class="daily-fortune-overall">
+        <div class="daily-fortune-overall-copy">
+          <small>오늘의 종합운 지수</small>
+          <p>${escapeHtml(summary)}</p>
+        </div>
+        ${renderAggregateGradeBadge(overallGrade)}
+        <div class="daily-fortune-gauge" aria-label="${escapeHtml(`오늘의 종합운 ${overallGrade} 등급`)}">
+          ${renderAggregateGradeBar(overallGrade)}
+        </div>
+      </div>
+      <div class="daily-fortune-list">
+        ${categories.map((category) => {
+          const key = String(category.key || "");
+          const grade = String(category.grade || "").trim();
+          const targets = asArray(category.targets).map((item) => productText(item)).filter(Boolean).join(" · ");
+          return `
+            <article class="daily-fortune-row ${metricToneClassFromGrade(grade)}">
+              <span class="daily-fortune-icon has-report-icon">${renderReportIcon(dailyFortuneIconKeys[key] || "default")}</span>
+              <span class="daily-fortune-copy">
+                <strong>${escapeHtml(productText(category.title))}</strong>
+                <small>${escapeHtml(targets)}</small>
+                <p>${escapeHtml(productText(category.summary || ""))}</p>
+              </span>
+              <b class="metric-grade-value ${metricGradeClassFromLabel(grade)}">${escapeHtml(grade)}</b>
+            </article>
+          `;
+        }).join("")}
+      </div>
     </section>
   `;
 }

@@ -16,6 +16,7 @@ import time
 from collections import OrderedDict, deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,7 +50,7 @@ API_ANALYSIS_WORKERS = _env_int("SAJU_ANALYSIS_WORKERS", 2, minimum=1, maximum=2
 API_CACHE_MAX_ENTRIES = 64
 API_CACHE_MAX_BYTES = 48 * 1024 * 1024
 API_CACHE_COMPRESSION_LEVEL = 1
-API_CACHE_VERSION = "judgment-v22-hidden-stem-complete"
+API_CACHE_VERSION = "judgment-v23-daily-fortune"
 _API_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
 _API_CACHE_LOCK = Lock()
 _API_CACHE_BYTES = 0
@@ -156,6 +157,7 @@ def _payload_cache_key(payload: dict[str, Any]) -> str:
     """Build a stable key for repeated report requests."""
     normalized = {
         "version": API_CACHE_VERSION,
+        "dailyDate": datetime.now(timezone(timedelta(hours=9))).date().isoformat(),
         "birthDate": str(payload.get("birthDate") or payload.get("birth_date") or ""),
         "birthTime": str(payload.get("birthTime") or payload.get("birth_time") or ""),
         "calendar": str(payload.get("calendar") or payload.get("calendarType") or ""),

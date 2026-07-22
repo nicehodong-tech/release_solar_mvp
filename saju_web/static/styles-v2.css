@@ -11977,3 +11977,173 @@ html.is-restoring-premium body::after {
   background: transparent;
   box-shadow: none;
 }
+
+/* Daily fortune sits between the natal profile and the long-form report routes. */
+.daily-fortune-board {
+  display: grid;
+  gap: 10px;
+  padding: 0;
+}
+
+.daily-fortune-head {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  padding: 0 2px 10px 12px;
+  border-bottom: 1px solid rgba(222, 181, 103, 0.085);
+}
+
+.daily-fortune-head::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 11px;
+  left: 0;
+  width: 2px;
+  background: rgba(223, 189, 119, 0.54);
+}
+
+.daily-fortune-head span {
+  color: rgba(230, 198, 134, 0.68);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.daily-fortune-head strong {
+  color: var(--ui-text, #f3ead9);
+  font-size: 15.5px;
+  line-height: 1.35;
+}
+
+.daily-fortune-overall {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 9px 12px;
+  align-items: center;
+  padding: 14px 14px 13px;
+  border: 1px solid rgba(222, 181, 103, 0.18);
+  border-radius: 7px;
+  background:
+    linear-gradient(100deg, rgba(222, 181, 103, 0.075), rgba(255, 255, 255, 0.018) 58%),
+    rgba(8, 25, 38, 0.58);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.018);
+}
+
+.daily-fortune-overall-copy {
+  min-width: 0;
+}
+
+.daily-fortune-overall-copy small {
+  display: block;
+  margin-bottom: 4px;
+  color: rgba(230, 198, 134, 0.78);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.daily-fortune-overall-copy p {
+  margin: 0;
+  color: var(--ui-text-body, rgba(244, 234, 214, 0.74));
+  font-size: 13.5px;
+  line-height: 1.55;
+  word-break: keep-all;
+}
+
+.daily-fortune-overall > .metric-level-badge {
+  justify-self: end;
+}
+
+.daily-fortune-gauge {
+  grid-column: 1 / -1;
+}
+
+.daily-fortune-gauge .metric-bar {
+  width: 100%;
+  height: 7px;
+  background: rgba(179, 199, 211, 0.13);
+}
+
+.daily-fortune-list {
+  overflow: hidden;
+  border: 1px solid rgba(222, 181, 103, 0.12);
+  border-radius: 7px;
+  background: rgba(6, 21, 33, 0.45);
+}
+
+.daily-fortune-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 32px;
+  gap: 9px;
+  align-items: center;
+  min-height: 72px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(222, 181, 103, 0.08);
+}
+
+.daily-fortune-row:last-child {
+  border-bottom: 0;
+}
+
+.daily-fortune-icon {
+  width: 30px;
+  height: 30px;
+  opacity: 0.88;
+}
+
+.daily-fortune-copy {
+  min-width: 0;
+}
+
+.daily-fortune-copy strong {
+  display: block;
+  color: var(--ui-text, #f3ead9);
+  font-size: 13.5px;
+  line-height: 1.35;
+}
+
+.daily-fortune-copy small {
+  display: block;
+  overflow: hidden;
+  margin-top: 2px;
+  color: rgba(230, 198, 134, 0.58);
+  font-size: 10.8px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.daily-fortune-copy p {
+  margin: 3px 0 0;
+  color: rgba(235, 228, 214, 0.66);
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: keep-all;
+}
+
+.daily-fortune-row > .metric-grade-value {
+  justify-self: end;
+  min-width: 30px;
+  text-align: center;
+}
+
+@media (max-width: 380px) {
+  .daily-fortune-overall {
+    padding-inline: 12px;
+  }
+
+  .daily-fortune-row {
+    grid-template-columns: 28px minmax(0, 1fr) 30px;
+    gap: 8px;
+    padding-inline: 10px;
+  }
+
+  .daily-fortune-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .daily-fortune-copy small {
+    white-space: normal;
+  }
+}

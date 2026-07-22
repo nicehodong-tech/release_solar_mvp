@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -10,12 +12,12 @@ RELEASE_ROOT = Path(__file__).resolve().parents[1]
 if str(RELEASE_ROOT) not in sys.path:
     sys.path.insert(0, str(RELEASE_ROOT))
 
-from saju_analysis_engine import analyze_chart  # noqa: E402
+from saju_analysis_engine import analyze_chart, build_daily_fortune_signal  # noqa: E402
 from saju_analysis_engine.constants import BRANCH_HIDDEN_STEMS  # noqa: E402
 from saju_analysis_engine.features import _preserve_cycle_axis_evidence  # noqa: E402
 from saju_birth_engine import BirthInput, build_birth_chart  # noqa: E402
 from saju_birth_engine.constants import HIDDEN_STEMS  # noqa: E402
-from saju_web.app import _operational_snapshot  # noqa: E402
+from saju_web.app import _operational_snapshot, _payload_cache_key  # noqa: E402
 from saju_web.report_service import (  # noqa: E402
     DISPLAY_HIDDEN_STEMS_BY_BRANCH_KEY,
     STEM_HANJA_BY_KEY,
@@ -40,6 +42,7 @@ class EngineEvidenceContractTests(unittest.TestCase):
         chart = build_birth_chart(
             BirthInput(1999, 12, 12, 7, 10, city="chuncheon", gender="male")
         )
+        cls.chart = chart
         cls.analysis = analyze_chart(chart, target_years=[2028])
 
     def test_cycle_versions_match_current_relation_contract(self) -> None:
@@ -130,6 +133,36 @@ class EngineEvidenceContractTests(unittest.TestCase):
             for structure in structures[1:]
         ))
 
+    def test_daily_flow_changes_by_date_without_randomness(self) -> None:
+        first = build_daily_fortune_signal(
+            self.chart,
+            self.analysis.chart_structure,
+            date(2026, 7, 23),
+        )
+        repeated = build_daily_fortune_signal(
+            self.chart,
+            self.analysis.chart_structure,
+            date(2026, 7, 23),
+        )
+        next_day = build_daily_fortune_signal(
+            self.chart,
+            self.analysis.chart_structure,
+            date(2026, 7, 24),
+        )
+        other_chart = build_birth_chart(
+            BirthInput(1996, 4, 3, 15, 21, city="seoul", gender="female")
+        )
+        other_analysis = analyze_chart(other_chart, target_years=[2026])
+        other_chart_same_day = build_daily_fortune_signal(
+            other_chart,
+            other_analysis.chart_structure,
+            date(2026, 7, 23),
+        )
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first["day_pillar"], next_day["day_pillar"])
+        self.assertNotEqual(first["domain_components"], next_day["domain_components"])
+        self.assertNotEqual(first["domain_components"], other_chart_same_day["domain_components"])
+
 
 class WebProductContractTests(unittest.TestCase):
     @classmethod
@@ -140,7 +173,7 @@ class WebProductContractTests(unittest.TestCase):
     def test_health_contract_is_available(self) -> None:
         health = _operational_snapshot()
         self.assertTrue(health["ok"])
-        self.assertEqual(health["version"], "judgment-v22-hidden-stem-complete")
+        self.assertEqual(health["version"], "judgment-v23-daily-fortune")
         self.assertEqual(health["runtime"]["service"], "local")
         self.assertEqual(health["runtime"]["revision"], "local")
         self.assertIn("analysisWorkers", health)
@@ -162,6 +195,32 @@ class WebProductContractTests(unittest.TestCase):
         self.assertEqual(self.report.get("free_profile_preview"), {})
         self.assertTrue(self.report.get("factor_sections"))
         self.assertTrue(self.report.get("analysis_engine_contract", {}).get("gyeokguk_contextual"))
+
+    def test_daily_fortune_contract_is_complete_and_differentiated(self) -> None:
+        daily = self.report.get("daily_fortune") or {}
+        self.assertEqual(daily.get("version"), "daily_fortune_product_v1")
+        self.assertRegex(str(daily.get("date") or ""), r"^\d{4}-\d{2}-\d{2}$")
+        self.assertTrue(daily.get("day_pillar"))
+        self.assertIn(daily.get("overall_grade"), {
+            "A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "D-"
+        })
+        categories = daily.get("categories") or []
+        self.assertEqual(
+            [item.get("key") for item in categories],
+            ["mood", "career", "money", "love", "social", "family"],
+        )
+        self.assertEqual([len(item.get("target_scores") or []) for item in categories], [3] * 6)
+        self.assertGreaterEqual(len({item.get("score") for item in categories}), 3)
+        for category in categories:
+            with self.subTest(category=category.get("key")):
+                self.assertGreaterEqual(int(category.get("score")), 0)
+                self.assertLessEqual(int(category.get("score")), 100)
+                self.assertTrue(category.get("summary"))
+
+    def test_report_cache_rolls_over_with_the_korean_date(self) -> None:
+        normalized = json.loads(_payload_cache_key(dict(SAMPLE_INPUT)))
+        self.assertRegex(normalized.get("dailyDate", ""), r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(normalized.get("version"), "judgment-v23-daily-fortune")
 
     def test_sample_time_bucket_matches_the_0710_hour_pillar(self) -> None:
         exact = build_birth_chart(
@@ -281,7 +340,9 @@ class WebProductContractTests(unittest.TestCase):
     def test_static_assets_use_current_contract(self) -> None:
         index_html = (RELEASE_ROOT / "saju_web" / "static" / "index.html").read_text(encoding="utf-8")
         app_js = (RELEASE_ROOT / "saju_web" / "static" / "app-v2.js").read_text(encoding="utf-8")
-        self.assertIn("production-release-v56", index_html)
+        self.assertIn("production-release-v57", index_html)
+        self.assertIn("renderDailyFortune", app_js)
+        self.assertIn("daily-fortune-board", app_js)
         self.assertIn("annualGroupAggregateItems", app_js)
         self.assertIn("total_indicator_labels", app_js)
         self.assertIn("rawMetricJudgmentStateType", app_js)

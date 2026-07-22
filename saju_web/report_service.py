@@ -8,7 +8,7 @@ leaking into page-level code.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from functools import lru_cache
 from math import ceil
@@ -19,6 +19,7 @@ from typing import Any
 from saju_analysis_engine import (
     TEN_GOD_DIRECTION_RULES,
     analyze_chart,
+    build_daily_fortune_signal,
     build_product_output,
     build_timing_decision_payload_from_flows,
 )
@@ -31890,6 +31891,360 @@ def _prepare_judgment_card_payload(
     return _sanitize_public_payload(public_payload)
 
 
+_KOREA_TIMEZONE = timezone(timedelta(hours=9))
+_DAILY_WEEKDAY_LABELS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
+
+
+_DAILY_FORTUNE_CATEGORY_CONTRACTS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "mood",
+        "title": "기분",
+        "flow_domain": "mood",
+        "targets": (
+            ("활력·의욕", ("실행 속도", "변화 수용성"), "activation", (0.38, 0.20, 0.16, 0.08, 0.11, 0.07)),
+            ("감정 안정", ("감정 조절", "위험 감지"), "stability", (0.40, 0.08, 0.10, 0.25, 0.07, 0.10)),
+            ("마음의 여유", ("감정 조절", "관계 거리 조절력", "관계 조절력"), "balanced", (0.36, 0.08, 0.12, 0.24, 0.08, 0.12)),
+        ),
+    },
+    {
+        "key": "career",
+        "title": "직장·업무",
+        "flow_domain": "career",
+        "targets": (
+            ("집중·추진", ("실무 처리력", "집중 지속력", "몰입 성향"), "activation", (0.42, 0.14, 0.16, 0.12, 0.10, 0.06)),
+            ("성과·평가", ("직업 성취도", "평가 관리력"), "activation", (0.40, 0.22, 0.18, 0.10, 0.05, 0.05)),
+            ("진행 안정", ("직업 지속성", "조직 적응성", "판단 신중성", "신중성"), "stability", (0.42, 0.10, 0.13, 0.22, 0.08, 0.05)),
+        ),
+    },
+    {
+        "key": "money",
+        "title": "재물·횡재",
+        "flow_domain": "money",
+        "targets": (
+            ("금전 유입", ("수입 창출력", "재물 형성력"), "activation", (0.40, 0.24, 0.18, 0.08, 0.05, 0.05)),
+            ("재물 보존", ("손실 회피력", "현금 운용력", "자산화 성향"), "stability", (0.46, 0.08, 0.10, 0.25, 0.06, 0.05)),
+            ("뜻밖의 이득", ("투자 판단력", "보상 회수력"), "activation", (0.34, 0.28, 0.17, 0.08, 0.09, 0.04)),
+        ),
+    },
+    {
+        "key": "love",
+        "title": "애정",
+        "flow_domain": "love",
+        "targets": (
+            ("호감·매력", ("이성 대상 호감도", "애정 표현"), "activation", (0.40, 0.24, 0.17, 0.07, 0.08, 0.04)),
+            ("감정 교류", ("애정 표현", "관계 주도성"), "activation", (0.42, 0.17, 0.17, 0.10, 0.08, 0.06)),
+            ("관계 안정·진전", ("관계 지속성", "갈등 회복력", "인연 지속성"), "stability", (0.44, 0.10, 0.12, 0.22, 0.06, 0.06)),
+        ),
+    },
+    {
+        "key": "social",
+        "title": "대인관계",
+        "flow_domain": "social",
+        "targets": (
+            ("만남·호응", ("친화성", "인맥 관계 형성력", "말의 영향력"), "activation", (0.40, 0.23, 0.17, 0.08, 0.08, 0.04)),
+            ("협력·도움", ("협력성", "지인 덕", "신뢰 형성"), "activation", (0.43, 0.18, 0.16, 0.11, 0.06, 0.06)),
+            ("갈등 조율", ("갈등 회피력", "관계 유지성", "거리 조절"), "stability", (0.45, 0.08, 0.11, 0.24, 0.06, 0.06)),
+        ),
+    },
+    {
+        "key": "family",
+        "title": "가정",
+        "flow_domain": "family",
+        "targets": (
+            ("가족 화목", ("가족 관계성", "생활 조율성"), "stability", (0.44, 0.13, 0.13, 0.18, 0.05, 0.07)),
+            ("가정 안정", ("결혼 안정성", "가정 책임감", "결혼 후 안정도"), "stability", (0.46, 0.08, 0.11, 0.23, 0.05, 0.07)),
+            ("생활 순조", ("생활 조율성", "재정 합의성", "가족 관계성"), "balanced", (0.42, 0.13, 0.14, 0.18, 0.06, 0.07)),
+        ),
+    },
+)
+
+
+_DAILY_FORTUNE_VERDICTS: dict[str, tuple[str, str, str]] = {
+    "mood": (
+        "의욕과 감정의 균형을 함께 쓰기 좋은 날입니다.",
+        "기분의 흐름은 무난하며, 중요한 일에 힘을 모으기 좋습니다.",
+        "감정 소모가 커질 수 있어 일정과 반응을 단순하게 잡는 편이 좋습니다.",
+    ),
+    "career": (
+        "집중과 실행이 성과로 이어지기 좋은 날입니다.",
+        "업무 흐름은 무난하며, 하던 일을 차분히 이어가기 좋습니다.",
+        "서두르면 누락이 생길 수 있어 확인과 순서를 우선하는 편이 좋습니다.",
+    ),
+    "money": (
+        "금전 흐름을 정리하고 실익을 챙기기 좋은 날입니다.",
+        "재물 흐름은 무난하며, 계획한 범위 안에서 움직이기 좋습니다.",
+        "뜻밖의 지출이나 성급한 판단을 줄이고 보존을 우선하는 편이 좋습니다.",
+    ),
+    "love": (
+        "호감과 감정 교류가 자연스럽게 이어지기 좋은 날입니다.",
+        "애정의 흐름은 무난하며, 상대의 반응을 살피며 다가가기 좋습니다.",
+        "감정의 속도 차이가 생길 수 있어 단정적인 표현은 줄이는 편이 좋습니다.",
+    ),
+    "social": (
+        "만남과 협력이 실질적인 도움으로 이어지기 좋은 날입니다.",
+        "대인관계는 무난하며, 필요한 소통을 차분히 이어가기 좋습니다.",
+        "말이 다르게 전달될 수 있어 약속과 역할을 분명히 하는 편이 좋습니다.",
+    ),
+    "family": (
+        "가족 간의 대화와 생활 조율이 원만하게 이어지기 좋은 날입니다.",
+        "가정의 흐름은 무난하며, 익숙한 생활 리듬을 유지하기 좋습니다.",
+        "사소한 부담이 쌓일 수 있어 역할과 비용을 미리 나누는 편이 좋습니다.",
+    ),
+}
+
+
+def _seoul_today() -> date:
+    return datetime.now(_KOREA_TIMEZONE).date()
+
+
+def _daily_grade(score: int) -> str:
+    if score >= 80:
+        return "A+"
+    if score >= 75:
+        return "A"
+    if score >= 70:
+        return "A-"
+    if score >= 65:
+        return "B+"
+    if score >= 60:
+        return "B"
+    if score >= 55:
+        return "B-"
+    if score >= 50:
+        return "C+"
+    if score >= 45:
+        return "C"
+    if score >= 40:
+        return "C-"
+    if score >= 35:
+        return "D+"
+    if score >= 30:
+        return "D"
+    return "D-"
+
+
+def _daily_metric_capacity(
+    indexed_metrics: dict[str, dict[str, int]],
+    domain_scores: dict[str, int],
+    domain: str,
+    labels: tuple[str, ...],
+) -> int:
+    domain_metrics = indexed_metrics.get(domain, {})
+    compact_index = {
+        _compact_match_key(label): score
+        for label, score in domain_metrics.items()
+        if isinstance(score, int)
+    }
+    matches: list[int] = []
+    for label in labels:
+        exact = domain_metrics.get(label)
+        if isinstance(exact, int):
+            matches.append(exact)
+            continue
+        compact = compact_index.get(_compact_match_key(label))
+        if isinstance(compact, int):
+            matches.append(compact)
+    if matches:
+        return max(0, min(100, round(sum(matches) / len(matches))))
+    return max(0, min(100, int(domain_scores.get(domain, 55) or 55)))
+
+
+def _daily_annual_domain_components(analysis: Any, target_year: int) -> dict[str, dict[str, int]]:
+    for flow in list(getattr(analysis, "flow_signals", []) or []):
+        if int(getattr(flow, "year", 0) or 0) != target_year:
+            continue
+        result: dict[str, dict[str, int]] = {}
+        for domain, components in dict(getattr(flow, "domain_scores", {}) or {}).items():
+            if not isinstance(components, dict):
+                continue
+            result[str(domain)] = {
+                key: max(0, min(100, round(float(components.get(key, 50) or 50))))
+                for key in ("opportunity", "risk", "change", "probability")
+            }
+        return result
+    return {}
+
+
+def _mean_daily_components(
+    source: dict[str, dict[str, Any]],
+    domains: tuple[str, ...],
+) -> dict[str, int]:
+    rows = [source[domain] for domain in domains if isinstance(source.get(domain), dict)]
+    if not rows:
+        return {key: 50 for key in ("opportunity", "risk", "change", "probability")}
+    return {
+        key: max(0, min(100, round(sum(float(row.get(key, 50) or 50) for row in rows) / len(rows))))
+        for key in ("opportunity", "risk", "change", "probability")
+    }
+
+
+def _daily_category_flow_components(
+    signal: dict[str, Any],
+    annual_components: dict[str, dict[str, int]],
+    category_key: str,
+) -> dict[str, int]:
+    daily_components = dict(signal.get("domain_components") or {})
+    context_quality = int((signal.get("context_quality") or {}).get(category_key, 55) or 55)
+    if category_key == "mood":
+        daily = _mean_daily_components(daily_components, ("career", "love"))
+        annual = _mean_daily_components(annual_components, ("career", "love"))
+    elif category_key == "social":
+        daily = _mean_daily_components(daily_components, ("career", "love", "marriage"))
+        annual = _mean_daily_components(annual_components, ("career", "love", "marriage"))
+    elif category_key == "family":
+        daily = _mean_daily_components(daily_components, ("marriage",))
+        annual = _mean_daily_components(annual_components, ("marriage",))
+    else:
+        daily = _mean_daily_components(daily_components, (category_key,))
+        annual = _mean_daily_components(annual_components, (category_key,))
+
+    combined = {
+        key: max(0, min(100, round(daily[key] * 0.78 + annual[key] * 0.22)))
+        for key in ("opportunity", "risk", "change", "probability")
+    }
+    if category_key in {"mood", "social", "family"}:
+        combined["opportunity"] = round(combined["opportunity"] * 0.78 + context_quality * 0.22)
+        combined["probability"] = round(combined["probability"] * 0.82 + context_quality * 0.18)
+        combined["risk"] = round(combined["risk"] * 0.80 + (100 - context_quality) * 0.20)
+    combined["context"] = context_quality if category_key in {"mood", "social", "family"} else round(
+        (combined["opportunity"] + combined["probability"] + (100 - combined["risk"])) / 3
+    )
+    return combined
+
+
+def _daily_change_quality(change_score: int, mode: str) -> int:
+    if mode == "activation":
+        return change_score
+    if mode == "stability":
+        return 100 - change_score
+    return max(0, min(100, round(100 - abs(change_score - 45) * 1.35)))
+
+
+def _daily_target_score(
+    capacity: int,
+    components: dict[str, int],
+    change_mode: str,
+    weights: tuple[float, float, float, float, float, float],
+) -> int:
+    capacity_weight, opportunity_weight, probability_weight, control_weight, change_weight, context_weight = weights
+    risk_control = 100 - int(components["risk"])
+    change_quality = _daily_change_quality(int(components["change"]), change_mode)
+    value = (
+        capacity * capacity_weight
+        + int(components["opportunity"]) * opportunity_weight
+        + int(components["probability"]) * probability_weight
+        + risk_control * control_weight
+        + change_quality * change_weight
+        + int(components["context"]) * context_weight
+    )
+    return max(0, min(100, round(value)))
+
+
+def _daily_category_verdict(category_key: str, score: int) -> str:
+    high, normal, low = _DAILY_FORTUNE_VERDICTS[category_key]
+    if score >= 65:
+        return high
+    if score >= 45:
+        return normal
+    return low
+
+
+def _build_daily_fortune_payload(
+    chart: BirthChartResult,
+    analysis: Any,
+    sections: list[dict[str, Any]],
+    *,
+    target_date: date,
+) -> dict[str, Any]:
+    signal = build_daily_fortune_signal(
+        chart,
+        analysis.chart_structure,
+        target_date,
+        timezone_offset_minutes=540,
+    )
+    domain_scores = _annual_section_scores_by_domain(sections)
+    indexed_metrics = _annual_section_metric_scores_by_domain(sections)
+    annual_components = _daily_annual_domain_components(analysis, target_date.year)
+    capacity_domain_by_category = {
+        "mood": "personality",
+        "career": "career",
+        "money": "money",
+        "love": "love",
+        "social": "social",
+        "family": "marriage",
+    }
+
+    categories: list[dict[str, Any]] = []
+    for contract in _DAILY_FORTUNE_CATEGORY_CONTRACTS:
+        key = str(contract["key"])
+        capacity_domain = capacity_domain_by_category[key]
+        components = _daily_category_flow_components(signal, annual_components, key)
+        target_scores: list[dict[str, Any]] = []
+        for label, labels, change_mode, weights in contract["targets"]:
+            capacity = _daily_metric_capacity(
+                indexed_metrics,
+                domain_scores,
+                capacity_domain,
+                tuple(labels),
+            )
+            score = _daily_target_score(capacity, components, str(change_mode), tuple(weights))
+            target_scores.append({
+                "label": label,
+                "score": score,
+                "grade": _daily_grade(score),
+            })
+        plain_average = sum(int(item["score"]) for item in target_scores) / len(target_scores)
+        weakest = min(int(item["score"]) for item in target_scores)
+        category_score = max(0, min(100, round(plain_average * 0.86 + weakest * 0.14)))
+        categories.append({
+            "key": key,
+            "title": str(contract["title"]),
+            "score": category_score,
+            "grade": _daily_grade(category_score),
+            "summary": _daily_category_verdict(key, category_score),
+            "targets": [str(item["label"]) for item in target_scores],
+            "target_scores": target_scores,
+        })
+
+    category_weights = {
+        "mood": 0.15,
+        "career": 0.20,
+        "money": 0.17,
+        "love": 0.15,
+        "social": 0.16,
+        "family": 0.17,
+    }
+    weighted_average = sum(
+        int(category["score"]) * category_weights[str(category["key"])]
+        for category in categories
+    )
+    weakest_category = min(categories, key=lambda item: int(item["score"]))
+    strongest_category = max(categories, key=lambda item: int(item["score"]))
+    overall_score = max(0, min(100, round(weighted_average * 0.88 + int(weakest_category["score"]) * 0.12)))
+    if int(weakest_category["score"]) < 45:
+        overview = (
+            f"오늘은 {strongest_category['title']}의 흐름이 가장 좋습니다. "
+            f"{weakest_category['title']}은 평소보다 신중하게 다루는 편이 좋습니다."
+        )
+    else:
+        overview = (
+            f"오늘은 {strongest_category['title']}의 흐름이 가장 좋습니다. "
+            "나머지 영역도 큰 흔들림 없이 이어집니다."
+        )
+    return {
+        "version": "daily_fortune_product_v1",
+        "signal_version": signal.get("version"),
+        "date": target_date.isoformat(),
+        "date_label": f"{target_date.month}월 {target_date.day}일 {_DAILY_WEEKDAY_LABELS[target_date.weekday()]}",
+        "day_pillar": signal.get("day_pillar"),
+        "overall_score": overall_score,
+        "overall_grade": _daily_grade(overall_score),
+        "summary": overview,
+        "categories": categories,
+        "calculation_scope": ["명식", "대운", "세운", "절기 월운", "일진", "지지 관계"],
+    }
+
+
 def build_report_payload(payload: dict[str, Any], *, defer_detail: bool = False) -> dict[str, Any]:
     """Build a UI-ready fortune result payload from form input."""
 
@@ -32006,6 +32361,13 @@ def build_report_payload(payload: dict[str, Any], *, defer_detail: bool = False)
                 delattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, name)
             else:
                 setattr(_PRODUCT_METRIC_SIGNAL_CACHE_LOCAL, name, previous_cache)
+
+    report_payload["daily_fortune"] = _build_daily_fortune_payload(
+        chart,
+        analysis,
+        list(report_payload.get("analysis_sections") or []),
+        target_date=_seoul_today(),
+    )
 
     visible_chart_payload = dict(chart_payload)
     visible_chart_payload.pop("timingAnnualRows", None)

@@ -1,6 +1,7 @@
 """Rule-based saju analysis engine."""
 
 from .engine import analyze_chart
+from .daily_fortune import DAILY_FORTUNE_SIGNAL_VERSION, build_daily_fortune_signal
 from .analysis_materials import (
     ANALYSIS_MATERIAL_CONTRACT_VERSION,
     ANALYSIS_MATERIAL_LAYERS,
@@ -362,6 +363,7 @@ __all__ = [
     "CUSTOMER_REPORT_SCHEMA_VERSION",
     "ENGINE_MANIFEST_SCHEMA_VERSION",
     "ANALYSIS_ENGINE_VERSION",
+    "DAILY_FORTUNE_SIGNAL_VERSION",
     "PRODUCT_CATALOG_VERSION",
     "CUSTOMER_LANGUAGE_POLICY_VERSION",
     "REPORT_RENDERER_VERSION",
@@ -402,6 +404,7 @@ __all__ = [
     "CustomerReport",
     "answer_from_prompt",
     "analyze_chart",
+    "build_daily_fortune_signal",
     "analysis_material_for",
     "interpretation_stage_for",
     "material_domain_priority_for",
