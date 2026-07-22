@@ -367,6 +367,8 @@ class WebProductContractTests(unittest.TestCase):
         self.assertIn("serverless", edge)
         self.assertIn("EXTERNAL_MANAGED", edge)
         self.assertIn("managed.state", edge)
+        self.assertNotIn("--timeout 300s", edge)
+        self.assertIn("--timeout 30s", edge)
         self.assertIn("--resolve", verify_edge)
         self.assertIn("cloudrun_parity_check.py", verify_edge)
         self.assertIn("Resolve-DnsName", verify_cutover)

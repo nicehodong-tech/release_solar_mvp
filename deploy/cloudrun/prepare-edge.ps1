@@ -69,7 +69,6 @@ if (-not (Test-GCloudResource -Arguments @(
         --project $ProjectId `
         --global `
         --load-balancing-scheme EXTERNAL_MANAGED `
-        --timeout 300s `
         --enable-logging `
         --logging-sample-rate 1.0
 }
@@ -86,6 +85,14 @@ $negAttached = @($backendState.backends) | Where-Object {
     $_.group -and $_.group.EndsWith("/networkEndpointGroups/$neg")
 }
 if (-not $negAttached) {
+    # Serverless NEGs reject non-default backend-service timeouts. Repair a
+    # partially created backend from an older script before attaching the NEG.
+    if ($backendState.timeoutSec -and [int]$backendState.timeoutSec -ne 30) {
+        Invoke-GCloud compute backend-services update $backend `
+            --project $ProjectId `
+            --global `
+            --timeout 30s
+    }
     Invoke-GCloud compute backend-services add-backend $backend `
         --project $ProjectId `
         --global `
