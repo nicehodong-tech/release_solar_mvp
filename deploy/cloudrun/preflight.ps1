@@ -19,6 +19,11 @@ function Assert-Path {
 }
 
 Write-Host "1/6 Release files"
+$keywordDataDirectory = -join @(
+    [char]0xBA85, [char]0xB9AC, [char]0x20,
+    [char]0xD575, [char]0xC2EC, [char]0xC5B4, [char]0x20,
+    [char]0xD30C, [char]0xC77C, [char]0x20, [char]0x32
+)
 @(
     "Dockerfile",
     ".dockerignore",
@@ -26,7 +31,7 @@ Write-Host "1/6 Release files"
     "saju_web\app.py",
     "saju_web\static\index.html",
     "saju_web\static\app-v2.js",
-    "saju_analysis_engine\data\명리 핵심어 파일 2",
+    ("saju_analysis_engine\data\{0}" -f $keywordDataDirectory),
     "saju_birth_engine",
     "tests\test_release_contract.py",
     "scripts\operational_check.py",

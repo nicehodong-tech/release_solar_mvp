@@ -18,10 +18,10 @@ Invoke-GCloud services enable `
     certificatemanager.googleapis.com `
     --project $ProjectId
 
-& $script:GCloud artifacts repositories describe $Repository `
-    --location $Region `
-    --project $ProjectId *> $null
-if ($LASTEXITCODE -ne 0) {
+if (-not (Test-GCloudResource -Arguments @(
+    "artifacts", "repositories", "describe", $Repository,
+    "--location", $Region, "--project", $ProjectId
+))) {
     Invoke-GCloud artifacts repositories create $Repository `
         --repository-format docker `
         --location $Region `

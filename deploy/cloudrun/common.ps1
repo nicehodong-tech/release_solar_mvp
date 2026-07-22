@@ -45,21 +45,33 @@ function Get-GCloudValue {
 function Test-GCloudResource {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    & $script:GCloud @Arguments *> $null
-    return $LASTEXITCODE -eq 0
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell promotes native stderr to NativeCommandError when
+        # ErrorActionPreference is Stop. Missing resources are expected here.
+        $ErrorActionPreference = "Continue"
+        & $script:GCloud @Arguments *> $null
+        $exists = $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return $exists
 }
 
 function Assert-GCloudSession {
     param([Parameter(Mandatory = $true)][string]$ProjectId)
 
     $script:GCloud = Get-GCloudExecutable
-    $accountJson = (@(& $script:GCloud auth list --format=json) -join "`n")
+    $activeAccounts = @(& $script:GCloud auth list `
+        "--filter=status:ACTIVE" `
+        "--format=value(account)")
     if ($LASTEXITCODE -ne 0) {
         throw "Could not inspect the Google Cloud login state."
     }
-    $accounts = @($accountJson | ConvertFrom-Json)
-    $activeAccount = @($accounts | Where-Object { $_.status -eq "ACTIVE" }) |
-        Select-Object -ExpandProperty account -First 1
+    $activeAccount = $activeAccounts |
+        ForEach-Object { ([string]$_).Trim() } |
+        Where-Object { $_ } |
+        Select-Object -First 1
     if (-not $activeAccount) {
         throw "No active Google Cloud account. Run: gcloud auth login"
     }
