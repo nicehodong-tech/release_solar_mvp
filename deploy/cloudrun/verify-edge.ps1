@@ -39,7 +39,7 @@ if (-not $curl) {
 Write-Host "1/3 Load balancer TLS and health with forced DNS"
 $healthText = & $curl.Source --silent --show-error --fail --compressed `
     --resolve "${Domain}:443:${ipAddress}" `
-    "https://${Domain}/healthz"
+    "https://${Domain}/health"
 if ($LASTEXITCODE -ne 0) {
     throw "The load balancer health request failed."
 }
@@ -63,7 +63,7 @@ if ($LASTEXITCODE -ne 0 -or $indexText -notmatch [regex]::Escape($releaseMarker)
 Push-Location $repoRoot
 try {
     Write-Host "2/3 Cloud Run production operational contract"
-    & $python scripts\operational_check.py $productionUrl --concurrency 2 --timeout 300
+    & $python scripts\operational_check.py $productionUrl --concurrency 2 --timeout 300 --health-path /health
     if ($LASTEXITCODE -ne 0) {
         throw "Cloud Run production operational verification failed."
     }

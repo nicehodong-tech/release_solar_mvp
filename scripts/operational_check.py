@@ -128,10 +128,12 @@ def main() -> None:
     parser.add_argument("base_url", nargs="?", default="http://127.0.0.1:8765")
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=240)
+    parser.add_argument("--health-path", default="/healthz")
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")
+    health_url = base_url + "/" + args.health_path.lstrip("/")
 
-    health_status, _headers, health = _json_request(base_url + "/healthz")
+    health_status, _headers, health = _json_request(health_url)
     if health_status != 200 or not health.get("ok"):
         raise SystemExit(f"health check failed: status={health_status} payload={health}")
 
@@ -149,7 +151,7 @@ def main() -> None:
         for future in as_completed(futures):
             results.append(future.result())
 
-    final_status, _headers, final_health = _json_request(base_url + "/healthz")
+    final_status, _headers, final_health = _json_request(health_url)
     if final_status != 200 or not final_health.get("ok"):
         raise SystemExit("final health check failed")
     print(

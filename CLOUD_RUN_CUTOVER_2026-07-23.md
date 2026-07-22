@@ -80,7 +80,7 @@ www  A    LOAD_BALANCER_IP    TTL 300
 
 다음 중 하나라도 나타나면 원인 분석보다 DNS 복구를 먼저 합니다.
 
-- `/healthz` 실패 또는 5xx 반복
+- Cloud Run `/health` 실패 또는 5xx 반복
 - 분석 제출 뒤 3분 이상 완료되지 않음
 - Cloudtype과 Cloud Run 결과 해시 불일치
 - 종합 근거 누락, 생시 미상인데 시주가 생성됨

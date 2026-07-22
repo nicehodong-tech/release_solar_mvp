@@ -378,6 +378,24 @@ class WebProductContractTests(unittest.TestCase):
         for source in (certificate, promotion, edge, verify_edge):
             self.assertNotIn("Remove-DnsServerResourceRecord", source)
 
+    def test_cloud_run_uses_a_non_reserved_health_path(self) -> None:
+        app_source = (RELEASE_ROOT / "saju_web" / "app.py").read_text(encoding="utf-8")
+        checker = (RELEASE_ROOT / "scripts" / "operational_check.py").read_text(
+            encoding="utf-8"
+        )
+        deploy_root = RELEASE_ROOT / "deploy" / "cloudrun"
+
+        self.assertIn('{"/health", "/healthz"}', app_source)
+        self.assertIn('parser.add_argument("--health-path", default="/healthz")', checker)
+        for script_name in (
+            "verify-staging.ps1",
+            "promote-production.ps1",
+            "verify-edge.ps1",
+            "verify-cutover.ps1",
+        ):
+            source = (deploy_root / script_name).read_text(encoding="utf-8")
+            self.assertIn("--health-path /health", source)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

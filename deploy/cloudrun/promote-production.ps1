@@ -76,7 +76,7 @@ if (-not $productionUrl) {
 Push-Location $repoRoot
 try {
     Write-Host "Operational verification: $productionUrl"
-    & $python scripts\operational_check.py $productionUrl --concurrency 2 --timeout 300
+    & $python scripts\operational_check.py $productionUrl --concurrency 2 --timeout 300 --health-path /health
     if ($LASTEXITCODE -ne 0) {
         throw "Production operational verification failed."
     }

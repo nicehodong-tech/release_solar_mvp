@@ -679,7 +679,7 @@ class SajuWebHandler(BaseHTTPRequestHandler):
         if self._redirect_to_canonical_host():
             return
         parsed = urlparse(self.path)
-        if parsed.path == "/healthz":
+        if parsed.path in {"/health", "/healthz"}:
             snapshot = _operational_snapshot()
             self._send_json(snapshot, 200 if snapshot.get("ok") else 503)
             return

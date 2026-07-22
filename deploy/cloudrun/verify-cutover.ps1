@@ -42,7 +42,7 @@ Write-Host "2/4 HTTPS for apex and www"
 foreach ($hostName in @($Domain, $WwwDomain)) {
     & $curl.Source --silent --show-error --fail --compressed `
         --max-time 30 `
-        "https://${hostName}/healthz" *> $null
+        "https://${hostName}/health" *> $null
     if ($LASTEXITCODE -ne 0) {
         throw "HTTPS health failed for $hostName."
     }
@@ -51,7 +51,7 @@ foreach ($hostName in @($Domain, $WwwDomain)) {
 Push-Location $repoRoot
 try {
     Write-Host "3/4 Public operational contract"
-    & $python scripts\operational_check.py "https://$Domain" --concurrency 2 --timeout 300
+    & $python scripts\operational_check.py "https://$Domain" --concurrency 2 --timeout 300 --health-path /health
     if ($LASTEXITCODE -ne 0) {
         throw "Public operational verification failed."
     }

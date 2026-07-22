@@ -25,7 +25,7 @@ if (-not $stagingUrl) {
 Push-Location $repoRoot
 try {
     Write-Host "1/2 Operational contract: $stagingUrl"
-    & $python scripts\operational_check.py $stagingUrl --concurrency 2 --timeout 300
+    & $python scripts\operational_check.py $stagingUrl --concurrency 2 --timeout 300 --health-path /health
     if ($LASTEXITCODE -ne 0) {
         throw "Cloud Run operational check failed."
     }
