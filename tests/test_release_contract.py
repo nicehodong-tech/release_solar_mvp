@@ -340,7 +340,9 @@ class WebProductContractTests(unittest.TestCase):
     def test_static_assets_use_current_contract(self) -> None:
         index_html = (RELEASE_ROOT / "saju_web" / "static" / "index.html").read_text(encoding="utf-8")
         app_js = (RELEASE_ROOT / "saju_web" / "static" / "app-v2.js").read_text(encoding="utf-8")
-        self.assertIn("production-release-v58", index_html)
+        self.assertIn("production-release-v59", index_html)
+        self.assertIn('data-action="go-report" class="is-active"', index_html)
+        self.assertIn("결과 목록", index_html)
         self.assertIn("renderDailyFortune", app_js)
         self.assertIn("daily-fortune-board", app_js)
         self.assertIn('data-action="toggle-daily-fortune"', app_js)
