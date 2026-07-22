@@ -310,6 +310,15 @@ def _operational_snapshot() -> dict[str, Any]:
         "ok": healthy,
         "status": "healthy" if healthy else "degraded",
         "version": API_CACHE_VERSION,
+        "runtime": {
+            "service": os.environ.get("K_SERVICE") or "local",
+            "revision": (
+                os.environ.get("K_REVISION")
+                or os.environ.get("SAJU_RELEASE_REVISION")
+                or "local"
+            ),
+            "configuration": os.environ.get("K_CONFIGURATION") or "local",
+        },
         "uptimeSeconds": int(max(0, now - SERVER_STARTED_AT)),
         "analysisWorkers": API_ANALYSIS_WORKERS,
         "jobs": {

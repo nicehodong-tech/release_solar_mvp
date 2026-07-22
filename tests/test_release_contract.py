@@ -140,6 +140,8 @@ class WebProductContractTests(unittest.TestCase):
         health = _operational_snapshot()
         self.assertTrue(health["ok"])
         self.assertEqual(health["version"], "judgment-v22-hidden-stem-complete")
+        self.assertEqual(health["runtime"]["service"], "local")
+        self.assertEqual(health["runtime"]["revision"], "local")
         self.assertIn("analysisWorkers", health)
         self.assertIn("jobs", health)
         self.assertIn("cache", health)
@@ -285,14 +287,21 @@ class WebProductContractTests(unittest.TestCase):
         self.assertIn("metricDisplayStateType", app_js)
         self.assertNotIn('data-submit-tier="free"', index_html)
 
-    def test_web_interstitial_is_safe_until_ad_unit_is_configured(self) -> None:
+    def test_web_interstitial_uses_the_configured_ad_unit_safely(self) -> None:
         index_html = (RELEASE_ROOT / "saju_web" / "static" / "index.html").read_text(encoding="utf-8")
         gam_js = (RELEASE_ROOT / "saju_web" / "static" / "gam-interstitial.js").read_text(encoding="utf-8")
-        self.assertIn('name="google-ad-manager-interstitial-unit" content=""', index_html)
-        self.assertIn("/gam-interstitial.js?v=gam-web-interstitial-v1", index_html)
+        self.assertIn(
+            'name="google-ad-manager-interstitial-unit" content="/23363471499/leehyeon_web_interstitial"',
+            index_html,
+        )
+        self.assertIn("/gam-interstitial.js?v=gam-web-interstitial-v3", index_html)
         self.assertIn("securepubads.g.doubleclick.net/tag/js/gpt.js", gam_js)
         self.assertIn("OutOfPageFormat.INTERSTITIAL", gam_js)
-        self.assertIn("unhideWindow: false", gam_js)
+        self.assertIn("LEEHYEON_ARM_GAM_AFTER_COUPANG", gam_js)
+        self.assertIn('reason = "waiting_for_coupang_departure"', gam_js)
+        self.assertIn("backward: false", gam_js)
+        self.assertIn("continueReading: false", gam_js)
+        self.assertIn("unhideWindow: true", gam_js)
         self.assertIn("navBar: false", gam_js)
         self.assertIn("inactivity: false", gam_js)
         self.assertIn("endOfArticle: false", gam_js)
@@ -303,7 +312,71 @@ class WebProductContractTests(unittest.TestCase):
         self.assertIn('<a class="report-entry-card', app_js)
         self.assertIn('<a class="domain-direct-card', app_js)
         self.assertIn('data-google-interstitial="false">쿠팡 방문하고 결과 보기', app_js)
+        self.assertIn('typeof window.LEEHYEON_ARM_GAM_AFTER_COUPANG === "function"', app_js)
+        self.assertIn("window.LEEHYEON_ARM_GAM_AFTER_COUPANG();", app_js)
         self.assertGreaterEqual(index_html.count('data-google-interstitial="false"'), 2)
+
+    def test_cloud_run_staging_contract_is_isolated_and_preserves_engine_data(self) -> None:
+        dockerfile = (RELEASE_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        dockerignore = (RELEASE_ROOT / ".dockerignore").read_text(encoding="utf-8")
+        gcloudignore = (RELEASE_ROOT / ".gcloudignore").read_text(encoding="utf-8")
+        deploy_script = (
+            RELEASE_ROOT / "deploy" / "cloudrun" / "deploy-staging.ps1"
+        ).read_text(encoding="utf-8")
+        parity_script = (
+            RELEASE_ROOT / "scripts" / "cloudrun_parity_check.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("FROM python:3.12-slim", dockerfile)
+        self.assertIn("COPY --chown=saju:saju saju_analysis_engine", dockerfile)
+        self.assertIn('USER saju', dockerfile)
+        self.assertIn('"--host", "0.0.0.0"', dockerfile)
+        self.assertNotIn("**/*.md", dockerignore)
+        self.assertNotIn("*.jsonl", dockerignore)
+        self.assertNotIn("**/*.md", gcloudignore)
+        self.assertNotIn("*.jsonl", gcloudignore)
+        self.assertIn('--min-instances 1', deploy_script)
+        self.assertIn('--max-instances 1', deploy_script)
+        self.assertIn('--no-cpu-throttling', deploy_script)
+        self.assertIn('aisaju-leehyeon-staging', deploy_script)
+        self.assertNotIn('aisajuleehyeon.com', deploy_script)
+        self.assertIn('"chart": detail.get("chart")', parity_script)
+        self.assertIn('"report": detail.get("report")', parity_script)
+
+    def test_cloud_run_cutover_is_preverified_and_reversible(self) -> None:
+        deploy_root = RELEASE_ROOT / "deploy" / "cloudrun"
+        preflight = (deploy_root / "preflight.ps1").read_text(encoding="utf-8")
+        certificate = (deploy_root / "prepare-certificate.ps1").read_text(encoding="utf-8")
+        promotion = (deploy_root / "promote-production.ps1").read_text(encoding="utf-8")
+        edge = (deploy_root / "prepare-edge.ps1").read_text(encoding="utf-8")
+        verify_edge = (deploy_root / "verify-edge.ps1").read_text(encoding="utf-8")
+        verify_cutover = (deploy_root / "verify-cutover.ps1").read_text(encoding="utf-8")
+        rollback = (deploy_root / "verify-rollback.ps1").read_text(encoding="utf-8")
+        runbook = (RELEASE_ROOT / "CLOUD_RUN_CUTOVER_2026-07-23.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("unittest discover -s tests -v", preflight)
+        self.assertIn("billing projects describe", preflight)
+        self.assertIn("mqquvbd6c9bd03f8.sel3.cloudtype.app", preflight)
+        self.assertIn("dns-authorizations create", certificate)
+        self.assertIn("Certificate state", certificate)
+        self.assertIn("verify-staging.ps1", promotion)
+        self.assertIn("spec.template.spec.containers[0].image", promotion)
+        self.assertIn("--max-instances 1", promotion)
+        self.assertIn("serverless", edge)
+        self.assertIn("EXTERNAL_MANAGED", edge)
+        self.assertIn("managed.state", edge)
+        self.assertIn("--resolve", verify_edge)
+        self.assertIn("cloudrun_parity_check.py", verify_edge)
+        self.assertIn("Resolve-DnsName", verify_cutover)
+        self.assertIn("cloudrun_parity_check.py", verify_cutover)
+        self.assertIn("CloudtypeTarget", rollback)
+        self.assertIn("jobs.running", runbook)
+        self.assertIn("jobs.queued", runbook)
+        self.assertIn("TTL 600", runbook)
+        for source in (certificate, promotion, edge, verify_edge):
+            self.assertNotIn("Remove-DnsServerResourceRecord", source)
 
 
 if __name__ == "__main__":

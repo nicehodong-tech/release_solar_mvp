@@ -187,6 +187,9 @@ function closeCoupangAffiliatePopup() {
 }
 
 function prepareAffiliateDeparture() {
+  if (typeof window.LEEHYEON_ARM_GAM_AFTER_COUPANG === "function") {
+    window.LEEHYEON_ARM_GAM_AFTER_COUPANG();
+  }
   affiliatePageWasHidden = false;
   markAffiliateDeparture();
   closeCoupangAffiliatePopup();

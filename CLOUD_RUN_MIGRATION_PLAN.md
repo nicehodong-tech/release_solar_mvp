@@ -1,5 +1,14 @@
 # Google Cloud Run 이전 계획
 
+## 0. 현재 이전 단계
+
+공개 Cloudtype 서버를 중단하지 않고 다음 두 단계로 이전합니다.
+
+1. **병행 스테이징:** 현재 서버를 그대로 컨테이너화해 서울 리전 Cloud Run의 별도 URL에 배포합니다. 프로세스 메모리 상태가 갈라지지 않도록 최소·최대 인스턴스를 모두 1로 고정하고, 비동기 분석이 응답 뒤에도 계속되도록 인스턴스 기반 CPU 할당을 사용합니다.
+2. **확장 구조 전환:** 스테이징 결과가 Cloudtype과 정확히 일치한 뒤 Firestore, Cloud Tasks, Cloud Storage로 작업 상태와 결과를 분리합니다. 이 단계가 끝난 뒤에만 여러 web-api와 worker 인스턴스로 확장합니다.
+
+1단계에서는 공개 도메인, 가비아 DNS, Cloudtype 설정을 변경하지 않습니다. 실제 명식 4건의 `chart`와 `report` 전체 해시가 일치해야 다음 단계로 진행합니다. 구체적인 실행 명령은 `CLOUD_RUN_DEPLOYMENT.md`에 정리합니다.
+
 ## 1. 이전 목표
 
 현재의 분석 품질과 화면 계약을 그대로 유지하면서 다음 문제를 해결합니다.
@@ -102,23 +111,37 @@ GET /api/judgment-detail?token=...
 
 ## 5. 컨테이너와 배포 파일
 
-다음 파일을 추가합니다.
+병행 스테이징 단계에서는 다음 파일을 사용합니다.
 
 ```text
 Dockerfile
 .dockerignore
+deploy/cloudrun/bootstrap.ps1
+deploy/cloudrun/preflight.ps1
+deploy/cloudrun/deploy-staging.ps1
+deploy/cloudrun/verify-staging.ps1
+deploy/cloudrun/pause-staging.ps1
+deploy/cloudrun/prepare-certificate.ps1
+deploy/cloudrun/promote-production.ps1
+deploy/cloudrun/prepare-edge.ps1
+deploy/cloudrun/verify-edge.ps1
+deploy/cloudrun/verify-cutover.ps1
+deploy/cloudrun/verify-rollback.ps1
+scripts/cloudrun_parity_check.py
+```
+
+확장 구조 단계에서 다음 모듈을 추가합니다.
+
+```text
 cloudrun/web_api.py
 cloudrun/analysis_worker.py
 cloudrun/job_store.py
 cloudrun/result_store.py
 cloudrun/task_queue.py
-deploy/cloudrun/bootstrap.ps1
-deploy/cloudrun/deploy-staging.ps1
-deploy/cloudrun/deploy-production.ps1
-scripts/cloudrun_smoke_check.py
+deploy/cloudrun/deploy-production-scalable.ps1
 ```
 
-엔진 모듈은 복사하지 않고 현재 패키지를 두 컨테이너가 같은 커밋에서 사용합니다.
+엔진 모듈을 따로 복제하지 않고 현재 패키지를 같은 커밋과 이미지에서 사용합니다. 특히 `saju_analysis_engine/data/명리 핵심어 파일 2`의 Markdown 원문과 JSONL·CSV 자료를 컨테이너에 모두 포함합니다.
 
 ## 6. 첫째 날 작업
 

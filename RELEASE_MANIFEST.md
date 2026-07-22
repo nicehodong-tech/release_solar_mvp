@@ -11,6 +11,10 @@
 - `saju_analysis_engine/data/명리 핵심어 파일 2/`: 종합 근거 화면에 그대로 사용하는 검증 원문 17개
 - `saju_birth_engine/`: 양력 기준 명식 산출 엔진
 - `tests/`: 현재 상품 화면·엔진 근거·연간 지표 계약 회귀 검사
+- `Dockerfile`, `.dockerignore`, `.gcloudignore`: Cloud Run 컨테이너와 Cloud Build 전송 계약
+- `deploy/cloudrun/`: 스테이징, 동일 이미지 승격, DNS 사전 인증, 로드밸런서, 전환·복구 검증 절차
+- `scripts/cloudrun_parity_check.py`: Cloudtype과 Cloud Run의 전체 결과 해시 비교
+- `CLOUD_RUN_CUTOVER_2026-07-23.md`: 7월 23일 실제 DNS 전환과 즉시 복구 실행표
 - `web_app.py`: 로컬 실행용 진입점
 - `Procfile`, `render.yaml`, `runtime.txt`: 서버 배포 준비 파일
 
