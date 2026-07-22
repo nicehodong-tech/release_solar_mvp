@@ -306,20 +306,39 @@ function tongbyeonSurfaceText(value) {
   return text;
 }
 
-const sectionSymbols = {
-  personality: "✦",
-  money: "財",
-  career: "官",
-  love: "♡",
-  marriage: "合",
-  timing: "運",
-  year_2026: "26",
-  year_2027: "27",
-  life: "年",
-  honor: "名",
-  social: "人",
-  default: "☷",
+const reportIconFiles = {
+  personality: "personality.svg",
+  money: "money.svg",
+  career: "career.svg",
+  love: "love.svg",
+  marriage: "marriage.svg",
+  timing: "timing.svg",
+  year_2026: "year-2026.svg",
+  year_2027: "year-2027.svg",
+  life: "timing.svg",
+  honor: "honor.svg",
+  social: "social.svg",
+  domains: "domains.svg",
+  contextual: "contextual.svg",
+  gyeokguk: "gyeokguk.svg",
+  ten_gods: "ten-gods.svg",
+  month: "month.svg",
+  elements: "elements.svg",
+  temperature: "temperature.svg",
+  basis: "basis.svg",
+  summary: "default.svg",
+  default: "default.svg",
 };
+
+const REPORT_ICON_ROOT = "/assets/report-icons";
+const REPORT_ICON_VERSION = "report-icons-v2";
+
+function renderReportIcon(key = "default", fallback = "✦") {
+  const normalizedKey = String(key || "default").split(":")[0];
+  const fileName = reportIconFiles[normalizedKey] || reportIconFiles.default;
+  if (!fileName) return escapeHtml(fallback);
+  return `<img class="report-category-icon" src="${REPORT_ICON_ROOT}/${fileName}?v=${REPORT_ICON_VERSION}" alt="" aria-hidden="true" width="64" height="64" decoding="async">`;
+}
 
 const domainPickerHints = {
   personality: "성격·기질·판단",
@@ -5075,7 +5094,7 @@ function renderReportEntryBoard(screenContract, sections) {
       <div class="report-entry-grid">
         ${entries.map((card) => `
           <a class="report-entry-card report-entry-${escapeHtml(card.key)}" href="#${escapeHtml(detailHashForKey(card.key))}" data-open-detail="${escapeHtml(card.key)}" aria-label="${escapeHtml(card.title)} 열기">
-            <span class="report-entry-symbol">${escapeHtml(card.icon)}</span>
+            <span class="report-entry-symbol has-report-icon">${renderReportIcon(card.key, card.icon)}</span>
             <span class="report-entry-copy">
               <strong>${escapeHtml(card.title)}</strong>
               <small>${escapeHtml(card.copy)}</small>
@@ -5096,7 +5115,7 @@ function renderReportComposition(sections, screenContract) {
     const featured = card.key === "timing" || card.key === "contextual" ? " is-featured" : "";
     return `
       <button class="section-card report-toc-card${featured}" type="button" data-open-detail="${card.key}">
-        <span class="section-symbol">${escapeHtml(card.icon)}</span>
+        <span class="section-symbol has-report-icon">${renderReportIcon(card.key, card.icon)}</span>
         <span class="section-card-copy">
           <small>${String(index + 1).padStart(2, "0")}</small>
           <h3>${escapeHtml(card.title)}</h3>
@@ -5192,7 +5211,7 @@ function renderDomainScoreBoard(sections) {
           const title = sectionDisplayTitle(section);
           return `
             <button class="domain-score-row ${metricToneClassFromGrade(grade)}" type="button" data-open-detail="domains:${index}" aria-label="${escapeHtml(title)} 열기">
-              <span class="section-symbol">${escapeHtml(sectionSymbols[domain] || sectionSymbols.default)}</span>
+              <span class="section-symbol has-report-icon">${renderReportIcon(domain)}</span>
               <span class="domain-score-copy">
                 <strong>${escapeHtml(title)}</strong>
                 <small>${escapeHtml(metric ? metric.label : compactText(section.lead || section.headline || section.summary, 34))}</small>
@@ -5465,7 +5484,7 @@ function renderDomainDirectCard({ section, index }) {
   const focusLabel = meta.strongLabel || meta.primaryLabel || meta.watchLabel || "";
   return `
     <a class="domain-direct-card ${metricToneClassFromGrade(grade)}" href="#${escapeHtml(detailHashForKey(`domains:${index}`))}" data-open-detail="domains:${index}" aria-label="${escapeHtml(title)} 열기">
-      <span class="section-symbol">${escapeHtml(sectionSymbols[domain] || sectionSymbols.default)}</span>
+      <span class="section-symbol has-report-icon">${renderReportIcon(domain)}</span>
       <span class="domain-direct-copy">
         <strong>${escapeHtml(title)}</strong>
         <small>${escapeHtml(focusLabel || (domainPickerHints[domain] || domainPickerHints.default))}</small>
@@ -5627,7 +5646,7 @@ function renderDetailTabs(activeKey) {
         .map(
           (item) => `
             <button type="button" class="${item.key === baseActiveKey ? "is-active" : ""}" data-detail-key="${escapeHtml(item.key)}" aria-label="${escapeHtml(item.title)} 열기"${item.key === baseActiveKey ? ' aria-current="page"' : ""}>
-              <span class="detail-tab-icon" aria-hidden="true">${escapeHtml(item.icon || "✦")}</span>
+              <span class="detail-tab-icon has-report-icon" aria-hidden="true">${renderReportIcon(item.key, item.icon)}</span>
               <span class="detail-tab-copy">
                 <strong>${escapeHtml(item.title)}</strong>
                 <small>${escapeHtml(item.copy || "")}</small>
@@ -5687,7 +5706,7 @@ function renderScreenInsights(screen, key = "") {
   return `
     <section class="contract-card screen-insights screen-insights-${escapeHtml(meta.tone)}">
       <div class="screen-insight-hero">
-        <div class="screen-insight-seal" aria-hidden="true">${escapeHtml(meta.icon)}</div>
+        <div class="screen-insight-seal has-report-icon" aria-hidden="true">${renderReportIcon(key, meta.icon)}</div>
         <div>
           <span>${escapeHtml(productText(meta.eyebrow))}</span>
           <h3>${escapeHtml(productText((screen && screen.title) || hero.title || "핵심 해석"))}</h3>
@@ -5958,7 +5977,7 @@ function renderGyeokgukFocusBoard(contract, detailUnit) {
   return `
     <section class="gyeokguk-focus-card" data-scroll-anchor="gyeokguk-overview">
       <div class="gyeokguk-focus-head">
-        <div class="gyeokguk-focus-seal" aria-hidden="true">格</div>
+        <div class="gyeokguk-focus-seal has-report-icon" aria-hidden="true">${renderReportIcon("gyeokguk", "格")}</div>
         <div>
           <span>격국의 중심</span>
           <h2>${escapeHtml(displayJoin([month, primary]) || primary)}</h2>
@@ -5988,7 +6007,7 @@ function renderStructureFocusCard(options = {}) {
   return `
     <section class="structure-focus-card structure-focus-${escapeHtml(options.tone || "default")}" ${options.anchor ? `data-scroll-anchor="${escapeHtml(options.anchor)}"` : ""}>
       <div class="structure-focus-head">
-        <div class="structure-focus-seal" aria-hidden="true">${escapeHtml(options.icon || "命")}</div>
+        <div class="structure-focus-seal has-report-icon" aria-hidden="true">${renderReportIcon(options.iconKey || options.tone || "default", options.icon || "命")}</div>
         <div>
           ${options.eyebrow ? `<span>${escapeHtml(options.eyebrow)}</span>` : ""}
           ${options.title ? `<h2>${escapeHtml(options.title)}</h2>` : ""}
@@ -6033,6 +6052,7 @@ function renderMonthFocusBoard(contract, detailUnit) {
   return renderStructureFocusCard({
     anchor: "month-overview",
     tone: "month",
+    iconKey: "month",
     icon: "月",
     eyebrow: "월령의 바탕",
     title: monthTitle,
@@ -6114,6 +6134,7 @@ function renderTenGodFocusBoard(contract, detailUnit) {
   return renderStructureFocusCard({
     anchor: "ten-gods-overview",
     tone: "gyeokguk",
+    iconKey: "ten_gods",
     icon: "十",
     eyebrow: "십신 요약",
     title: displayJoin([month, primary]) || primary,
@@ -6461,6 +6482,7 @@ function renderElementFocusBoard(balance, contract, detailUnit) {
   return renderStructureFocusCard({
     anchor: "elements-overview",
     tone: "elements",
+    iconKey: "elements",
     icon: "五",
     eyebrow: "오행 요약",
     title: topMeta.ko ? `${topMeta.ko} 기운 ${top.percent}%` : "오행 분석",
@@ -6613,6 +6635,7 @@ function renderTemperatureFocusBoard(balance, contract, detailUnit) {
   return renderStructureFocusCard({
     anchor: "temperature-overview",
     tone: "temperature",
+    iconKey: "temperature",
     icon: "水",
     eyebrow: "조후 요약",
     title,
@@ -6699,6 +6722,7 @@ function renderContextualFocusBoard(contract, detailUnit) {
   return renderStructureFocusCard({
     anchor: "contextual-overview",
     tone: "contextual",
+    iconKey: "contextual",
     icon: "綜",
     eyebrow: "종합 근거",
     title,
@@ -8176,7 +8200,7 @@ function renderDomainLanding(sections) {
           const grade = meta.grade;
           return `
             <button class="domain-landing-card ${metricToneClassFromGrade(grade)}" type="button" data-detail-key="domains:${index}">
-              <span class="section-symbol">${escapeHtml(sectionSymbols[domain] || sectionSymbols.default)}</span>
+              <span class="section-symbol has-report-icon">${renderReportIcon(domain)}</span>
               <span class="domain-landing-copy">
                 <strong>${escapeHtml(sectionDisplayTitle(section))}</strong>
                 <small>${escapeHtml(meta.primaryLabel || (domainPickerHints[domain] || domainPickerHints.default))}</small>
@@ -8344,7 +8368,7 @@ function renderAnnualDetail(section, domainKey) {
   return `
     <section class="paper-card annual-detail ${metricToneClassFromGrade(grade)}">
       <div class="annual-detail-head">
-        <span class="annual-year-seal" aria-hidden="true">${escapeHtml(section.icon || meta.icon)}</span>
+        <span class="annual-year-seal has-report-icon" aria-hidden="true">${renderReportIcon(domainKey, section.icon || meta.icon)}</span>
         <div>
           <span>${escapeHtml(`${section.year || meta.year} ${section.ganji || meta.ganji}`.trim())}</span>
           <h2>${escapeHtml(section.title || meta.title)}</h2>

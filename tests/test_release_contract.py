@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from xml.etree import ElementTree
 
 
 RELEASE_ROOT = Path(__file__).resolve().parents[1]
@@ -280,12 +281,31 @@ class WebProductContractTests(unittest.TestCase):
     def test_static_assets_use_current_contract(self) -> None:
         index_html = (RELEASE_ROOT / "saju_web" / "static" / "index.html").read_text(encoding="utf-8")
         app_js = (RELEASE_ROOT / "saju_web" / "static" / "app-v2.js").read_text(encoding="utf-8")
-        self.assertIn("production-release-v55", index_html)
+        self.assertIn("production-release-v56", index_html)
         self.assertIn("annualGroupAggregateItems", app_js)
         self.assertIn("total_indicator_labels", app_js)
         self.assertIn("rawMetricJudgmentStateType", app_js)
         self.assertIn("metricDisplayStateType", app_js)
+        self.assertIn('const REPORT_ICON_ROOT = "/assets/report-icons"', app_js)
+        self.assertIn('const REPORT_ICON_VERSION = "report-icons-v2"', app_js)
+        self.assertIn("renderReportIcon", app_js)
+        self.assertNotIn("const sectionSymbols = {", app_js)
         self.assertNotIn('data-submit-tier="free"', index_html)
+
+    def test_report_category_icons_are_complete_and_valid(self) -> None:
+        icon_dir = RELEASE_ROOT / "saju_web" / "static" / "assets" / "report-icons"
+        expected = {
+            "basis.svg", "career.svg", "contextual.svg", "default.svg", "domains.svg",
+            "elements.svg", "gyeokguk.svg", "honor.svg", "love.svg", "marriage.svg",
+            "money.svg", "month.svg", "personality.svg", "social.svg", "temperature.svg",
+            "ten-gods.svg", "timing.svg", "year-2026.svg", "year-2027.svg",
+        }
+        actual = {path.name for path in icon_dir.glob("*.svg")}
+        self.assertEqual(actual, expected)
+        for icon_path in sorted(icon_dir.glob("*.svg")):
+            with self.subTest(icon=icon_path.name):
+                root = ElementTree.parse(icon_path).getroot()
+                self.assertEqual(root.attrib.get("viewBox"), "0 0 64 64")
 
     def test_web_interstitial_uses_the_configured_ad_unit_safely(self) -> None:
         index_html = (RELEASE_ROOT / "saju_web" / "static" / "index.html").read_text(encoding="utf-8")

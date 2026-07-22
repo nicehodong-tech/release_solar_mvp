@@ -11951,3 +11951,29 @@ html.is-restoring-premium body::after {
     font-size: 14px;
   }
 }
+
+/* Report V2 category icon system. The wrapper keeps the existing layout size. */
+.report-category-icon {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.has-report-icon {
+  flex: 0 0 auto;
+  overflow: visible;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: inherit;
+}
+
+.detail-tabs button.is-active .detail-tab-icon.has-report-icon {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
