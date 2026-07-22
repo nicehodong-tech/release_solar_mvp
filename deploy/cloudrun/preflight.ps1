@@ -65,9 +65,9 @@ try {
 
 Write-Host "4/6 Google Cloud account and billing"
 Assert-GCloudSession -ProjectId $ProjectId
-$billingEnabled = (& $script:GCloud billing projects describe $ProjectId `
-    --format="value(billingEnabled)").Trim()
-if ($LASTEXITCODE -ne 0 -or $billingEnabled -ne "True") {
+$billingEnabled = Get-GCloudValue billing projects describe $ProjectId `
+    --format="value(billingEnabled)"
+if ($billingEnabled -ne "True") {
     throw "Billing is not enabled for project '$ProjectId'."
 }
 

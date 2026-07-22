@@ -14,11 +14,11 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Assert-GCloudSession -ProjectId $ProjectId
 $python = Get-PythonExecutable
 
-$expectedIp = (& $script:GCloud compute addresses describe "$Prefix-ip" `
+$expectedIp = Get-GCloudValue compute addresses describe "$Prefix-ip" `
     --project $ProjectId `
     --global `
-    --format="value(address)").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $expectedIp) {
+    --format="value(address)"
+if (-not $expectedIp) {
     throw "Could not read the expected load balancer IP."
 }
 

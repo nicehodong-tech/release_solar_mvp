@@ -15,19 +15,19 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Assert-GCloudSession -ProjectId $ProjectId
 $python = Get-PythonExecutable
 
-$ipAddress = (& $script:GCloud compute addresses describe "$Prefix-ip" `
+$ipAddress = Get-GCloudValue compute addresses describe "$Prefix-ip" `
     --project $ProjectId `
     --global `
-    --format="value(address)").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $ipAddress) {
+    --format="value(address)"
+if (-not $ipAddress) {
     throw "Could not read the load balancer IP address."
 }
 
-$productionUrl = (& $script:GCloud run services describe $Service `
+$productionUrl = Get-GCloudValue run services describe $Service `
     --project $ProjectId `
     --region $Region `
-    --format="value(status.url)").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $productionUrl) {
+    --format="value(status.url)"
+if (-not $productionUrl) {
     throw "Could not read the Cloud Run production URL."
 }
 

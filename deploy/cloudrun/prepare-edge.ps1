@@ -25,10 +25,10 @@ $redirectMap = "$Prefix-http-redirect-map"
 $httpProxy = "$Prefix-http-proxy"
 $httpRule = "$Prefix-http-rule"
 
-$certificateState = (& $script:GCloud certificate-manager certificates describe $certificate `
+$certificateState = Get-GCloudValue certificate-manager certificates describe $certificate `
     --project $ProjectId `
-    --format="value(managed.state)").Trim()
-if ($LASTEXITCODE -ne 0 -or $certificateState -ne "ACTIVE") {
+    --format="value(managed.state)"
+if ($certificateState -ne "ACTIVE") {
     throw "Certificate '$certificate' is not ACTIVE. Run prepare-certificate.ps1 and add its CNAME records first."
 }
 
@@ -170,11 +170,11 @@ if (-not (Test-GCloudResource -Arguments @(
         --ports 80
 }
 
-$ipAddress = (& $script:GCloud compute addresses describe $address `
+$ipAddress = Get-GCloudValue compute addresses describe $address `
     --project $ProjectId `
     --global `
-    --format="value(address)").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $ipAddress) {
+    --format="value(address)"
+if (-not $ipAddress) {
     throw "Could not read the load balancer IP address."
 }
 

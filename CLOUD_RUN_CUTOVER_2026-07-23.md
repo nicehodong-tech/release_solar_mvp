@@ -26,6 +26,7 @@ www  CNAME    mqquvbd6c9bd03f8.sel3.cloudtype.app.    TTL 600
 
 ```powershell
 Set-Location "C:\Users\niceh\OneDrive\문서\사주 운세 서비스 시스템 구축\release_solar_mvp"
+Set-ExecutionPolicy -Scope Process Bypass -Force
 .\deploy\cloudrun\bootstrap.ps1 -ProjectId PROJECT_ID
 .\deploy\cloudrun\preflight.ps1 -ProjectId PROJECT_ID
 .\deploy\cloudrun\deploy-staging.ps1 -ProjectId PROJECT_ID

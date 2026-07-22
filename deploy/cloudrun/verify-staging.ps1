@@ -14,11 +14,11 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Assert-GCloudSession -ProjectId $ProjectId
 $python = Get-PythonExecutable
 
-$stagingUrl = (& $script:GCloud run services describe $Service `
+$stagingUrl = Get-GCloudValue run services describe $Service `
     --project $ProjectId `
     --region $Region `
-    --format "value(status.url)").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $stagingUrl) {
+    --format "value(status.url)"
+if (-not $stagingUrl) {
     throw "Could not read the Cloud Run staging URL."
 }
 

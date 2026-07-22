@@ -92,9 +92,9 @@ foreach ($authorization in @($apexAuthorization, $wwwAuthorization)) {
     Write-Host ""
 }
 
-$certificateState = (& $script:GCloud certificate-manager certificates describe $certificate `
+$certificateState = Get-GCloudValue certificate-manager certificates describe $certificate `
     --project $ProjectId `
-    --format="value(managed.state)").Trim()
+    --format="value(managed.state)"
 if (-not $certificateState) {
     $certificateState = "PROVISIONING"
 }

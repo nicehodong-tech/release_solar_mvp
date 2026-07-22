@@ -25,9 +25,12 @@ CPU 할당: 인스턴스 기반(--no-cpu-throttling)
 PowerShell에서 다음을 실행합니다.
 
 ```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force
 gcloud auth login
 gcloud init
 ```
+
+`Set-ExecutionPolicy`는 현재 PowerShell 창에서만 배포 스크립트 실행을 허용하며 컴퓨터의 영구 보안 정책은 바꾸지 않습니다.
 
 Google Cloud Console에서 결제가 연결된 프로젝트를 만들거나 기존 프로젝트를 선택합니다. 아래의 `PROJECT_ID`는 프로젝트 이름이 아니라 고유 프로젝트 ID입니다.
 

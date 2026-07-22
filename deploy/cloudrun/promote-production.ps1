@@ -24,11 +24,11 @@ if ($LASTEXITCODE -ne 0) {
     throw "Staging verification did not pass."
 }
 
-$image = (& $script:GCloud run services describe $StagingService `
+$image = Get-GCloudValue run services describe $StagingService `
     --project $ProjectId `
     --region $Region `
-    --format="value(spec.template.spec.containers[0].image)").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $image) {
+    --format="value(spec.template.spec.containers[0].image)"
+if (-not $image) {
     throw "Could not read the verified staging image."
 }
 
@@ -65,11 +65,11 @@ Invoke-GCloud run deploy $ProductionService `
     --set-env-vars $environment `
     --labels "app=aisaju-leehyeon,environment=production"
 
-$productionUrl = (& $script:GCloud run services describe $ProductionService `
+$productionUrl = Get-GCloudValue run services describe $ProductionService `
     --project $ProjectId `
     --region $Region `
-    --format="value(status.url)").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $productionUrl) {
+    --format="value(status.url)"
+if (-not $productionUrl) {
     throw "The production service was deployed, but its URL could not be read."
 }
 

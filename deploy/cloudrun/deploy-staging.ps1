@@ -60,11 +60,11 @@ Invoke-GCloud run deploy $Service `
     --set-env-vars $environment `
     --labels "app=aisaju-leehyeon,environment=staging"
 
-$serviceUrl = (& $script:GCloud run services describe $Service `
+$serviceUrl = Get-GCloudValue run services describe $Service `
     --project $ProjectId `
     --region $Region `
-    --format "value(status.url)").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $serviceUrl) {
+    --format "value(status.url)"
+if (-not $serviceUrl) {
     throw "The staging service was deployed, but its URL could not be read."
 }
 

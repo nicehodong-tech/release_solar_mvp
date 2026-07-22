@@ -32,6 +32,16 @@ function Invoke-GCloud {
     }
 }
 
+function Get-GCloudValue {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+
+    $lines = @(& $script:GCloud @Arguments)
+    if ($LASTEXITCODE -ne 0) {
+        throw "gcloud command failed: gcloud $($Arguments -join ' ')"
+    }
+    return (($lines | ForEach-Object { [string]$_ }) -join "`n").Trim()
+}
+
 function Test-GCloudResource {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
@@ -43,8 +53,14 @@ function Assert-GCloudSession {
     param([Parameter(Mandatory = $true)][string]$ProjectId)
 
     $script:GCloud = Get-GCloudExecutable
-    $activeAccount = (& $script:GCloud auth list --filter="status:ACTIVE" --format="value(account)").Trim()
-    if ($LASTEXITCODE -ne 0 -or -not $activeAccount) {
+    $accountJson = (@(& $script:GCloud auth list --format=json) -join "`n")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect the Google Cloud login state."
+    }
+    $accounts = @($accountJson | ConvertFrom-Json)
+    $activeAccount = @($accounts | Where-Object { $_.status -eq "ACTIVE" }) |
+        Select-Object -ExpandProperty account -First 1
+    if (-not $activeAccount) {
         throw "No active Google Cloud account. Run: gcloud auth login"
     }
 
