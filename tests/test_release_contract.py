@@ -425,6 +425,8 @@ class WebProductContractTests(unittest.TestCase):
         self.assertNotIn('aisajuleehyeon.com', deploy_script)
         self.assertIn('"chart": detail.get("chart")', parity_script)
         self.assertIn('"report": detail.get("report")', parity_script)
+        self.assertIn('frozenset({"detail_token", "daily_fortune"})', parity_script)
+        self.assertIn("_normalize_comparable", parity_script)
 
     def test_cloud_run_cutover_is_preverified_and_reversible(self) -> None:
         deploy_root = RELEASE_ROOT / "deploy" / "cloudrun"

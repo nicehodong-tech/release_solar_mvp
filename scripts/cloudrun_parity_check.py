@@ -11,6 +11,28 @@ from typing import Any
 from operational_check import SAMPLES, _full_payload, _json_request
 
 
+_PARITY_EXCLUDED_KEYS = frozenset({"detail_token", "daily_fortune"})
+
+
+def _normalize_comparable(value: Any) -> Any:
+    """Remove only ephemeral or intentionally additive release fields.
+
+    The remaining chart and report payload must still match byte-for-byte after
+    canonical JSON encoding, so existing engine judgments cannot drift during
+    an additive product release.
+    """
+
+    if isinstance(value, dict):
+        return {
+            key: _normalize_comparable(item)
+            for key, item in value.items()
+            if key not in _PARITY_EXCLUDED_KEYS
+        }
+    if isinstance(value, list):
+        return [_normalize_comparable(item) for item in value]
+    return value
+
+
 def _fingerprint(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -89,10 +111,10 @@ def _fetch_result(base_url: str, sample: dict[str, str], timeout: float) -> dict
         raise RuntimeError(
             f"detail failed: url={base_url} date={sample['birthDate']} status={detail_status}"
         )
-    comparable = {
+    comparable = _normalize_comparable({
         "chart": detail.get("chart") or {},
         "report": detail.get("report") or {},
-    }
+    })
     return {
         "seconds": round(time.perf_counter() - started, 2),
         "fingerprint": _fingerprint(comparable),
