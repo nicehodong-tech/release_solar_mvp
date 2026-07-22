@@ -340,9 +340,11 @@ class WebProductContractTests(unittest.TestCase):
     def test_static_assets_use_current_contract(self) -> None:
         index_html = (RELEASE_ROOT / "saju_web" / "static" / "index.html").read_text(encoding="utf-8")
         app_js = (RELEASE_ROOT / "saju_web" / "static" / "app-v2.js").read_text(encoding="utf-8")
-        self.assertIn("production-release-v57", index_html)
+        self.assertIn("production-release-v58", index_html)
         self.assertIn("renderDailyFortune", app_js)
         self.assertIn("daily-fortune-board", app_js)
+        self.assertIn('data-action="toggle-daily-fortune"', app_js)
+        self.assertIn('aria-expanded="false"', app_js)
         self.assertIn("annualGroupAggregateItems", app_js)
         self.assertIn("total_indicator_labels", app_js)
         self.assertIn("rawMetricJudgmentStateType", app_js)

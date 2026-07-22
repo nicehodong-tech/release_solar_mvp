@@ -4395,6 +4395,16 @@ document.addEventListener("click", (event) => {
     void copyFullAnalysisResult(button);
     return;
   }
+  if (action === "toggle-daily-fortune") {
+    const detailsId = String(button.getAttribute("aria-controls") || "");
+    const details = detailsId ? document.getElementById(detailsId) : null;
+    if (!details) return;
+    const isExpanded = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", String(!isExpanded));
+    details.hidden = isExpanded;
+    button.closest(".daily-fortune-board")?.classList.toggle("is-expanded", !isExpanded);
+    return;
+  }
   if (action === "open-basis") {
     openDetail("contextual");
     return;
@@ -5052,37 +5062,52 @@ function renderDailyFortune(dailyFortune = {}) {
   const summary = productText(dailyFortune.summary || "오늘의 영역별 흐름을 정리했습니다.");
   return `
     <section class="daily-fortune-board ${metricToneClassFromGrade(overallGrade)}" aria-labelledby="daily-fortune-title">
-      <div class="daily-fortune-head">
-        <span>${escapeHtml(dateLabel)}${dayPillar ? ` · ${escapeHtml(dayPillar)}일` : ""}</span>
-        <strong id="daily-fortune-title">오늘의 운세</strong>
-      </div>
-      <div class="daily-fortune-overall">
-        <div class="daily-fortune-overall-copy">
-          <small>오늘의 종합운 지수</small>
-          <p>${escapeHtml(summary)}</p>
+      <button
+        class="daily-fortune-toggle"
+        type="button"
+        data-action="toggle-daily-fortune"
+        aria-expanded="false"
+        aria-controls="daily-fortune-details"
+      >
+        <span class="daily-fortune-toggle-copy">
+          <small>${escapeHtml(dateLabel)}${dayPillar ? ` · ${escapeHtml(dayPillar)}일` : ""}</small>
+          <strong id="daily-fortune-title">오늘의 운세</strong>
+        </span>
+        <span class="daily-fortune-toggle-grade">
+          <small>종합운</small>
+          <b class="metric-grade-value ${metricGradeClassFromLabel(overallGrade)}">${escapeHtml(overallGrade)}</b>
+        </span>
+        <span class="daily-fortune-chevron" aria-hidden="true"></span>
+      </button>
+      <div class="daily-fortune-details" id="daily-fortune-details" hidden>
+        <div class="daily-fortune-overall">
+          <div class="daily-fortune-overall-copy">
+            <small>오늘의 종합운 지수</small>
+            <p>${escapeHtml(summary)}</p>
+          </div>
+          ${renderAggregateGradeBadge(overallGrade)}
+          <div class="daily-fortune-gauge" aria-label="${escapeHtml(`오늘의 종합운 ${overallGrade} 등급`)}">
+            ${renderAggregateGradeBar(overallGrade)}
+          </div>
         </div>
-        ${renderAggregateGradeBadge(overallGrade)}
-        <div class="daily-fortune-gauge" aria-label="${escapeHtml(`오늘의 종합운 ${overallGrade} 등급`)}">
-          ${renderAggregateGradeBar(overallGrade)}
+        <div class="daily-fortune-list">
+          ${categories.map((category) => {
+            const key = String(category.key || "");
+            const grade = String(category.grade || "").trim();
+            const targets = asArray(category.targets).map((item) => productText(item)).filter(Boolean).join(" · ");
+            return `
+              <article class="daily-fortune-row ${metricToneClassFromGrade(grade)}">
+                <span class="daily-fortune-icon has-report-icon">${renderReportIcon(dailyFortuneIconKeys[key] || "default")}</span>
+                <span class="daily-fortune-copy">
+                  <strong>${escapeHtml(productText(category.title))}</strong>
+                  <small>${escapeHtml(targets)}</small>
+                  <p>${escapeHtml(productText(category.summary || ""))}</p>
+                </span>
+                <b class="metric-grade-value ${metricGradeClassFromLabel(grade)}">${escapeHtml(grade)}</b>
+              </article>
+            `;
+          }).join("")}
         </div>
-      </div>
-      <div class="daily-fortune-list">
-        ${categories.map((category) => {
-          const key = String(category.key || "");
-          const grade = String(category.grade || "").trim();
-          const targets = asArray(category.targets).map((item) => productText(item)).filter(Boolean).join(" · ");
-          return `
-            <article class="daily-fortune-row ${metricToneClassFromGrade(grade)}">
-              <span class="daily-fortune-icon has-report-icon">${renderReportIcon(dailyFortuneIconKeys[key] || "default")}</span>
-              <span class="daily-fortune-copy">
-                <strong>${escapeHtml(productText(category.title))}</strong>
-                <small>${escapeHtml(targets)}</small>
-                <p>${escapeHtml(productText(category.summary || ""))}</p>
-              </span>
-              <b class="metric-grade-value ${metricGradeClassFromLabel(grade)}">${escapeHtml(grade)}</b>
-            </article>
-          `;
-        }).join("")}
       </div>
     </section>
   `;
