@@ -5,8 +5,8 @@ param(
     [string]$Region = "asia-northeast3",
     [string]$Service = "aisaju-leehyeon-production",
     [string]$Domain = "aisajuleehyeon.com",
-    [string]$Prefix = "aisaju-web",
-    [string]$LegacyUrl = "https://port-0-release-solar-mvp-mqquvbd6c9bd03f8.sel3.cloudtype.app"
+    [string]$WwwDomain = "www.aisajuleehyeon.com",
+    [string]$Prefix = "aisaju-web"
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +23,13 @@ if (-not $ipAddress) {
     throw "Could not read the load balancer IP address."
 }
 
+$certificateState = Get-GCloudValue certificate-manager certificates describe "$Prefix-cert" `
+    --project $ProjectId `
+    --format="value(managed.state)"
+if ($certificateState -ne "ACTIVE") {
+    throw "The managed certificate is not ACTIVE. Current state: $certificateState"
+}
+
 $productionUrl = Get-GCloudValue run services describe $Service `
     --project $ProjectId `
     --region $Region `
@@ -33,56 +40,65 @@ if (-not $productionUrl) {
 
 $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
 if (-not $curl) {
-    throw "curl.exe is required for pre-DNS TLS verification."
+    throw "curl.exe is required for TLS verification."
 }
 
-Write-Host "1/3 Load balancer TLS and health with forced DNS"
-$healthText = & $curl.Source --silent --show-error --fail --compressed `
-    --resolve "${Domain}:443:${ipAddress}" `
-    "https://${Domain}/health"
-if ($LASTEXITCODE -ne 0) {
-    throw "The load balancer health request failed."
-}
-$health = $healthText | ConvertFrom-Json
-if (-not $health.ok -or $health.status -ne "healthy") {
-    throw "The load balancer returned an unhealthy service."
-}
-
-$indexText = (& $curl.Source --silent --show-error --fail --compressed `
-    --resolve "${Domain}:443:${ipAddress}" `
-    "https://${Domain}/") -join "`n"
 $localIndex = Get-Content -Raw -Encoding utf8 (Join-Path $repoRoot "saju_web\static\index.html")
 $releaseMarker = [regex]::Match($localIndex, "production-release-v[0-9]+").Value
 if (-not $releaseMarker) {
     throw "The local product shell has no release marker."
 }
-if ($LASTEXITCODE -ne 0 -or $indexText -notmatch [regex]::Escape($releaseMarker)) {
-    throw "The load balancer did not return the current product shell."
+
+Write-Host "1/3 TLS, certificate, and product shell"
+foreach ($hostName in @($Domain, $WwwDomain)) {
+    $healthText = & $curl.Source --silent --show-error --fail --location --compressed `
+        --resolve "${hostName}:443:${ipAddress}" `
+        "https://${hostName}/health"
+    if ($LASTEXITCODE -ne 0) {
+        throw "The forced-DNS health request failed for $hostName."
+    }
+    $health = $healthText | ConvertFrom-Json
+    if (-not $health.ok -or $health.status -ne "healthy" -or $health.runtime.service -ne $Service) {
+        throw "$hostName is not serving the expected Cloud Run production service."
+    }
+
+    $indexText = (& $curl.Source --silent --show-error --fail --location --compressed `
+        --resolve "${hostName}:443:${ipAddress}" `
+        "https://${hostName}/") -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $indexText -notmatch [regex]::Escape($releaseMarker)) {
+        throw "$hostName did not return the current product shell."
+    }
+}
+
+Write-Host "2/3 Public DNS"
+foreach ($hostName in @($Domain, $WwwDomain)) {
+    $addresses = @(Resolve-DnsName $hostName -Type A -Server 8.8.8.8 -ErrorAction Stop |
+        Where-Object { $_.IPAddress } |
+        ForEach-Object { [string]$_.IPAddress })
+    if ($ipAddress -notin $addresses) {
+        throw "$hostName does not resolve to $ipAddress. Current: $($addresses -join ', ')"
+    }
 }
 
 Push-Location $repoRoot
 try {
-    Write-Host "2/3 Cloud Run production operational contract"
-    & $python scripts\operational_check.py $productionUrl --concurrency 2 --timeout 300 --health-path /health
+    Write-Host "3/3 Public edge and direct service parity"
+    & $python scripts\operational_check.py "https://$Domain" --concurrency 2 --timeout 300 --health-path /health
     if ($LASTEXITCODE -ne 0) {
-        throw "Cloud Run production operational verification failed."
+        throw "Public production operational verification failed."
     }
-
-    Write-Host "3/3 Legacy and Cloud Run full engine parity"
     & $python scripts\cloudrun_parity_check.py `
-        $LegacyUrl `
         $productionUrl `
+        "https://$Domain" `
         --sample-count 4 `
         --timeout 300
     if ($LASTEXITCODE -ne 0) {
-        throw "Legacy and Cloud Run engine parity failed."
+        throw "The public edge and direct Cloud Run service differ."
     }
 } finally {
     Pop-Location
 }
 
-Write-Host "EDGE VERIFICATION PASSED. DNS is still unchanged."
-Write-Host "At cutover, replace both Cloudtype CNAME records with:"
-Write-Host "@    A    $ipAddress    TTL 300"
-Write-Host "www  A    $ipAddress    TTL 300"
-Write-Host "Rollback baseline: @ and www CNAME mqquvbd6c9bd03f8.sel3.cloudtype.app. TTL 600"
+Write-Host "EDGE VERIFICATION PASSED."
+Write-Host "$Domain and $WwwDomain -> $ipAddress"
+Write-Host "Certificate: $certificateState"

@@ -69,5 +69,5 @@ if (-not $serviceUrl) {
 }
 
 Write-Host "Staging URL: $serviceUrl"
-Write-Host "The public domain and Cloudtype service were not changed."
+Write-Host "The public production service and DNS were not changed."
 Write-Host "Verify: .\deploy\cloudrun\verify-staging.ps1 -ProjectId $ProjectId"

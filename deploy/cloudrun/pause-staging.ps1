@@ -21,4 +21,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Staging minimum instances are now 0."
 Write-Host "The service remains available and will start again on the next request."
-Write-Host "A new deploy restores the migration-test setting of min-instances=1."
+Write-Host "A new deploy restores the validation setting of min-instances=1."

@@ -124,7 +124,7 @@ def _analyze(base_url: str, sample: dict[str, str], timeout: float) -> dict[str,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Check the temporary Cloudtype operating contract.")
+    parser = argparse.ArgumentParser(description="Check the deployed web service operating contract.")
     parser.add_argument("base_url", nargs="?", default="http://127.0.0.1:8765")
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=240)

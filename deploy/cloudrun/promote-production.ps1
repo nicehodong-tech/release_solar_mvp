@@ -5,7 +5,7 @@ param(
     [string]$Region = "asia-northeast3",
     [string]$StagingService = "aisaju-leehyeon-staging",
     [string]$ProductionService = "aisaju-leehyeon-production",
-    [string]$LegacyUrl = "https://port-0-release-solar-mvp-mqquvbd6c9bd03f8.sel3.cloudtype.app"
+    [string]$PublicUrl = "https://aisajuleehyeon.com"
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,12 +14,12 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Assert-GCloudSession -ProjectId $ProjectId
 $python = Get-PythonExecutable
 
-Write-Host "Re-verifying the staging service before promotion."
+Write-Host "1/5 Re-verifying staging against the current public production service."
 & (Join-Path $PSScriptRoot "verify-staging.ps1") `
     -ProjectId $ProjectId `
     -Region $Region `
     -Service $StagingService `
-    -ProductionUrl $LegacyUrl
+    -ProductionUrl $PublicUrl
 if ($LASTEXITCODE -ne 0) {
     throw "Staging verification did not pass."
 }
@@ -32,7 +32,18 @@ if (-not $image) {
     throw "Could not read the verified staging image."
 }
 
-$revision = ($image -split "[:@]")[-1]
+$previousRevision = Get-GCloudValue run services describe $ProductionService `
+    --project $ProjectId `
+    --region $Region `
+    --format="value(status.latestReadyRevisionName)"
+if (-not $previousRevision) {
+    throw "Could not read the current production revision."
+}
+
+$releaseId = ($image -split "[:@]")[-1]
+$timestamp = Get-Date -Format "yyMMdd-HHmmss"
+$candidateSuffix = "release-$timestamp"
+$candidateTag = "candidate"
 $environment = @(
     "PYTHONHASHSEED=0",
     "SAJU_ANALYSIS_WORKERS=2",
@@ -41,10 +52,10 @@ $environment = @(
     "SAJU_JOB_ESTIMATED_SECONDS=15",
     "SAJU_JOB_HARD_TIMEOUT_SECONDS=120",
     "SAJU_LOG_LEVEL=INFO",
-    "SAJU_RELEASE_REVISION=$revision"
+    "SAJU_RELEASE_REVISION=$releaseId"
 ) -join ","
 
-Write-Host "Promoting the exact verified image: $image"
+Write-Host "2/5 Deploying the verified image as a zero-traffic candidate: $image"
 Invoke-GCloud run deploy $ProductionService `
     --image $image `
     --project $ProjectId `
@@ -63,37 +74,74 @@ Invoke-GCloud run deploy $ProductionService `
     --no-cpu-throttling `
     --cpu-boost `
     --set-env-vars $environment `
-    --labels "app=aisaju-leehyeon,environment=production"
+    --labels "app=aisaju-leehyeon,environment=production" `
+    --revision-suffix $candidateSuffix `
+    --tag $candidateTag `
+    --no-traffic
 
-$productionUrl = Get-GCloudValue run services describe $ProductionService `
+$serviceStateText = Get-GCloudValue run services describe $ProductionService `
     --project $ProjectId `
     --region $Region `
-    --format="value(status.url)"
-if (-not $productionUrl) {
-    throw "The production service was deployed, but its URL could not be read."
+    --format="json"
+$serviceState = $serviceStateText | ConvertFrom-Json
+$candidateRevision = [string]$serviceState.status.latestCreatedRevisionName
+$candidateRoute = @($serviceState.status.traffic |
+    Where-Object { $_.revisionName -eq $candidateRevision -and $_.url } |
+    Select-Object -First 1)
+$candidateUrl = [string]$candidateRoute.url
+if (-not $candidateRevision -or -not $candidateUrl) {
+    throw "The zero-traffic candidate revision or tagged URL could not be read."
 }
 
 Push-Location $repoRoot
 try {
-    Write-Host "Operational verification: $productionUrl"
-    & $python scripts\operational_check.py $productionUrl --concurrency 2 --timeout 300 --health-path /health
+    Write-Host "3/5 Verifying the candidate revision before public traffic changes."
+    & $python scripts\operational_check.py $candidateUrl --concurrency 2 --timeout 300 --health-path /health
     if ($LASTEXITCODE -ne 0) {
-        throw "Production operational verification failed."
+        throw "Candidate operational verification failed."
     }
-
-    Write-Host "Full engine parity: $LegacyUrl <-> $productionUrl"
     & $python scripts\cloudrun_parity_check.py `
-        $LegacyUrl `
-        $productionUrl `
+        (Get-GCloudValue run services describe $StagingService --project $ProjectId --region $Region --format="value(status.url)") `
+        $candidateUrl `
         --sample-count 4 `
         --timeout 300
     if ($LASTEXITCODE -ne 0) {
-        throw "Production engine parity failed."
+        throw "Candidate and staging engine parity failed."
+    }
+
+    Write-Host "4/5 Routing public traffic to the verified candidate."
+    Invoke-GCloud run services update-traffic $ProductionService `
+        --project $ProjectId `
+        --region $Region `
+        --to-revisions "$candidateRevision=100"
+
+    try {
+        Write-Host "5/5 Verifying the public domain after traffic switch."
+        & $python scripts\operational_check.py $PublicUrl --concurrency 2 --timeout 300 --health-path /health
+        if ($LASTEXITCODE -ne 0) {
+            throw "Public production operational verification failed."
+        }
+        & $python scripts\cloudrun_parity_check.py `
+            $candidateUrl `
+            $PublicUrl `
+            --sample-count 4 `
+            --timeout 300
+        if ($LASTEXITCODE -ne 0) {
+            throw "Public production does not match the verified candidate."
+        }
+    } catch {
+        Write-Warning "Post-switch verification failed. Restoring $previousRevision."
+        Invoke-GCloud run services update-traffic $ProductionService `
+            --project $ProjectId `
+            --region $Region `
+            --to-revisions "$previousRevision=100"
+        throw
     }
 } finally {
     Pop-Location
 }
 
-Write-Host "Production promotion passed. Public DNS was not changed."
-Write-Host "Cloud Run URL: $productionUrl"
-Write-Host "Next: .\deploy\cloudrun\prepare-edge.ps1 -ProjectId $ProjectId"
+Write-Host "Production promotion passed without changing DNS."
+Write-Host "Previous revision: $previousRevision"
+Write-Host "Current revision: $candidateRevision"
+Write-Host "Public URL: $PublicUrl"

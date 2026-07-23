@@ -37,7 +37,7 @@ try {
         --sample-count $SampleCount `
         --timeout 300
     if ($LASTEXITCODE -ne 0) {
-        throw "Cloudtype and Cloud Run result parity failed."
+        throw "Production and staging result parity failed."
     }
 } finally {
     Pop-Location

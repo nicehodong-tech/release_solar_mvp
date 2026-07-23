@@ -430,27 +430,31 @@ class WebProductContractTests(unittest.TestCase):
         self.assertIn('frozenset({"detail_token", "daily_fortune"})', parity_script)
         self.assertIn("_normalize_comparable", parity_script)
 
-    def test_cloud_run_cutover_is_preverified_and_reversible(self) -> None:
+    def test_cloud_run_operations_are_preverified_and_reversible(self) -> None:
         deploy_root = RELEASE_ROOT / "deploy" / "cloudrun"
         preflight = (deploy_root / "preflight.ps1").read_text(encoding="utf-8")
         certificate = (deploy_root / "prepare-certificate.ps1").read_text(encoding="utf-8")
         promotion = (deploy_root / "promote-production.ps1").read_text(encoding="utf-8")
         edge = (deploy_root / "prepare-edge.ps1").read_text(encoding="utf-8")
         verify_edge = (deploy_root / "verify-edge.ps1").read_text(encoding="utf-8")
-        verify_cutover = (deploy_root / "verify-cutover.ps1").read_text(encoding="utf-8")
-        rollback = (deploy_root / "verify-rollback.ps1").read_text(encoding="utf-8")
-        runbook = (RELEASE_ROOT / "CLOUD_RUN_CUTOVER_2026-07-23.md").read_text(
+        runbook = (RELEASE_ROOT / "CLOUD_RUN_DEPLOYMENT.md").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("unittest discover -s tests -v", preflight)
         self.assertIn("billing projects describe", preflight)
-        self.assertIn("mqquvbd6c9bd03f8.sel3.cloudtype.app", preflight)
+        self.assertIn("aisaju-web-ip", preflight)
+        self.assertIn("managed.state", preflight)
+        self.assertIn("runtime.service", preflight)
         self.assertIn("dns-authorizations create", certificate)
         self.assertIn("Certificate state", certificate)
         self.assertIn("verify-staging.ps1", promotion)
         self.assertIn("spec.template.spec.containers[0].image", promotion)
         self.assertIn("--max-instances 1", promotion)
+        self.assertIn("--no-traffic", promotion)
+        self.assertIn("--revision-suffix", promotion)
+        self.assertIn("run services update-traffic", promotion)
+        self.assertIn("previousRevision", promotion)
         self.assertIn("serverless", edge)
         self.assertIn("EXTERNAL_MANAGED", edge)
         self.assertIn("managed.state", edge)
@@ -458,14 +462,12 @@ class WebProductContractTests(unittest.TestCase):
         self.assertIn("--timeout 30s", edge)
         self.assertIn("--resolve", verify_edge)
         self.assertIn("cloudrun_parity_check.py", verify_edge)
-        self.assertIn("Resolve-DnsName", verify_cutover)
-        self.assertIn("cloudrun_parity_check.py", verify_cutover)
-        self.assertIn("CloudtypeTarget", rollback)
-        self.assertIn("jobs.running", runbook)
-        self.assertIn("jobs.queued", runbook)
-        self.assertIn("TTL 600", runbook)
+        self.assertIn("Resolve-DnsName", verify_edge)
+        self.assertIn("0% 트래픽 후보", runbook)
+        self.assertIn("직전 리비전으로 자동 복구", runbook)
         for source in (certificate, promotion, edge, verify_edge):
             self.assertNotIn("Remove-DnsServerResourceRecord", source)
+            self.assertNotIn("cloudtype", source.lower())
 
     def test_cloud_run_uses_a_non_reserved_health_path(self) -> None:
         app_source = (RELEASE_ROOT / "saju_web" / "app.py").read_text(encoding="utf-8")
@@ -480,7 +482,6 @@ class WebProductContractTests(unittest.TestCase):
             "verify-staging.ps1",
             "promote-production.ps1",
             "verify-edge.ps1",
-            "verify-cutover.ps1",
         ):
             source = (deploy_root / script_name).read_text(encoding="utf-8")
             self.assertIn("--health-path /health", source)

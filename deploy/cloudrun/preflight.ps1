@@ -3,6 +3,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ProjectId,
     [string]$Region = "asia-northeast3",
+    [string]$ProductionService = "aisaju-leehyeon-production",
+    [string]$Domain = "aisajuleehyeon.com",
+    [string]$WwwDomain = "www.aisajuleehyeon.com",
+    [string]$AddressName = "aisaju-web-ip",
+    [string]$CertificateName = "aisaju-web-cert",
     [switch]$AllowDirty
 )
 
@@ -93,17 +98,41 @@ if ($missingApis.Count -gt 0) {
     throw "Required APIs are not enabled: $($missingApis -join ', '). Run bootstrap.ps1."
 }
 
-Write-Host "6/6 Current DNS rollback baseline"
-$apex = Resolve-DnsName aisajuleehyeon.com -Type CNAME -Server 8.8.8.8 -ErrorAction Stop |
-    Select-Object -First 1
-$www = Resolve-DnsName www.aisajuleehyeon.com -Type CNAME -Server 8.8.8.8 -ErrorAction Stop |
-    Select-Object -First 1
-$expectedRollback = "mqquvbd6c9bd03f8.sel3.cloudtype.app"
-if ($apex.NameHost.TrimEnd(".") -ne $expectedRollback -or $www.NameHost.TrimEnd(".") -ne $expectedRollback) {
-    throw "The current DNS baseline no longer points both hosts to Cloudtype."
+Write-Host "6/6 Cloud Run public edge"
+$expectedIp = Get-GCloudValue compute addresses describe $AddressName `
+    --project $ProjectId `
+    --global `
+    --format="value(address)"
+if (-not $expectedIp) {
+    throw "The Cloud Run load balancer address '$AddressName' is unavailable."
 }
-Write-Host "@ CNAME $($apex.NameHost) TTL=$($apex.TTL)"
-Write-Host "www CNAME $($www.NameHost) TTL=$($www.TTL)"
 
-Write-Host "PREFLIGHT PASSED: source, engine tests, Google project, APIs, billing, and rollback DNS are ready."
+$apexIps = @(Resolve-DnsName $Domain -Type A -Server 8.8.8.8 -ErrorAction Stop |
+    Where-Object { $_.IPAddress } |
+    ForEach-Object { [string]$_.IPAddress })
+$wwwIps = @(Resolve-DnsName $WwwDomain -Type A -Server 8.8.8.8 -ErrorAction Stop |
+    Where-Object { $_.IPAddress } |
+    ForEach-Object { [string]$_.IPAddress })
+if ($expectedIp -notin $apexIps -or $expectedIp -notin $wwwIps) {
+    throw "Both public hosts must resolve to the Cloud Run load balancer IP $expectedIp."
+}
+
+$certificateState = Get-GCloudValue certificate-manager certificates describe $CertificateName `
+    --project $ProjectId `
+    --format="value(managed.state)"
+if ($certificateState -ne "ACTIVE") {
+    throw "Certificate '$CertificateName' is not ACTIVE. Current state: $certificateState"
+}
+
+$health = Invoke-RestMethod -Uri "https://$Domain/health" -TimeoutSec 30
+if (-not $health.ok -or $health.status -ne "healthy") {
+    throw "The public Cloud Run health endpoint is not healthy."
+}
+if ($health.runtime.service -ne $ProductionService) {
+    throw "The public domain is not served by '$ProductionService'. Current: $($health.runtime.service)"
+}
+Write-Host "$Domain, $WwwDomain -> $expectedIp"
+Write-Host "Certificate: $certificateState; revision: $($health.runtime.revision)"
+
+Write-Host "PREFLIGHT PASSED: source, engine tests, Google project, APIs, billing, DNS, TLS, and production health are ready."
 Write-Host "Region: $Region"

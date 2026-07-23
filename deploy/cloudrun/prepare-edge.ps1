@@ -191,4 +191,4 @@ Write-Host "Verify before DNS: .\deploy\cloudrun\verify-edge.ps1 -ProjectId $Pro
 Write-Host "Cutover records for Gabia after verification:"
 Write-Host "@    A    $ipAddress    TTL 300"
 Write-Host "www  A    $ipAddress    TTL 300"
-Write-Host "Remove the existing @ and www Cloudtype CNAME records only at cutover time."
+Write-Host "Keep both public hosts pointed at this address."

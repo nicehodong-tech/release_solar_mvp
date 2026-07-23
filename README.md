@@ -40,21 +40,9 @@ python scripts/operational_check.py http://127.0.0.1:8775 --concurrency 2
 
 ## 서버 배포
 
-Render처럼 Python 웹 프로세스를 실행할 수 있는 호스팅을 기준으로 합니다.
+공개 서비스는 Google Cloud Run과 Google Cloud HTTPS 로드밸런서로 운영합니다. 현재 애플리케이션은 `/api/judgment`에서 서버 분석을 생성하므로 정적 호스팅만으로는 실행할 수 없습니다.
 
-권장 실행 명령은 다음과 같습니다.
-
-```bash
-python -m saju_web.app
-```
-
-호스팅 서비스가 `PORT` 환경변수를 제공하면 별도 포트 지정은 필요하지 않습니다.
-
-GitHub Pages는 정적 사이트 전용이므로 이 MVP에는 적합하지 않습니다. 현재 서비스는 `/api/judgment`를 통해 서버에서 사주 분석을 생성합니다.
-
-자세한 배포 절차는 `DEPLOYMENT_NOTES.md`를 확인합니다.
-
-Cloudtype을 유지하면서 Google Cloud Run 스테이징을 병행 준비하는 절차는 `CLOUD_RUN_DEPLOYMENT.md`를 확인합니다. 2026년 7월 23일 DNS 전환과 복구 순서는 `CLOUD_RUN_CUTOVER_2026-07-23.md`에 고정했습니다. 준비 스크립트는 공개 도메인과 DNS를 자동 변경하지 않습니다.
+스테이징 배포, 0% 트래픽 후보 검증, 무중단 운영 승격, Cloud Run 리비전 복구 절차는 `CLOUD_RUN_DEPLOYMENT.md`를 확인합니다.
 
 ## 출시 범위
 
